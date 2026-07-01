@@ -1,0 +1,31 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.*
+
+# Build / framework output
+dist/
+build/
+.output/
+.vinxi/
+.tanstack/
+.wrangler/
+
+# Env & secrets — never commit
+.env
+.env.local
+.env.*.local
+
+# Local aggregated data (personal — never commit, when it exists)
+src/data/the data file
+
+# Optional local reference snapshot at repo ROOT (kept out of git).
+# Anchored with a leading slash so it does NOT also ignore docs/reference/
+# (the committed, distilled studied-template teardown that CLAUDE.md points to).
+/reference/
+
+# OS / editor
+.DS_Store
+*.log
+.vscode/
+.idea/

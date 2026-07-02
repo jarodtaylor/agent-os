@@ -31,5 +31,5 @@ Uses the **compound-engineering** plugin: `ce-strategy` (North Star) → `ce-bra
 - Structural graph queryable via codebase-memory MCP, project key `Users-jarod-Code-personal-studied-template` (persists independent of the folder).
 - The raw code is only rarely needed — the distillation covers ~95%.
 
-## Current phase (2026-07-01)
-Strategy complete — North Star formalized in **[`STRATEGY.md`](STRATEGY.md)** (2026-07-01). Teardown + feature slate + memory vision done; migrated from the studied-template study repo. **Next: architecture + per-bucket `ce-brainstorm`/`ce-plan`.** **Build order is deliberately deferred.**
+## Current phase (2026-07-01, end of day)
+Planning complete through `ce-plan`: slice 1 has an **implementation-ready plan** at `docs/plans/2026-07-01-001-feat-slice-1-substrate-parity-plan.md` (Brain seed flagship, thin vertical slice, CC+Codex writes — decision #11). **Next: `ce-work`, starting with U13's gating spike, on a feature branch.** Code era begins — feature branches + PRs from here (docs-to-main exception ended).

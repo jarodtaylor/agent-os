@@ -25,22 +25,23 @@ Jarod's own **Agent OS**: a local-first personal control plane that **acts** on 
 **Scope decided: "Rung 2"** — a *local* control plane on one machine, but with those two seams built **remote-ready**, so driving agents on other machines / a VPS later ("Rung 3") is an *extension*, not a rewrite.
 
 ## Where we are RIGHT NOW
-- ✅ **Understand** the reference (teardown → `docs/reference/studied-template/`).
-- ✅ **Design** — ranked feature slate (`docs/FEATURE-SLATE.md`) + memory vision (`docs/MEMORY-SYSTEM-VISION.md`).
-- ✅ **Migrated** into this repo from the studied-template study folder (2026-07-01).
-- ✅ **`ce-strategy`** — North Star formalized in **[`STRATEGY.md`](../STRATEGY.md)** (repo root, canonical) — 2026-07-01.
-- ⏳ **Next: `ce-brainstorm`** on the first bucket — lean **Observe+Control** (first visible slice), **Brain** substrate started alongside (it's the wedge). Then `ce-doc-review` → `ce-plan` (where the flagship / thin-slice fork gets decided). **Build order deferred on purpose.**
+- ✅ **Understand + Design + Migrate + `ce-strategy`** (2026-07-01) — teardown distilled, slate + memory vision written, North Star canonical in [`STRATEGY.md`](../STRATEGY.md).
+- ✅ **`ce-brainstorm`** (2026-07-01) — slice 1 scoped: the **"parity-enabling cut"** (Brain/board substrate seed, agents-primary + 4-runtime inventory + parity actions). Decisions #9 (slices sequence, never shrink) and #10 logged.
+- ✅ **`ce-doc-review` ×2** — requirements hardened by a 6-reviewer panel (8 fixes), plan hardened by a 5-reviewer round-2 panel (11 findings walked through and applied: capture-time redaction, token model, in-process capture, session-keyed handoffs, U13/U14/U15).
+- ✅ **`ce-plan`** (2026-07-01) — **implementation-ready plan: [`docs/plans/2026-07-01-001-feat-slice-1-substrate-parity-plan.md`](plans/2026-07-01-001-feat-slice-1-substrate-parity-plan.md)**. Forks closed by decision #11: thin vertical slice · Claude Code + Codex writes · **Brain seed is the v1 flagship**.
+- ⏳ **Next: `ce-work` on the slice-1 plan.** Start with **U13** (throwaway resume spike — it *gates* Phase A: validate trail-resume + injection quality before building anything). Branch off fresh `main` (`feat/slice-1-substrate`); code era begins → feature branches + PRs from here on (docs-to-main exception is over). KTDs 1–9 are decided — don't re-litigate.
 
 ## Read next (in order)
-1. `docs/DECISIONS.md` — what's locked, what's still open.
-2. `docs/FEATURE-SLATE.md` — the slate + the two seams (§2) + MCP-gateway/A2A integration (§7).
-3. `docs/MEMORY-SYSTEM-VISION.md` — the Agent Brain design + its open decisions.
+1. `docs/plans/2026-07-01-001-feat-slice-1-substrate-parity-plan.md` — THE plan (scan headings: Goal Capsule → unit index → U13).
+2. `docs/DECISIONS.md` — decisions 1–11 locked; 3 forks still open (deployment, remote adapter, memory routing).
+3. `docs/FEATURE-SLATE.md` / `docs/MEMORY-SYSTEM-VISION.md` — design grounding.
 4. `docs/reference/studied-template/the rebuild notes.md` — the distilled borrow/fix/cut lessons.
 
 ## Open threads
-- ✅ **North Star** formalized → [`STRATEGY.md`](../STRATEGY.md) (2026-07-01). Next: architecture + per-bucket planning.
-- **NotebookLM** not yet connected to Claude — the memory system deepens once it is (Jarod has extensive memory research captured there).
-- **The 6 forks** (flagship/build-order, deployment, native-write runtimes, first remote adapter, memory routing, substrate-vs-vertical-slice) are **deferred** to strategy/planning — see `DECISIONS.md`.
+- **NotebookLM** not yet connected to Claude — the memory system deepens once it is (full 4-layer Brain = v1.1 of the slice-1 substrate).
+- **U12 spike** owns OpenClaw/Hermes lane discovery (capture/consumption + Hermes 9119 write surface) — findings land in DECISIONS.md.
+- **3 remaining deferred forks** (deployment model, first remote adapter, memory routing) — see `DECISIONS.md` open table.
+- **Codex hit-rate** is the measured bet: if AGENTS.md-pointer consumption is weak, investigate Codex `features.hooks` in v1.1.
 
 ## Continuity note
 Migrated from `~/Code/personal/studied-template` on 2026-07-01. The original Claude Code session that produced all this may still be open as a fallback backstop. If anything here is unclear, that session (or the studied-template project transcript/memory) is the deep backup — but this doc + `DECISIONS.md` should be enough.

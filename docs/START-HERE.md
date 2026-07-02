@@ -29,7 +29,7 @@ Jarod's own **Agent OS**: a local-first personal control plane that **acts** on 
 - ✅ **Design** — ranked feature slate (`docs/FEATURE-SLATE.md`) + memory vision (`docs/MEMORY-SYSTEM-VISION.md`).
 - ✅ **Migrated** into this repo from the studied-template study folder (2026-07-01).
 - ✅ **`ce-strategy`** — North Star formalized in **[`STRATEGY.md`](../STRATEGY.md)** (repo root, canonical) — 2026-07-01.
-- ⏳ **Next: architecture + per-bucket `ce-brainstorm`/`ce-plan`** → `ce-work` (build). **Build order deferred on purpose.**
+- ⏳ **Next: `ce-brainstorm`** on the first bucket — lean **Observe+Control** (first visible slice), **Brain** substrate started alongside (it's the wedge). Then `ce-doc-review` → `ce-plan` (where the flagship / thin-slice fork gets decided). **Build order deferred on purpose.**
 
 ## Read next (in order)
 1. `docs/DECISIONS.md` — what's locked, what's still open.
@@ -44,3 +44,5 @@ Jarod's own **Agent OS**: a local-first personal control plane that **acts** on 
 
 ## Continuity note
 Migrated from `~/Code/personal/studied-template` on 2026-07-01. The original Claude Code session that produced all this may still be open as a fallback backstop. If anything here is unclear, that session (or the studied-template project transcript/memory) is the deep backup — but this doc + `DECISIONS.md` should be enough.
+
+**Session wrap-up:** run `/handoff` (project skill) to write the durable handoff — it updates *this doc* + `DECISIONS.md` at a clean phase boundary, or drops a mid-work cursor into gitignored `docs/HANDOFF.local.md`.

@@ -21,6 +21,7 @@ The anti-drift ledger. Every decision + **why** + **which intent it serves**. Re
 | 8 | 2026-07-01 | **Session handoffs feed the canonical record.** `/handoff` project skill updates `START-HERE.md` + `DECISIONS.md` (clean boundary) or a gitignored `docs/HANDOFF.local.md` (mid-work) — never a parallel "next session" block. | Operationalizes #5: continuity across contexts/agents without a competing state doc. Adapted from Jarod's cadre handoff skill. | Anti-drift is THE risk (attempt #2); a clean cross-session handoff keeps intent continuous. |
 | 9 | 2026-07-01 | **Slices sequence the North Star; they never shrink it.** Anything excluded from a slice must appear in that plan's "Deferred, not cut" section with the trigger that promotes it. No brainstorm/plan may silently drop a North Star capability. | Jarod: lean cuts were starting to feel like stripping the product down to the easiest path — the exact discouragement pattern that makes him walk away from projects. | Anti-drift **and** anti-discouragement: slices stay small while the full vision stays visible and scheduled. |
 | 10 | 2026-07-01 | **Slice 1 = the "parity-enabling cut":** Brain/board substrate seed (agents = primary consumer, Jarod secondary) + unified read inventory across all 4 runtimes (skills/MCP/plugins) + cross-runtime parity actions ("make skill/MCP X available in harness Y"). Run-steering and context inspector deferred **with promotion triggers** per #9. | O+C pains are *anticipated, not lived* — Jarod avoided multi-agent work because nothing centralized projects across harnesses. Slice ranked by "what un-collapses the team," not by lived pain. Consistent with the flagship-fork lean; does NOT close the ce-plan forks (build order, native writes). | "Acts on my stack" + the shared-brain wedge; keeps #6's Coordination boundary clean. |
+| 11 | 2026-07-01 | **Slice-1 forks resolved in `ce-plan`** (plan: `docs/plans/2026-07-01-001-feat-slice-1-substrate-parity-plan.md`): **build order = thin vertical slice** (Claude Code end-to-end first, then broaden); **native writes v1 = Claude Code + Codex** (Hermes/OpenClaw read-only, v1.1 via verified APIs); **flagship = the Brain seed** ("any agent picks up where we left off" headlines v1; Dream deferred). Closes the flagship/build-order, native-writes, and substrate-vs-slice rows of the open-forks table. | Vertical slice reaches a felt checkpoint fast (anti-discouragement per #9's rationale); CC+Codex writes are cheap (shared SKILL.md standard) while the other two are the XL tail; the Brain is Jarod's stated emotional core and everything since the brainstorm re-centered on it. | The wedge (shared brain) leads; "acts on my stack" ships in the same slice; deferred forks stay visible. |
 
 ## Open — deliberately deferred (do NOT decide until the phase that owns them)
 
@@ -28,12 +29,11 @@ These surfaced during design (the "6 forks") but are premature to lock. Parked h
 
 | Fork | Decide during | Current lean (NOT locked) |
 |---|---|---|
-| **Flagship / build order** (which bucket ships first) | `ce-plan` | A (observe+control) as first *visible* bucket; B (Dream) as its first act; C (brain) substrate built alongside, full brain = v1.1. |
-| **Deployment model** (local / installable / sync-ready) | `ce-strategy` / architecture | Local `Bun.serve`, sync-ready interfaces. |
-| **Which runtimes get native writes in v1** | `ce-plan` | Claude Code + Codex native; Hermes/OpenClaw read-only in v1. |
+| **Deployment model** (local / installable / sync-ready) | `ce-strategy` / architecture | Local `Bun.serve`, sync-ready interfaces — the slice-1 plan builds exactly this shape; formal close when packaging matters. |
 | **First real remote adapter** (vendor-cloud vs. own machine) | Rung 3 planning | Vendor-cloud first. |
 | **Memory routing model** (agent-driven / orchestrated / hybrid) | Memory architecture (post-NotebookLM) | Hybrid (brain exposes retrieval as MCP tools). |
-| **Substrate-first vs. thin vertical slice** | `ce-plan` | CTO lean: thin vertical slice (one runtime, one action, one write, end-to-end) before broadening. |
+
+*Closed by decision #11 (2026-07-01): flagship/build-order, native-write set, and substrate-first-vs-thin-slice — see the slice-1 plan.*
 
 ## How to add a decision
 Append a row to **Decisions made** with the date, the decision, the **why**, and the **intent served**. If it closes an open fork, move that fork out of the deferred table and cite the decision number.

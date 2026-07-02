@@ -2,8 +2,10 @@
 
 > **Status:** early sketch, captured 2026-07-01. **Source:** Jarod's NotebookLM synthesis
 > (Karpathy's LLM-Wiki, the "Infinite Brain," Google's Open Knowledge Format, Pinecone vector recall).
-> Not yet fully talked through. **To be deepened once NotebookLM is connected to Claude (CLI/MCP)** —
-> at which point we pull the real sources.
+> Not yet fully talked through. **NotebookLM connected 2026-07-01** (`notebooklm` CLI + skill,
+> auth verified) — deepen this doc by pulling from notebooks "AI Second Brain" (`ba4b1af4…`),
+> "AgentOS" (`0db2b38d…`), and "Claude, Hermes, and NotebookLM" (`7d55c036…`) when the
+> memory-architecture phase (v1.1) starts.
 >
 > This is the **"unified memory" anchor** of the Agent OS and, in my (CTO) view, the strongest
 > candidate for its **headline feature** — the equivalent of what the Dream engine is to a studied template.

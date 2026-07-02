@@ -38,7 +38,7 @@ Jarod's own **Agent OS**: a local-first personal control plane that **acts** on 
 4. `docs/reference/studied-template/the rebuild notes.md` — the distilled borrow/fix/cut lessons.
 
 ## Open threads
-- **NotebookLM** not yet connected to Claude — the memory system deepens once it is (full 4-layer Brain = v1.1 of the slice-1 substrate).
+- ✅ **NotebookLM connected** (2026-07-01) — `notebooklm` CLI authenticated + skill installed (`~/.claude/skills/notebooklm`); 11 notebooks verified. Memory-relevant: **"AI Second Brain"** (`ba4b1af4…`), **"AgentOS"** (`0db2b38d…`), **"Claude, Hermes, and NotebookLM"** (`7d55c036…`). This unlocks the v1.1 Brain deepening + the memory-routing fork — pull the sources when the memory architecture phase starts (not during slice-1 build).
 - **U12 spike** owns OpenClaw/Hermes lane discovery (capture/consumption + Hermes 9119 write surface) — findings land in DECISIONS.md.
 - **3 remaining deferred forks** (deployment model, first remote adapter, memory routing) — see `DECISIONS.md` open table.
 - **Codex hit-rate** is the measured bet: if AGENTS.md-pointer consumption is weak, investigate Codex `features.hooks` in v1.1.

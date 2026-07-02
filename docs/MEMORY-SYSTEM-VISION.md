@@ -45,6 +45,14 @@
    at larger scale.)
 8. **NotebookLM = a *source*, not a runtime dependency.** Ingest its synthesized findings into *our*
    layers (L2 + L3). Don't let the brain depend on a closed system we can't fully script. Own the data.
+9. **Wrap-Up ≠ handoff (Jarod, 2026-07-01).** The *handoff* is a continuity cursor ("pick up here,
+   next session"); the *Wrap-Up* is knowledge extraction (decisions → L2 wiki) **plus** the full raw
+   conversation log → L3 vector. Slice 1's substrate ships the handoff lane + an automatic raw
+   breadcrumb trail — the same two-lane hybrid shape at seed scale, so the full Wrap-Up *deepens* the
+   substrate later instead of replacing it.
+10. **L3 doubles as OS substrate (Jarod, 2026-07-01).** The raw vector archive isn't only memory —
+    full session logs in Pinecone (or another vector DB) become fuel for later Agent OS
+    observability, planning, and eval features. Capture once, exploit many ways.
 
 ## Open decisions to resolve (when we go deep)
 

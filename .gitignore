@@ -6,6 +6,11 @@ node_modules/
 # Build / framework output
 dist/
 build/
+
+# SQLite databases (local substrate store — never commit)
+*.db
+*.db-shm
+*.db-wal
 .output/
 .vinxi/
 .tanstack/

@@ -322,7 +322,7 @@ describe("scenario 8 — capture_cursor round-trips offsets", () => {
   });
 });
 
-// ── Projects registry: upserted as a write-side-effect (advisor-flagged: implement ⇒ test) ────
+// ── Projects registry: upserted as a side effect of writeHandoff/writeBreadcrumb (no dedicated method) ────
 
 describe("projects registry — upserted as a side effect of writeHandoff/writeBreadcrumb", () => {
   test("writeHandoff registers its project", async () => {

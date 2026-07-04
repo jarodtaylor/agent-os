@@ -120,12 +120,7 @@ export function createRepo(db: Store): Repo {
 
       if (handoffRow) {
         // AE2: only breadcrumbs STRICTLY newer than the curated handoff ride along as the raw tail.
-        const rawTrail = db
-          .select()
-          .from(breadcrumbs)
-          .where(and(eq(breadcrumbs.project, project), gt(breadcrumbs.ts, handoffRow.ts)))
-          .orderBy(asc(breadcrumbs.ts), asc(breadcrumbs.id))
-          .all();
+        const rawTrail = selectBreadcrumbTrail(db, project, handoffRow.ts);
 
         const lastActivity = rawTrail.reduce((max, row) => Math.max(max, row.ts), handoffRow.ts);
 
@@ -144,12 +139,7 @@ export function createRepo(db: Store): Repo {
       }
 
       // AE1: no curated handoff — fall back to the raw trail itself, if any exists.
-      const allCrumbs = db
-        .select()
-        .from(breadcrumbs)
-        .where(eq(breadcrumbs.project, project))
-        .orderBy(asc(breadcrumbs.ts), asc(breadcrumbs.id))
-        .all();
+      const allCrumbs = selectBreadcrumbTrail(db, project);
 
       if (allCrumbs.length === 0) return null;
 
@@ -214,10 +204,11 @@ export function createRepo(db: Store): Repo {
           .map((r) => r.sessionId)
           .filter((s): s is string => s !== null),
       );
-      const universe = new Set<string>(
+      const breadcrumbSessions = new Set<string>(
         db.selectDistinct({ sessionId: breadcrumbs.sessionId }).from(breadcrumbs).all().map((r) => r.sessionId),
       );
-      for (const s of consumed) universe.add(s); // a consuming session belongs in its own denominator
+      // Denominator = every session the store has seen; a consuming session counts in its own population.
+      const universe = consumed.union(breadcrumbSessions);
 
       if (universe.size === 0) return 0; // guard divide-by-zero
       return consumed.size / universe.size;
@@ -228,6 +219,20 @@ export function createRepo(db: Store): Repo {
 // ─────────────────────────────────────────────────────────────────────────────
 // Internal helpers
 // ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The project's raw-lane breadcrumbs in deterministic `(ts, id)` order — the ONE place that ordering
+ * (the AE1/AE2 tiebreak invariant the tests pin) is expressed, so `readWorkState`'s two call sites
+ * can't drift apart. `afterTs` bounds the scan to events STRICTLY newer than a handoff (AE2's curated
+ * tail); omitted, it returns the whole trail (AE1's fallback).
+ */
+function selectBreadcrumbTrail(db: Store, project: string, afterTs?: number) {
+  const where =
+    afterTs === undefined
+      ? eq(breadcrumbs.project, project)
+      : and(eq(breadcrumbs.project, project), gt(breadcrumbs.ts, afterTs));
+  return db.select().from(breadcrumbs).where(where).orderBy(asc(breadcrumbs.ts), asc(breadcrumbs.id)).all();
+}
 
 /**
  * Register `project` in the registry as a side effect of writing a handoff/breadcrumb that

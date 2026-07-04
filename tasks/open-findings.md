@@ -27,6 +27,32 @@ single writer) is the current mitigation.
 
 ---
 
+## Deferred — U2 store residuals (2026-07-04, ce-code-review)
+
+Surfaced by the U2 review (correctness + adversarial at session tier, plus data-migration,
+maintainability, project-standards). All are correct under the current locked design; each carries a
+promotion trigger so the right fix lands when its usage model is real, not speculatively.
+
+- [~] **U2-R1 — [note → U3/U4] Repo write methods don't re-validate inputs; only `readWorkState` parses.**
+  In-process TS types guard the write boundary today. **Promotion trigger (concrete, next units):** when
+  U3 (server) / U4 (MCP tools) write handoffs/breadcrumbs from external HTTP/MCP JSON, validate via the
+  contract zod schema at the write boundary *before* `repo.write*` — never trust TS types for untrusted input.
+- [~] **U2-R2 — [low] Handoff upsert is latest-write-wins, not ts-guarded** (`repo.ts`). Correct under the
+  single-writer, in-order v1. **Promotion trigger:** federation replay / multi-machine sync (v1.1) — then
+  guard the upsert so an out-of-order *older* handoff can't clobber a newer one for the same session.
+- [~] **U2-R3 — [low] Cross-process `migrate()` race** (`db.ts`). Moot under KTD9 (one server process);
+  SQLite file locking + `busy_timeout` + drizzle's `__drizzle_migrations` bookkeeping serialize it
+  regardless. **Promotion trigger:** the architecture ever has >1 process opening the same db → flock
+  around `migrate()`, or route bootstrap through a single dedicated migrator.
+- [~] **U2-R4 — [low] `capture_cursor.byteOffset` has no monotonic guard** (`repo.ts`). A backwards write
+  would cause re-reads; masked today by breadcrumb id-idempotency. **Promotion trigger:** a capture-lane
+  bug or a non-idempotent raw lane makes re-reads harmful → add a `max(old, new)` guard on write.
+- [~] **U2-R5 — [low] `hitRate()` has no project scope** (`repo.ts`). The same sessionId across two
+  projects counts once — a self-documented approximation. **Promotion trigger:** U4 wires the real
+  per-tool consumption metric → decide project scoping then.
+
+---
+
 ## Fixed 2026-07-04 — Codex adversarial review (3 passes) + ce-code-review, folded into this branch
 
 **Contract (`src/contract/schema.ts`) — 2nd/3rd adversarial passes:**

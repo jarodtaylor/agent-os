@@ -234,9 +234,9 @@ function serializeConfig(format: ConfigFormat, value: unknown): string {
     default:
       return assertNever(format);
   }
-  // Normalize to exactly one trailing newline so re-serialized output is byte-stable across formats
+  // Canonicalize to exactly one trailing newline so re-serialized output is byte-stable across formats
   // (JSON.stringify emits none; yaml/toml emit one) — the no-op short-circuit compares raw bytes.
-  return text.endsWith("\n") ? text : text + "\n";
+  return text.replace(/\n+$/, "") + "\n";
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

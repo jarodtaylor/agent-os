@@ -167,7 +167,7 @@ export function Inferred<T extends z.ZodType>(inner: T) {
     evidence: z.array(z.string()),
   });
 }
-export type Inferred<T> = { value: T; confidence: number; evidence: string[] };
+export type Inferred<T extends z.ZodType> = { value: z.infer<T>; confidence: number; evidence: string[] };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Shared vocabulary

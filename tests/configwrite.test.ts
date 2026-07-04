@@ -1,0 +1,378 @@
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import {
+  appendFileSync,
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { parse as parseToml } from "smol-toml";
+import { parse as parseYaml } from "yaml";
+import { deepMerge, listUndo, mergeConfig, undo } from "../src/configwrite/index";
+import { backupsDir, journalPath } from "../src/configwrite/internal";
+
+// Each test gets an isolated workspace: `configs/` holds the target files a caller mutates, `data/`
+// is the injected dataDir where backups + the journal land. The two are separate dirs on purpose —
+// it lets the "read-only directory" test freeze the config dir while backups still land in data.
+let root: string;
+let configsDir: string;
+let dataDir: string;
+
+beforeEach(() => {
+  root = mkdtempSync(join(tmpdir(), "cw-"));
+  configsDir = join(root, "configs");
+  dataDir = join(root, "data");
+  mkdirSync(configsDir);
+});
+
+afterEach(() => {
+  // A test may have frozen configsDir to 0500 to force a write failure — thaw before cleanup.
+  try {
+    chmodSync(configsDir, 0o700);
+  } catch {
+    /* already gone */
+  }
+  rmSync(root, { recursive: true, force: true });
+});
+
+function seed(name: string, content: string): string {
+  const path = join(configsDir, name);
+  writeFileSync(path, content);
+  return path;
+}
+
+function read(path: string): string {
+  return readFileSync(path, "utf8");
+}
+
+function bakCount(): number {
+  const dir = backupsDir(dataDir);
+  return existsSync(dir) ? readdirSync(dir).filter((f) => f.endsWith(".bak")).length : 0;
+}
+
+// ── merge-don't-clobber across all three formats (R11, U14 scenario 1) ────────────
+
+describe("merge preserves unrelated keys across formats", () => {
+  test("JSON: unrelated + nested keys survive", () => {
+    const target = seed("settings.json", JSON.stringify({ a: 1, nested: { x: 1 } }, null, 2) + "\n");
+    mergeConfig(target, { b: 2, nested: { y: 2 } }, { dataDir });
+    expect(JSON.parse(read(target))).toEqual({ a: 1, b: 2, nested: { x: 1, y: 2 } });
+  });
+
+  test("TOML: bare keys and existing table members survive", () => {
+    const target = seed("config.toml", 'keep = 1\n[table]\ninner = "a"\n');
+    mergeConfig(target, { added: 2, table: { inner2: "b" } }, { dataDir });
+    expect(parseToml(read(target))).toEqual({ keep: 1, added: 2, table: { inner: "a", inner2: "b" } });
+  });
+
+  test("YAML: unrelated + nested keys survive", () => {
+    const target = seed("config.yaml", "keep: 1\nnested:\n  x: 1\n");
+    mergeConfig(target, { added: 2, nested: { y: 2 } }, { dataDir });
+    expect(parseYaml(read(target))).toEqual({ keep: 1, added: 2, nested: { x: 1, y: 2 } });
+  });
+});
+
+// ── backup discipline (R11, U14 scenario 2) ───────────────────────────────────────
+
+test("a byte-exact backup is written 0600 before the target changes", () => {
+  const original = JSON.stringify({ a: 1 }, null, 2) + "\n";
+  const target = seed("settings.json", original);
+
+  const result = mergeConfig(target, { b: 2 }, { dataDir });
+
+  expect(result.backupPath).not.toBeNull();
+  expect(existsSync(result.backupPath!)).toBe(true);
+  expect(statSync(result.backupPath!).mode & 0o777).toBe(0o600);
+  // The backup holds the PRE-mutation bytes, exactly…
+  expect(read(result.backupPath!)).toBe(original);
+  // …while the target now holds the merged result.
+  expect(JSON.parse(read(target))).toEqual({ a: 1, b: 2 });
+});
+
+// ── undo restores byte-identically (R11, VS4 seed, U14 scenario 3) ─────────────────
+
+test("undo restores the target's exact bytes and original mode", () => {
+  // Deliberately hand-formatted (4-space, trailing spaces) to prove the restore is raw bytes, not a
+  // reserialize — our engine would otherwise rewrite this as 2-space JSON.
+  const original = '{\n    "a": 1,\n    "keep": "me"\n}\n';
+  const target = seed("settings.json", original);
+  chmodSync(target, 0o644);
+
+  const result = mergeConfig(target, { b: 2 }, { dataDir });
+  expect(read(target)).not.toBe(original); // it really did change
+
+  undo(result.undoId!, dataDir);
+
+  expect(read(target)).toBe(original); // byte-identical
+  expect(statSync(target).mode & 0o777).toBe(0o644); // original mode restored
+});
+
+// ── failure mid-write leaves the original intact (R11, U14 scenario 4) ─────────────
+
+test("a write that fails mid-flight leaves the original file untouched and cleans up", () => {
+  // Assumes a non-root runner: root ignores directory permission bits.
+  const original = JSON.stringify({ a: 1 }, null, 2) + "\n";
+  const target = seed("settings.json", original);
+
+  // Freeze the config dir read-only: the backup (into dataDir) still succeeds, but writing the sibling
+  // temp file fails — exercising the cleanup path that must remove the just-made backup.
+  chmodSync(configsDir, 0o500);
+  expect(() => mergeConfig(target, { b: 2 }, { dataDir })).toThrow();
+  chmodSync(configsDir, 0o700); // thaw so we can inspect
+
+  expect(read(target)).toBe(original); // original never touched
+  expect(bakCount()).toBe(0); // the orphaned backup was rolled back
+  expect(listUndo(dataDir)).toEqual([]); // nothing journaled for a write that didn't land
+});
+
+test("a corrupt existing config aborts before writing anything (fail closed)", () => {
+  const corrupt = "{ this is not valid json";
+  const target = seed("settings.json", corrupt);
+
+  expect(() => mergeConfig(target, { a: 1 }, { dataDir })).toThrow(/failed to parse/);
+
+  expect(read(target)).toBe(corrupt); // untouched
+  expect(bakCount()).toBe(0);
+  expect(listUndo(dataDir)).toEqual([]);
+});
+
+// ── idempotency: a no-op write has NO side effects (R11, U14 scenario 5) ────────────
+
+test("double-provision is idempotent — no second write, backup, or journal entry", () => {
+  const target = seed("settings.json", JSON.stringify({ a: 1 }, null, 2) + "\n");
+
+  const first = mergeConfig(target, { b: 2 }, { dataDir });
+  expect(first.noop).toBe(false);
+  const afterFirst = read(target);
+
+  // Re-merging the same patch is a true no-op: no write, no undo id, no backup.
+  const second = mergeConfig(target, { b: 2 }, { dataDir });
+  expect(second.noop).toBe(true);
+  expect(second.undoId).toBeNull();
+  expect(second.backupPath).toBeNull();
+
+  // An empty patch is likewise a no-op.
+  expect(mergeConfig(target, {}, { dataDir }).noop).toBe(true);
+
+  expect(read(target)).toBe(afterFirst); // bytes unchanged across the repeats
+  expect(listUndo(dataDir).length).toBe(1); // only the first, real write was journaled
+  expect(bakCount()).toBe(1); // and only one backup exists
+});
+
+// ── array-replace is a documented, tested contract (guards the U6 hooks footgun) ────
+
+test("array values are replaced wholesale, not appended or index-merged", () => {
+  const target = seed("settings.json", JSON.stringify({ list: [1, 2, 3], keep: true }, null, 2) + "\n");
+  mergeConfig(target, { list: [9] }, { dataDir });
+  expect(JSON.parse(read(target))).toEqual({ list: [9], keep: true });
+});
+
+// ── new-file creation + its undo (deletes rather than restores) ─────────────────────
+
+test("a new file is created, and its undo deletes it (idempotently)", () => {
+  const target = join(configsDir, "new.json");
+  expect(existsSync(target)).toBe(false);
+
+  const result = mergeConfig(target, { a: 1 }, { dataDir });
+  expect(result.created).toBe(true);
+  expect(result.noop).toBe(false);
+  expect(result.backupPath).toBeNull(); // nothing to back up
+  expect(JSON.parse(read(target))).toEqual({ a: 1 });
+  expect(listUndo(dataDir).length).toBe(1);
+
+  undo(result.undoId!, dataDir);
+  expect(existsSync(target)).toBe(false); // create undone by deletion
+
+  expect(() => undo(result.undoId!, dataDir)).not.toThrow(); // idempotent double-undo
+});
+
+// ── format detection ────────────────────────────────────────────────────────────────
+
+describe("format handling", () => {
+  test(".yml is treated as YAML", () => {
+    const target = seed("config.yml", "a: 1\n");
+    mergeConfig(target, { b: 2 }, { dataDir });
+    expect(parseYaml(read(target))).toEqual({ a: 1, b: 2 });
+  });
+
+  test("an explicit format overrides the (absent) extension", () => {
+    const target = seed("rc", JSON.stringify({ a: 1 }) + "\n");
+    mergeConfig(target, { b: 2 }, { dataDir, format: "json" });
+    expect(JSON.parse(read(target))).toEqual({ a: 1, b: 2 });
+  });
+
+  test("an unknown extension with no override throws", () => {
+    const target = seed("notes.txt", "hello");
+    expect(() => mergeConfig(target, { a: 1 }, { dataDir })).toThrow(/cannot infer format/);
+  });
+});
+
+// ── journal robustness + prototype-pollution guard (safety-utility hardening) ────────
+
+test("listUndo skips malformed journal lines but keeps the good entries", () => {
+  const target = seed("settings.json", JSON.stringify({ a: 1 }, null, 2) + "\n");
+  const result = mergeConfig(target, { b: 2 }, { dataDir }); // one valid entry
+
+  const path = journalPath(dataDir);
+  appendFileSync(path, "this is not json\n"); // torn line
+  appendFileSync(path, JSON.stringify({ id: "x" }) + "\n"); // JSON but fails schema
+
+  const entries = listUndo(dataDir);
+  expect(entries.length).toBe(1);
+  expect(entries[0]!.id).toBe(result.undoId!);
+  expect(() => undo(result.undoId!, dataDir)).not.toThrow(); // the good entry still resolves
+});
+
+test("deepMerge ignores prototype-pollution keys", () => {
+  // Guards RUNTIME prototype pollution (the security property) — NOT disk-level key stripping. A nested
+  // __proto__ under a fresh key can still serialize to a config file (harmless GIGO); what must never
+  // happen is the actual prototype being mutated. JSON.parse makes __proto__ an own key here.
+  const hostile = JSON.parse('{"__proto__": {"polluted": true}, "b": 2}');
+  const merged = deepMerge({ a: 1 }, hostile) as Record<string, unknown>;
+
+  expect(merged.a).toBe(1);
+  expect(merged.b).toBe(2);
+  expect((merged as { polluted?: unknown }).polluted).toBeUndefined(); // not inherited
+  expect(({} as { polluted?: unknown }).polluted).toBeUndefined(); // Object.prototype untouched
+});
+
+// ── parse errors never leak file content / secrets into the thrown error (security S1) ──
+
+test("a parse error never leaks file content into the thrown error", () => {
+  const secret = "sk-ant-SECRET-do-not-leak";
+
+  // TOML: a bare invalid line right after a secret-bearing line — the raw parser message would frame it.
+  const toml = seed("config.toml", `token = "${secret}"\nthis is not valid toml\n`);
+  let tomlErr = "";
+  try {
+    mergeConfig(toml, { added: 1 }, { dataDir });
+  } catch (e) {
+    tomlErr = (e as Error).message;
+  }
+  expect(tomlErr).toMatch(/failed to parse/);
+  expect(tomlErr).not.toContain(secret);
+
+  // YAML: an unclosed flow sequence right after a secret-bearing line.
+  const yaml = seed("config.yaml", `token: ${secret}\nbroken: [unclosed\n`);
+  let yamlErr = "";
+  try {
+    mergeConfig(yaml, { added: 1 }, { dataDir });
+  } catch (e) {
+    yamlErr = (e as Error).message;
+  }
+  expect(yamlErr).toMatch(/failed to parse/);
+  expect(yamlErr).not.toContain(secret);
+});
+
+// ── the patch must be a plain object — fail closed before any file work (correctness C1) ──
+
+describe("mergeConfig rejects a non-object patch before touching the file", () => {
+  test.each([
+    ["null", null],
+    ["undefined", undefined],
+    ["an array", [1, 2, 3]],
+    ["a scalar", 42],
+  ])("rejects %s without clobbering or writing", (_label, patch) => {
+    const original = JSON.stringify({ keep: true }, null, 2) + "\n";
+    const target = seed("settings.json", original);
+
+    expect(() => mergeConfig(target, patch, { dataDir })).toThrow(/patch must be a plain object/);
+    expect(read(target)).toBe(original); // untouched — no silent whole-config clobber
+    expect(bakCount()).toBe(0);
+    expect(listUndo(dataDir)).toEqual([]);
+  });
+});
+
+// ── idempotency holds for TOML/YAML too, not just JSON — the no-op short-circuit depends on each
+//    serializer's round-trip being byte-stable (TOML is Codex's config.toml, re-provisioned per session) ──
+
+describe("double-provision is a true no-op across formats (serializer round-trip is byte-stable)", () => {
+  test.each([
+    ["config.toml", 'keep = 1\n[table]\ninner = "a"\n', { added: 2, table: { inner2: "b" } }],
+    ["config.yaml", "keep: 1\nnested:\n  x: 1\n", { added: 2, nested: { y: 2 } }],
+  ] as const)("%s: re-merging the same patch neither rewrites nor re-backs-up", (name, seedContent, patch) => {
+    const target = seed(name, seedContent);
+
+    const first = mergeConfig(target, patch, { dataDir });
+    expect(first.noop).toBe(false);
+    const afterFirst = read(target);
+
+    const second = mergeConfig(target, patch, { dataDir });
+    expect(second.noop).toBe(true); // fails loudly if the serializer round-trip is not byte-stable
+    expect(second.undoId).toBeNull();
+
+    expect(read(target)).toBe(afterFirst);
+    expect(listUndo(dataDir).length).toBe(1);
+    expect(bakCount()).toBe(1);
+  });
+});
+
+// ── undo is safe against later writes — never blindly clobbers (adversarial U14-F1) ──
+
+test("undo refuses to roll back once a later write has diverged the target", () => {
+  const target = seed("settings.json", JSON.stringify({ a: 1 }, null, 2) + "\n");
+
+  const first = mergeConfig(target, { b: 2 }, { dataDir }); // write A → {a,b}
+  mergeConfig(target, { c: 3 }, { dataDir }); // write B → {a,b,c}; target no longer matches A
+
+  // Undoing A now would silently discard B — refuse instead of clobbering.
+  expect(() => undo(first.undoId!, dataDir)).toThrow(/refusing to clobber|changed since/);
+  expect(JSON.parse(read(target))).toEqual({ a: 1, b: 2, c: 3 }); // B survives untouched
+});
+
+test("undo of the latest write succeeds and restores the prior state", () => {
+  const target = seed("settings.json", JSON.stringify({ a: 1 }, null, 2) + "\n");
+
+  mergeConfig(target, { b: 2 }, { dataDir }); // A → {a,b}
+  const second = mergeConfig(target, { c: 3 }, { dataDir }); // B → {a,b,c}
+
+  undo(second.undoId!, dataDir); // undoing the latest is safe (target still matches B)
+  expect(JSON.parse(read(target))).toEqual({ a: 1, b: 2 }); // back to A's state
+});
+
+test("undo is idempotent on the restore branch — a second undo is a clean no-op", () => {
+  const target = seed("settings.json", JSON.stringify({ a: 1 }, null, 2) + "\n");
+  const result = mergeConfig(target, { b: 2 }, { dataDir });
+
+  undo(result.undoId!, dataDir); // target now holds the restored backup, not the post-image
+  const afterFirst = read(target);
+  expect(() => undo(result.undoId!, dataDir)).not.toThrow(); // currentHash === hash(backup) → no-op
+  expect(read(target)).toBe(afterFirst); // unchanged
+});
+
+// ── symlinked config targets are refused (adversarial U14-F2: don't replace the link) ──
+
+test("refuses to write through a symlinked target (fail closed)", () => {
+  const real = seed("real.json", JSON.stringify({ a: 1 }, null, 2) + "\n");
+  const link = join(configsDir, "link.json");
+  symlinkSync(real, link);
+
+  expect(() => mergeConfig(link, { b: 2 }, { dataDir })).toThrow(/symlink/);
+  expect(JSON.parse(read(real))).toEqual({ a: 1 }); // the real file behind the link is untouched
+});
+
+// ── a torn journal tail can't swallow the next entry (adversarial G3-b) ──
+
+test("recordUndo isolates a torn journal tail so a later entry still survives", () => {
+  const target = seed("settings.json", JSON.stringify({ a: 1 }, null, 2) + "\n");
+  const first = mergeConfig(target, { b: 2 }, { dataDir }); // one clean entry
+
+  // Simulate a crash that left a partial, newline-less final line at the end of the journal.
+  appendFileSync(journalPath(dataDir), '{"id":"torn","partial');
+
+  // A later write must still produce a discoverable entry despite the torn tail.
+  const target2 = seed("other.json", JSON.stringify({ x: 1 }, null, 2) + "\n");
+  const second = mergeConfig(target2, { y: 2 }, { dataDir });
+
+  const ids = listUndo(dataDir).map((e) => e.id);
+  expect(ids).toContain(first.undoId!); // the earlier clean entry is intact
+  expect(ids).toContain(second.undoId!); // and the later one survived the torn tail
+});

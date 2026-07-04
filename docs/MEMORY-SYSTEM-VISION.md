@@ -2,8 +2,10 @@
 
 > **Status:** early sketch, captured 2026-07-01. **Source:** Jarod's NotebookLM synthesis
 > (Karpathy's LLM-Wiki, the "Infinite Brain," Google's Open Knowledge Format, Pinecone vector recall).
-> Not yet fully talked through. **To be deepened once NotebookLM is connected to Claude (CLI/MCP)** —
-> at which point we pull the real sources.
+> Not yet fully talked through. **NotebookLM connected 2026-07-01** (`notebooklm` CLI + skill,
+> auth verified) — deepen this doc by pulling from notebooks "AI Second Brain" (`ba4b1af4…`),
+> "AgentOS" (`0db2b38d…`), and "Claude, Hermes, and NotebookLM" (`7d55c036…`) when the
+> memory-architecture phase (v1.1) starts.
 >
 > This is the **"unified memory" anchor** of the Agent OS and, in my (CTO) view, the strongest
 > candidate for its **headline feature** — the equivalent of what the Dream engine is to a studied template.
@@ -45,6 +47,14 @@
    at larger scale.)
 8. **NotebookLM = a *source*, not a runtime dependency.** Ingest its synthesized findings into *our*
    layers (L2 + L3). Don't let the brain depend on a closed system we can't fully script. Own the data.
+9. **Wrap-Up ≠ handoff (Jarod, 2026-07-01).** The *handoff* is a continuity cursor ("pick up here,
+   next session"); the *Wrap-Up* is knowledge extraction (decisions → L2 wiki) **plus** the full raw
+   conversation log → L3 vector. Slice 1's substrate ships the handoff lane + an automatic raw
+   breadcrumb trail — the same two-lane hybrid shape at seed scale, so the full Wrap-Up *deepens* the
+   substrate later instead of replacing it.
+10. **L3 doubles as OS substrate (Jarod, 2026-07-01).** The raw vector archive isn't only memory —
+    full session logs in Pinecone (or another vector DB) become fuel for later Agent OS
+    observability, planning, and eval features. Capture once, exploit many ways.
 
 ## Open decisions to resolve (when we go deep)
 

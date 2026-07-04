@@ -25,22 +25,28 @@ Jarod's own **Agent OS**: a local-first personal control plane that **acts** on 
 **Scope decided: "Rung 2"** — a *local* control plane on one machine, but with those two seams built **remote-ready**, so driving agents on other machines / a VPS later ("Rung 3") is an *extension*, not a rewrite.
 
 ## Where we are RIGHT NOW
-- ✅ **Understand** the reference (teardown → `docs/reference/studied-template/`).
-- ✅ **Design** — ranked feature slate (`docs/FEATURE-SLATE.md`) + memory vision (`docs/MEMORY-SYSTEM-VISION.md`).
-- ✅ **Migrated** into this repo from the studied-template study folder (2026-07-01).
-- ✅ **`ce-strategy`** — North Star formalized in **[`STRATEGY.md`](../STRATEGY.md)** (repo root, canonical) — 2026-07-01.
-- ⏳ **Next: architecture + per-bucket `ce-brainstorm`/`ce-plan`** → `ce-work` (build). **Build order deferred on purpose.**
+- ✅ **Understand + Design + Migrate + `ce-strategy`** (2026-07-01) — teardown distilled, slate + memory vision written, North Star canonical in [`STRATEGY.md`](../STRATEGY.md).
+- ✅ **`ce-brainstorm`** (2026-07-01) — slice 1 scoped: the **"parity-enabling cut"** (Brain/board substrate seed, agents-primary + 4-runtime inventory + parity actions). Decisions #9 (slices sequence, never shrink) and #10 logged.
+- ✅ **`ce-doc-review` ×2** — requirements hardened by a 6-reviewer panel (8 fixes), plan hardened by a 5-reviewer round-2 panel (11 findings walked through and applied: capture-time redaction, token model, in-process capture, session-keyed handoffs, U13/U14/U15).
+- ✅ **`ce-plan`** (2026-07-01) — **implementation-ready plan: [`docs/plans/2026-07-01-001-feat-slice-1-substrate-parity-plan.md`](plans/2026-07-01-001-feat-slice-1-substrate-parity-plan.md)**. Forks closed by decision #11: thin vertical slice · Claude Code + Codex writes · **Brain seed is the v1 flagship**.
+- ✅ **Whole-system architecture pass** (2026-07-02, decisions #12–13) — closed a mid-`ce-work` gap: no consolidated whole-system view existed, so execution kept wobbling (3 step-backs in one session). Produced the durable cohesion map → **[`ARCHITECTURE.md`](ARCHITECTURE.md)** (Jarod affirmed the exit condition). Adopted **4 extensibility hooks** (per-run cost/tokens, Event Spine, `Inferred<T>` provenance, Brain redaction choke-point) + **3 reserved homes** (Notifications, Economics, Scheduling). **Roster updated:** OpenClaw dropped; real set = Claude · Codex · Hermes · Cursor · Antigravity · OpenCode. **Runtime = Bun confirmed**; FE framework deferred to U11 (lean: React Router 7 / Remix, Tailwind + Shadcn, colorblind-safe). a studied template ideas mined → `reference/studied-template-mined-ideas.md`.
+- ✅ **`ce-work` begun — U13 gate GO + U1 shipped** (2026-07-02). U13 test #2 validated the sharpest assumption (raw-trail resume-sufficiency): a *cold* agent reconstructed in-flight state + the exact next action from a mechanically-extracted trail alone (decision #14). Test #1 (injection) was skipped — mechanism already de-risked, cadre confounded. **U1 committed** (`2bd3a14`): Bun scaffold + typed contract core (seam #1) — all 5 records + all 4 hooks (#13); **30 tests green, tsc clean**. Stack + roster locked (decision #15).
+- ✅ **U14 shipped + hardened — PR #1 open** (2026-07-04). Config-write discipline engine (`src/configwrite/*`): format-aware merge (JSON/TOML/YAML) behind one API; byte-exact backup → merge-don't-clobber → write-to-temp + atomic rename → **identity-checked** undo journal; backups `0600` under the OS data dir (KTD6 / R11). Went through the full loop — `ce-work` → `ce-simplify-code` → `ce-code-review` → **3 Codex adversarial passes**; the U1 contract was hardened alongside (discriminated-union `WorkState` so its invariant holds at the JSON-Schema boundary too, `maxSensitivity` redaction escalation, `strictObject` records). **65 tests green, `tsc` clean.** [**PR #1**](https://github.com/jarodtaylor/agents-os/pull/1) = the whole slice-1 branch (planning + U1 + U14), so merging lands all of slice-1-so-far into `main`. Two robustness findings **deferred** (cross-process concurrency, undo crash-durability) — tracked in [`tasks/open-findings.md`](../tasks/open-findings.md) with promotion triggers.
+- ⏳ **Next: `ce-work` U2 — store + persistence** (`src/store/*`): `bun:sqlite` + Drizzle behind a repository interface, `PRAGMA journal_mode=WAL`, the self-recording access-log for the shared-brain hit rate (KTD3). Phase A order after: **U2 → U3 → U4 → U5 → U6 → U7 → U15**. KTDs 1–9 + the 4 hooks (#13) are build constraints — don't re-litigate. **Watch:** re-check trail-sufficiency on a messier mid-implementation resume during U5 (test-#2 caveat); fold in any CodeRabbit findings on PR #1. Reference: `docs/ARCHITECTURE.md` (the whole-system map); open review items in `tasks/open-findings.md`.
 
 ## Read next (in order)
-1. `docs/DECISIONS.md` — what's locked, what's still open.
-2. `docs/FEATURE-SLATE.md` — the slate + the two seams (§2) + MCP-gateway/A2A integration (§7).
-3. `docs/MEMORY-SYSTEM-VISION.md` — the Agent Brain design + its open decisions.
+1. `docs/plans/2026-07-01-001-feat-slice-1-substrate-parity-plan.md` — THE plan (scan headings: Goal Capsule → unit index → U13).
+2. `docs/DECISIONS.md` — decisions 1–11 locked; 3 forks still open (deployment, remote adapter, memory routing).
+3. `docs/FEATURE-SLATE.md` / `docs/MEMORY-SYSTEM-VISION.md` — design grounding.
 4. `docs/reference/studied-template/the rebuild notes.md` — the distilled borrow/fix/cut lessons.
 
 ## Open threads
-- ✅ **North Star** formalized → [`STRATEGY.md`](../STRATEGY.md) (2026-07-01). Next: architecture + per-bucket planning.
-- **NotebookLM** not yet connected to Claude — the memory system deepens once it is (Jarod has extensive memory research captured there).
-- **The 6 forks** (flagship/build-order, deployment, native-write runtimes, first remote adapter, memory routing, substrate-vs-vertical-slice) are **deferred** to strategy/planning — see `DECISIONS.md`.
+- ✅ **NotebookLM connected** (2026-07-01) — `notebooklm` CLI authenticated + skill installed (`~/.claude/skills/notebooklm`); 11 notebooks verified. Memory-relevant: **"AI Second Brain"** (`ba4b1af4…`), **"AgentOS"** (`0db2b38d…`), **"Claude, Hermes, and NotebookLM"** (`7d55c036…`). This unlocks the v1.1 Brain deepening + the memory-routing fork — pull the sources when the memory architecture phase starts (not during slice-1 build).
+- **U12 spike** owns OpenClaw/Hermes lane discovery (capture/consumption + Hermes 9119 write surface) — findings land in DECISIONS.md.
+- **3 remaining deferred forks** (deployment model, first remote adapter, memory routing) — see `DECISIONS.md` open table.
+- **Codex hit-rate** is the measured bet: if AGENTS.md-pointer consumption is weak, investigate Codex `features.hooks` in v1.1.
 
 ## Continuity note
 Migrated from `~/Code/personal/studied-template` on 2026-07-01. The original Claude Code session that produced all this may still be open as a fallback backstop. If anything here is unclear, that session (or the studied-template project transcript/memory) is the deep backup — but this doc + `DECISIONS.md` should be enough.
+
+**Session wrap-up:** run `/handoff` (project skill) to write the durable handoff — it updates *this doc* + `DECISIONS.md` at a clean phase boundary, or drops a mid-work cursor into gitignored `docs/HANDOFF.local.md`.

@@ -6,6 +6,11 @@ node_modules/
 # Build / framework output
 dist/
 build/
+
+# SQLite databases (local substrate store — never commit)
+*.db
+*.db-shm
+*.db-wal
 .output/
 .vinxi/
 .tanstack/
@@ -18,6 +23,10 @@ build/
 
 # Local aggregated data (personal — never commit, when it exists)
 src/data/the data file
+
+# Session handoff scratch — mid-work resume cursor written by /handoff.
+# Local-only; the canonical state is START-HERE.md + DECISIONS.md.
+docs/HANDOFF.local.md
 
 # Optional local reference snapshot at repo ROOT (kept out of git).
 # Anchored with a leading slash so it does NOT also ignore docs/reference/

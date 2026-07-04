@@ -9,6 +9,7 @@ import {
   WorkState,
   enumerateSensitive,
   jsonSchemas,
+  maxSensitivity,
   sensitive,
   type SensitiveField,
 } from "../src/contract/index";
@@ -210,7 +211,7 @@ describe("z.toJSONSchema exports are tool-usable", () => {
   });
 
   test("object records expose properties + required", () => {
-    for (const key of ["WorkState", "Handoff", "Breadcrumb"] as const) {
+    for (const key of ["Handoff", "Breadcrumb"] as const) {
       const js = jsonSchemas[key] as JsonSchemaShape;
       expect(js.type).toBe("object");
       expect(js.properties).toBeDefined();
@@ -219,11 +220,26 @@ describe("z.toJSONSchema exports are tool-usable", () => {
     }
   });
 
-  test("required lists a known field", () => {
-    const js = jsonSchemas.WorkState as JsonSchemaShape;
+  test("Handoff required lists a known field", () => {
+    const js = jsonSchemas.Handoff as JsonSchemaShape;
     expect(js.required).toContain("project");
     expect(js.properties).toHaveProperty("machineId");
     expect(js.properties).toHaveProperty("source");
+  });
+
+  // The lane invariant must survive export to JSON Schema (the MCP tool boundary, KTD2) — a .check()
+  // refinement would be dropped by z.toJSONSchema; the discriminated union is representable (adversarial G1).
+  test("WorkState JSON Schema encodes the lane invariant as oneOf", () => {
+    const js = jsonSchemas.WorkState as { oneOf?: JsonSchemaShape[] };
+    expect(Array.isArray(js.oneOf)).toBe(true);
+    expect(js.oneOf).toHaveLength(2);
+    for (const variant of js.oneOf!) {
+      expect(variant.type).toBe("object");
+      expect(variant.properties).toHaveProperty("project");
+      expect(variant.required).toContain("lane");
+    }
+    // raw ⇒ non-empty rawTrailTail is enforced at the boundary, not just at zod parse.
+    expect(JSON.stringify(js)).toContain("minItems");
   });
 });
 
@@ -253,5 +269,57 @@ describe("Inferred wrapper", () => {
 
   test("validates the wrapped value against its inner schema", () => {
     expect(Detected.safeParse({ value: [42], confidence: 0.5, evidence: [] }).success).toBe(false);
+  });
+});
+
+// ── maxSensitivity + capture-time escalation (adversarial U1-F1: don't under-redact secret breadcrumbs) ──
+
+describe("maxSensitivity escalates to the more restrictive level", () => {
+  test("orders secret > personal > path", () => {
+    expect(maxSensitivity("personal", "path")).toBe("personal");
+    expect(maxSensitivity("path", "secret")).toBe("secret");
+    expect(maxSensitivity("secret", "personal")).toBe("secret");
+    expect(maxSensitivity("path", "path")).toBe("path");
+  });
+
+  test("a secret-classified breadcrumb escalates its summary above the schema floor", () => {
+    const secretBc = { ...breadcrumb, sensitivity: "secret" as const };
+    const summaryFloor = enumerateSensitive(Breadcrumb).find((f) => f.path === "summary")!.level;
+    expect(summaryFloor).toBe("personal"); // the static schema mark under-redacts on its own…
+    // …so the redaction pass must combine it with the record's capture-time classification.
+    expect(maxSensitivity(summaryFloor, secretBc.sensitivity)).toBe("secret");
+  });
+});
+
+// ── WorkState resume-state invariant (adversarial U1-F2: no valid empty work-state) ──
+
+describe("WorkState requires its lane's primary payload", () => {
+  const stateBase = { project: "/Users/jarod/x", ...base, lastActivity: 1_720_000_000_000 };
+
+  test("curated without a handoff is rejected", () => {
+    expect(WorkState.safeParse({ ...stateBase, lane: "curated", rawTrailTail: [breadcrumb] }).success).toBe(false);
+  });
+
+  test("raw without a non-empty rawTrailTail is rejected", () => {
+    expect(WorkState.safeParse({ ...stateBase, lane: "raw", handoff }).success).toBe(false);
+    expect(WorkState.safeParse({ ...stateBase, lane: "raw", rawTrailTail: [] }).success).toBe(false);
+  });
+
+  test("valid curated and raw states parse", () => {
+    expect(WorkState.safeParse({ ...stateBase, lane: "curated", handoff }).success).toBe(true);
+    expect(WorkState.safeParse({ ...stateBase, lane: "raw", rawTrailTail: [breadcrumb] }).success).toBe(true);
+  });
+});
+
+// ── Records reject unknown fields (adversarial U1-F3: strictObject aligns with additionalProperties:false) ──
+
+describe("records reject unknown fields (strictObject)", () => {
+  test("an unknown root field fails to parse", () => {
+    expect(Handoff.safeParse({ ...handoff, bogus: 1 }).success).toBe(false);
+    expect(InventoryItem.safeParse({ ...inventoryItem, bogus: 1 }).success).toBe(false);
+  });
+
+  test("an unknown nested field fails to parse", () => {
+    expect(Handoff.safeParse({ ...handoff, cursor: { ...handoff.cursor, bogus: 1 } }).success).toBe(false);
   });
 });

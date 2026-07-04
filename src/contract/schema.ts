@@ -22,6 +22,17 @@ export const Sensitivity = z.enum(SENSITIVITY);
 export type Sensitivity = (typeof SENSITIVITY)[number];
 
 /**
+ * The MORE restrictive of two sensitivity levels, by `Sensitivity.options` order (secret > personal > path).
+ * The redaction pass MUST combine a field's static schema mark with a record's capture-time `sensitivity`
+ * through this — a `Breadcrumb` whose `summary` is schema-marked `personal` but captured as `secret` must
+ * redact as `secret`. Static enumeration alone (`enumerateSensitive`) under-redacts an escalated record.
+ */
+export function maxSensitivity(a: Sensitivity, b: Sensitivity): Sensitivity {
+  const order = Sensitivity.options; // most- to least-restrictive
+  return order.indexOf(a) <= order.indexOf(b) ? a : b;
+}
+
+/**
  * Custom typed registry marking WHICH schemas carry sensitive content, at what level.
  *
  * A registry — not `z.brand()` — is deliberate: branding would make `z.infer` of a marked
@@ -81,7 +92,15 @@ interface ZodDef {
 export function enumerateSensitive(schema: z.ZodType): SensitiveField[] {
   const out: SensitiveField[] = [];
   walk(schema, "", out, new Set());
-  return out;
+  // Dedupe: a union/intersection walk revisits shared sub-schemas (e.g. both work-state variants embed
+  // the same Handoff), so the same (path, level) can surface more than once. Collapse identical marks;
+  // a genuine same-path-different-level (rare) keeps both entries.
+  const seen: SensitiveField[] = [];
+  return out.filter((f) => {
+    if (seen.some((s) => s.path === f.path && s.level === f.level)) return false;
+    seen.push(f);
+    return true;
+  });
 }
 
 function walk(node: z.ZodType, path: string, out: SensitiveField[], seen: Set<z.ZodType>): void {
@@ -188,7 +207,7 @@ const federation = {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** The continuity cursor inside a handoff. */
-export const Cursor = z.object({
+export const Cursor = z.strictObject({
   // Least-curated of the three: an in-flight buffer that can hold a pasted token, a raw command,
   // or an error dump — so it carries the highest redaction obligation.
   inFlight: sensitive(z.string(), "secret"),
@@ -198,7 +217,7 @@ export const Cursor = z.object({
 export type Cursor = z.infer<typeof Cursor>;
 
 /** Curated "pick up here" record, keyed by (project, sessionId) so concurrent sessions never clobber (KTD8). */
-export const Handoff = z.object({
+export const Handoff = z.strictObject({
   project: z.string().min(1),
   sessionId: z.string().min(1),
   ...federation,
@@ -208,13 +227,15 @@ export const Handoff = z.object({
 export type Handoff = z.infer<typeof Handoff>;
 
 /** One captured event on the raw lane. */
-export const Breadcrumb = z.object({
+export const Breadcrumb = z.strictObject({
   id: z.string().min(1),
   project: z.string().min(1),
   sessionId: z.string().min(1),
   ...federation,
   kind: BreadcrumbKind,
-  // Captured event text; defaults to `personal` per KTD2 (escalated at capture via `sensitivity` below).
+  // Captured event text. The schema mark is the FLOOR (`personal`); the record's `sensitivity` field can
+  // escalate it — the redaction pass MUST take `maxSensitivity(schema mark, record.sensitivity)`, or a
+  // secret-classified breadcrumb under-redacts.
   summary: sensitive(z.string(), "personal"),
   ts: epochMs,
   // Capture-time CLASSIFICATION (data) — distinct from the schema-level mark on `summary`.
@@ -222,21 +243,43 @@ export const Breadcrumb = z.object({
 });
 export type Breadcrumb = z.infer<typeof Breadcrumb>;
 
-/** The resume payload `read_work_state` returns: curated handoff primary, raw trail fallback, freshness visible (R1/R5/R6). */
-export const WorkState = z.object({
+/** Fields shared by both work-state variants. */
+const workStateCommon = {
   project: z.string().min(1),
   ...federation,
-  lane: Lane,
   lastActivity: epochMs,
-  handoff: Handoff.optional(),
+};
+
+/** Curated resume state: the handoff is the primary "pick up here" payload (a newer raw trail may ride alongside). */
+const CuratedWorkState = z.strictObject({
+  ...workStateCommon,
+  lane: z.literal("curated"),
+  handoff: Handoff,
   rawTrailTail: z.array(Breadcrumb).optional(),
 });
+
+/** Raw resume state: a non-empty breadcrumb trail is the fallback payload when no curated handoff exists. */
+const RawWorkState = z.strictObject({
+  ...workStateCommon,
+  lane: z.literal("raw"),
+  rawTrailTail: z.array(Breadcrumb).min(1),
+  handoff: Handoff.optional(),
+});
+
+/**
+ * The resume payload `read_work_state` returns (R1/R5/R6). A discriminated union on `lane` makes the
+ * resume-state invariant STRUCTURAL — curated ⇒ handoff, raw ⇒ non-empty trail — so it holds at zod
+ * parse AND is represented in the exported JSON Schema (`oneOf` + `minItems`). That closes the boundary
+ * gap a `.check()` refinement leaves: `z.toJSONSchema` drops custom checks, so the MCP tool schema (KTD2)
+ * would otherwise still accept an empty work-state a reader mistakes for "nothing in flight" (AE1/AE2).
+ */
+export const WorkState = z.discriminatedUnion("lane", [CuratedWorkState, RawWorkState]);
 export type WorkState = z.infer<typeof WorkState>;
 
 /** One observed stack item. `runtime` is the discriminant — kept a plain enum (not a
  *  discriminatedUnion) because every runtime emits an identical shape in slice 1; promote
  *  to a discriminatedUnion only when per-runtime branches diverge (simplicity first). */
-export const InventoryItem = z.object({
+export const InventoryItem = z.strictObject({
   runtime: Runtime,
   kind: ItemKind,
   name: z.string().min(1),
@@ -245,7 +288,7 @@ export const InventoryItem = z.object({
 export type InventoryItem = z.infer<typeof InventoryItem>;
 
 /** Seam #2 sliver: the descriptor parity writes dispatch against, never a hardcoded `~/.claude` path (KTD6). */
-export const RuntimeTarget = z.object({
+export const RuntimeTarget = z.strictObject({
   id: z.string().min(1),
   runtime: Runtime,
   // Filesystem paths — reveal home dir / username, so the whole list is redaction-marked.

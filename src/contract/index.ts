@@ -7,6 +7,7 @@ export {
   sensitivityRegistry,
   sensitive,
   enumerateSensitive,
+  maxSensitivity,
   // Inferred wrapper (decision #13)
   Inferred,
   // Shared vocabulary

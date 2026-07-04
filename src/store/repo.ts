@@ -15,7 +15,7 @@
  * never interleave their statements — there is nothing for WAL's writer lock to contend with.
  */
 import { and, asc, desc, eq, gt, isNotNull } from "drizzle-orm";
-import { WorkState, type Breadcrumb, type Handoff } from "../contract/schema";
+import { WorkState, type Breadcrumb, type Handoff } from "../contract/index";
 import type { Store } from "./db";
 import { accessLog, breadcrumbs, captureCursor, handoffs, projects } from "./schema";
 
@@ -45,8 +45,9 @@ export interface Repo {
   writeCaptureCursor(sourcePath: string, byteOffset: number): Promise<void>;
   /** `null` when the path has never been recorded — distinct from an offset of `0`. */
   readCaptureCursor(sourcePath: string): Promise<number | null>;
-  /** Append one row to `access_log`. This is the ONLY thing that writes to it — see the module
-   *  header on why it is never auto-invoked from inside a read/write method above. */
+  /** Append one row to `access_log` — the ONLY writer (architecture decision #4). Read/write methods
+   *  never auto-log here: the hit rate must measure harness CONSUMPTION, so OS-internal capture must
+   *  not inflate it (the auto-log wrapper is deferred to the U4 tool choke-point). */
   logAccess(entry: AccessLogEntry): Promise<void>;
   /** Fraction of distinct sessions that consumed the store through a logged tool call. See the
    *  method body for the exact ratio and its documented edge cases. */

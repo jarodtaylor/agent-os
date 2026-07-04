@@ -12,6 +12,7 @@
  * `Date` on read, which fails the contract's `z.number().int()` at `WorkState.parse()` in repo.ts.
  */
 import { integer, primaryKey, sqliteTable, text } from "drizzle-orm/sqlite-core";
+import type { BreadcrumbKind, ItemKind, Runtime, Sensitivity, Source } from "../contract/index";
 
 /**
  * Registry of known project keys. Never written to directly — `repo.ts`'s `writeHandoff` and
@@ -37,7 +38,7 @@ export const handoffs = sqliteTable(
     project: text("project").notNull(),
     sessionId: text("session_id").notNull(),
     machineId: text("machine_id").notNull(),
-    source: text("source").notNull(),
+    source: text("source").$type<Source>().notNull(),
     // The Cursor's three fields, flattened (decision #3) — `inFlight` is the secret-sensitivity one.
     cursorInFlight: text("cursor_in_flight").notNull(),
     cursorLastDecided: text("cursor_last_decided").notNull(),
@@ -57,11 +58,11 @@ export const breadcrumbs = sqliteTable("breadcrumbs", {
   project: text("project").notNull(),
   sessionId: text("session_id").notNull(),
   machineId: text("machine_id").notNull(),
-  source: text("source").notNull(),
-  kind: text("kind").notNull(),
+  source: text("source").$type<Source>().notNull(),
+  kind: text("kind").$type<BreadcrumbKind>().notNull(),
   summary: text("summary").notNull(),
   ts: integer("ts").notNull(),
-  sensitivity: text("sensitivity").notNull(),
+  sensitivity: text("sensitivity").$type<Sensitivity>().notNull(),
 });
 
 /**
@@ -71,11 +72,11 @@ export const breadcrumbs = sqliteTable("breadcrumbs", {
 export const inventory = sqliteTable(
   "inventory",
   {
-    runtime: text("runtime").notNull(),
-    kind: text("kind").notNull(),
+    runtime: text("runtime").$type<Runtime>().notNull(),
+    kind: text("kind").$type<ItemKind>().notNull(),
     name: text("name").notNull(),
     machineId: text("machine_id").notNull(),
-    source: text("source").notNull(),
+    source: text("source").$type<Source>().notNull(),
   },
   (table) => [primaryKey({ columns: [table.runtime, table.kind, table.name, table.machineId] })],
 );

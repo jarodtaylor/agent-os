@@ -97,6 +97,45 @@ describe("migration bootstrap", () => {
     const row = opened.db.$client.query("PRAGMA journal_mode").get() as { journal_mode: string };
     expect(row.journal_mode.toLowerCase()).toBe("wal");
   });
+
+  test("reopening an already-migrated db is a no-op that preserves data (migrate idempotency)", async () => {
+    const path = join(root, "reopen.db");
+    const first = openDb(path);
+    try {
+      await createRepo(first.db).writeHandoff(makeHandoff({ project: "/p/reopen", sessionId: "s1" }));
+    } finally {
+      first.close();
+    }
+    // Reopening runs migrate() again against the same file — it must NOT re-run 0000 (drizzle keys
+    // applied migrations off __drizzle_migrations) nor throw "table already exists"; the row survives.
+    const second = openDb(path);
+    try {
+      const state = await createRepo(second.db).readWorkState("/p/reopen");
+      expect(state?.lane).toBe("curated");
+    } finally {
+      second.close();
+    }
+  });
+});
+
+// ── openDb guards (fail-closed on unusable paths) ─────────────────────────────
+
+describe("openDb guards", () => {
+  test("rejects ':memory:' — WAL and the concurrency guarantees are a no-op there", () => {
+    expect(() => openDb(":memory:")).toThrow(/real file path/);
+  });
+
+  test("creates a missing parent directory instead of throwing on a first-run path", () => {
+    const nested = join(root, "deep", "nested", "dir", "store.db");
+    expect(existsSync(nested)).toBe(false);
+    const opened = openDb(nested); // parent dirs don't exist yet — openDb must mkdir -p them
+    try {
+      expect(existsSync(nested)).toBe(true);
+      expect(opened.db.select().from(projectsTable).all()).toEqual([]); // and it's a working db
+    } finally {
+      opened.close();
+    }
+  });
 });
 
 // ── Scenario 1: handoff write→read round-trip ─────────────────────────────────
@@ -182,6 +221,23 @@ describe("scenario 4 — lane/freshness derivation", () => {
     if (state!.lane === "curated") {
       expect(state!.handoff).toEqual(handoff);
       expect(state!.rawTrailTail?.map((b) => b.summary)).toEqual(["after 1", "after 2"]);
+    }
+  });
+
+  test("AE2 boundary: a breadcrumb whose ts EQUALS the handoff ts is excluded (strict gt, not gte)", async () => {
+    const project = "/Users/jarod/ae2-boundary";
+    const handoff = makeHandoff({ project, sessionId: "s1", ts: 1000 });
+    await repo.writeHandoff(handoff);
+    // Same ts as the handoff: the strict `ts > handoff.ts` filter must NOT surface it — a gt()->gte()
+    // flip would silently pull the handoff's own moment into the "newer activity" tail. Only the
+    // strictly-newer crumb rides along.
+    await repo.writeBreadcrumb(makeBreadcrumb({ project, ts: 1000, summary: "exactly at handoff ts" }));
+    await repo.writeBreadcrumb(makeBreadcrumb({ project, ts: 1001, summary: "one ms newer" }));
+
+    const state = await repo.readWorkState(project);
+    expect(state!.lane).toBe("curated");
+    if (state!.lane === "curated") {
+      expect(state!.rawTrailTail?.map((b) => b.summary)).toEqual(["one ms newer"]);
     }
   });
 

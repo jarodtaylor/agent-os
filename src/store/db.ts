@@ -10,7 +10,8 @@
 import { Database } from "bun:sqlite";
 import { drizzle } from "drizzle-orm/bun-sqlite";
 import { migrate } from "drizzle-orm/bun-sqlite/migrator";
-import { join } from "node:path";
+import { mkdirSync } from "node:fs";
+import { dirname, join } from "node:path";
 import * as schema from "./schema";
 
 // Resolved relative to THIS file (Bun's `import.meta.dir`), not `process.cwd()`, so `openDb()`
@@ -26,13 +27,21 @@ export interface OpenedDb {
 }
 
 /**
- * Open (creating if absent) the sqlite file at `path`, enable WAL + a busy timeout on the RAW
- * client, then bring the schema up to date via the committed migrations.
+ * Open (creating the file and its parent dir if absent) the sqlite db at `path`, enable WAL + a
+ * busy timeout on the RAW client, then bring the schema up to date via the committed migrations.
  *
- * WAL is a no-op on `:memory:` — callers that need the WAL/concurrency guarantees (this store
- * always does, in production) MUST pass a real file path, never `:memory:`.
+ * `:memory:` is rejected, not merely discouraged: `PRAGMA journal_mode=WAL` is a silent no-op on an
+ * in-memory db, so an in-memory store would hand back the WAL/concurrency guarantees the rest of the
+ * store's contract assumes without actually having them — fail closed instead.
  */
 export function openDb(path: string): OpenedDb {
+  if (path === ":memory:") {
+    throw new Error("openDb requires a real file path: WAL and the store's concurrency guarantees are a no-op on ':memory:'");
+  }
+  // bun:sqlite won't create missing parent directories, so a first-run data-dir path would throw at
+  // `new Database` before the store ever opens. Create the parent up front (no-op if it exists).
+  mkdirSync(dirname(path), { recursive: true });
+
   const sqlite = new Database(path);
   sqlite.exec("PRAGMA journal_mode = WAL;");
   sqlite.exec("PRAGMA busy_timeout = 5000;");

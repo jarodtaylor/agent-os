@@ -739,4 +739,23 @@ describe("K — extractor/contract failures abort the file pass, cursor un-advan
     expect(written).toBeGreaterThan(0); // reset to 0 + re-tailed, NOT silently skipped past
     expect((await summaries()).some((s) => s.includes("completely different"))).toBe(true);
   });
+
+  // OUT OF CONTRACT (append-only violated) — documents the U5-R2 residual, NOT a fix. The no-lost-crumbs
+  // guarantee is scoped to append-only inputs, which Claude Code satisfies (per-session files only grow;
+  // --resume copies events verbatim to a NEW path). This locks the KNOWN first-write-wins behavior so a future
+  // change to the store's ON CONFLICT DO NOTHING is forced to revisit U5-R2.
+  test("[out-of-contract] a same-UUID in-place rewrite is first-write-wins — the rewrite is NOT reflected", async () => {
+    const UUID = "reused-uuid-1";
+    const path = writeJsonl("t.jsonl", [userPrompt("ORIGINAL content", { uuid: UUID })]);
+    expect(await tailFile(deps(), path)).toBe(1);
+    // Same uuid, different + longer content, rewritten in place. The boundary check DETECTS it and re-tails
+    // from 0 — but the re-derived crumb id (from the reused uuid) collides with the first row, so the store's
+    // per-id idempotent append keeps ORIGINAL. (A real generation-aware fix at U8 would write a fresh row.)
+    writeFileSync(path, `${JSON.stringify(userPrompt("REWRITTEN much longer different brand-new content here", { uuid: UUID }))}\n`);
+    await tailFile(deps(), path);
+    const trail = await summaries();
+    expect(trail.length).toBe(1); // same id → no new row written
+    expect(trail[0]).toContain("ORIGINAL"); // first-write-wins: the stale row is kept
+    expect(trail[0]).not.toContain("REWRITTEN");
+  });
 });

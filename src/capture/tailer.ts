@@ -65,7 +65,17 @@ const NEWLINE = 0x0a; // '\n'
  *    re-derives the identical crumbs next pass; the store's per-id idempotent append collapses the retry —
  *    no duplicate rows.
  *  - RESILIENT. A malformed JSON line is skipped without killing the tail, and the cursor still advances
- *    past it (re-reading a byte-for-byte-identical bad line would only fail again).
+ *    past it (re-reading a byte-for-byte-identical bad line would only fail again). An extractor throw or a
+ *    contract-invalid crumb, by contrast, is a bug on a VALID line — it aborts the pass before the cursor
+ *    advances (retried after the fix), so it is never silently skipped.
+ *
+ * SCOPE — the no-lost-crumbs guarantee holds for APPEND-ONLY inputs, which Claude Code transcripts are (per-
+ * session files that only grow; `--resume` copies events verbatim to a NEW path). Truncation and a rewrite
+ * that shifts the byte at `cursor-1` off its newline are detected and re-tailed. But a same-SHAPE, same-UUID
+ * in-place rewrite (different content, identical event ids, a `\n` still at `cursor-1`) is OUT OF CONTRACT:
+ * even when re-tailed, the store's per-id idempotent append keeps the first-written row (first-write-wins), so
+ * the rewritten content is not reflected. That case cannot occur for Claude Code; full rewrite/rotation safety
+ * (generation-aware crumb identity) is the Codex/U8 concern tracked in open-findings U5-R2.
  */
 export async function tailFile(deps: TailerDeps, sourcePath: string): Promise<number> {
   // machineId is stamped onto EVERY crumb (contract federation, min-length 1). Guard this global precondition

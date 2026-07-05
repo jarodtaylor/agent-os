@@ -134,16 +134,22 @@ keyset `(ts, id)`: lossless AND hard-bounded.)
   behavior-preserving simplify pass. **Promotion trigger:** live tailer / daemon wiring (U6 / boot sequence) —
   land the bounded-chunk read there. Surfaced by the U5 ce-simplify efficiency reviewer; conscious defer.
 
-- [~] **U5-R2 — [low] A same-SHAPE transcript rewrite between passes evades the line-boundary guard** (`src/capture/tailer.ts`).
-  Two guards now catch a rewritten transcript: `start > size` (a shrink) and the line-boundary check (byte
-  `cursor-1` must be the `\n` of the last complete line, else the file was rewritten → reset to 0). Together
-  they catch a truncation and any rewrite that shifts the byte at `cursor-1` off a newline — essentially every
-  real rotation/edit. The RESIDUAL: a same-SHAPE rewrite that still leaves a `\n` at exactly `cursor-1` (the new
-  content happens to carry a line boundary there too) resumes at a stale offset and skips the rewritten prefix.
-  Cannot fire for Claude Code (per-session transcripts are append-only — verified), so it is dead for U5; it
-  becomes live for the Codex/U8 extractor if those logs rotate/rewrite in place. Full fix: persist an inode +
-  first-N-bytes-hash fingerprint beside the offset and reset on change. **Promotion trigger:** U8/Codex capture
-  over a surface that rewrites/rotates in place. Surfaced by the U5 adversarial + Codex cross-model reviews.
+- [~] **U5-R2 — [low] In-place rewrite safety (same-shape detection + same-UUID identity) — OUT OF CONTRACT for U5, a U8 concern** (`src/capture/tailer.ts` + the store's per-id append).
+  The tailer's no-lost-crumbs guarantee is scoped to APPEND-ONLY inputs (documented in `tailFile`). Two guards
+  catch a rewritten transcript — `start > size` (a shrink) and the line-boundary check (byte `cursor-1` must be
+  the last complete line's `\n`, else reset to 0) — covering truncation and any rewrite that shifts the byte at
+  `cursor-1`. TWO residuals remain, both requiring generation-aware identity, both raised by the Codex cross-
+  model gate: (1) a same-SHAPE rewrite that still leaves a `\n` at `cursor-1` evades detection; (2) even when a
+  rewrite IS detected and re-tailed, if it preserved event UUIDs the re-derived crumbs collide on id with the
+  old rows and the store's `ON CONFLICT DO NOTHING` keeps the first-written content (first-write-wins), so the
+  rewrite isn't reflected. NEITHER can fire for Claude Code: transcripts are append-only and `--resume` copies
+  events VERBATIM to a NEW path (identical content — no divergence). Full fix (at U8, where rotation is real):
+  persist a per-file generation fingerprint (inode + first-N-bytes hash) beside the cursor, reset on change, and
+  fold the generation into crumb identity so a rewritten generation writes fresh rows. Deliberately NOT fixed in
+  U5 — the fix would touch U2's `ON CONFLICT DO NOTHING`, the same idempotency primitive the at-least-once retry
+  depends on, to close a case CC cannot produce (advisor-affirmed: fixing now is riskier than deferring).
+  **Promotion trigger:** U8/Codex capture over a rotating/rewriting surface. Surfaced + re-flagged by the Codex
+  cross-model gate (2× no-ship); overridden as a scoped defer under the narrowed append-only invariant.
 
 ---
 

@@ -298,6 +298,52 @@ describe("scenario 7 — dev=prod: bun run src/server/index.ts", () => {
   );
 });
 
+// ── Single-instance boot: a second daemon on the same data dir refuses to start ──
+
+describe("single-instance boot — one daemon per data dir, across different ports", () => {
+  test(
+    "a second boot (same dataDir, DIFFERENT port) exits non-zero and never clobbers the first token",
+    async () => {
+      const dataRoot = mkdtempSync(join(tmpdir(), "single-boot-"));
+      const dataDir = join(dataRoot, "agent-os");
+      const indexPath = join(import.meta.dir, "..", "src", "server", "index.ts");
+
+      const portA = await getFreePort();
+      const procA = Bun.spawn({
+        cmd: [process.execPath, "run", indexPath],
+        env: { ...process.env, AGENT_OS_PORT: String(portA), AGENT_OS_DATA_DIR: dataDir },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+
+      try {
+        await waitForHealth(portA);
+        const tokenA = readFileSync(tokenPath(dataDir), "utf8");
+
+        // Second instance: SAME dataDir, DIFFERENT port. Bind-before-write can't catch this (no
+        // EADDRINUSE) — the single-instance lock must. It should refuse and exit non-zero.
+        const portB = await getFreePort();
+        const procB = Bun.spawn({
+          cmd: [process.execPath, "run", indexPath],
+          env: { ...process.env, AGENT_OS_PORT: String(portB), AGENT_OS_DATA_DIR: dataDir },
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        const exitB = await procB.exited;
+        expect(exitB).not.toBe(0); // couldn't acquire the single-instance lock
+
+        // The live instance's token is untouched — B never published over it.
+        expect(readFileSync(tokenPath(dataDir), "utf8")).toBe(tokenA);
+      } finally {
+        procA.kill();
+        await procA.exited;
+        rmSync(dataRoot, { recursive: true, force: true });
+      }
+    },
+    15_000,
+  );
+});
+
 /** Ask the OS for a free port by briefly binding to port 0, then release it for the real spawn. */
 async function getFreePort(): Promise<number> {
   const probe = Bun.serve({ port: 0, fetch: () => new Response() });

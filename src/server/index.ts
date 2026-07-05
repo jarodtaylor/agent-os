@@ -18,6 +18,7 @@ import { openDb } from "../store/db";
 import { createRepo } from "../store/repo";
 import { createRoutes } from "./routes";
 import { generateToken, securityGate, writeTokenFile } from "./security";
+import { acquireSingleInstanceLock } from "./single-instance";
 
 const PORT = ((): number => {
   const n = Number(process.env.AGENT_OS_PORT);
@@ -30,6 +31,11 @@ const PORT = ((): number => {
 const dataDir = resolveDataDir();
 const { db } = openDb(dbPath(dataDir));
 const repo = createRepo(db);
+
+// One daemon per data dir (KTD9: one SQLite writer BY CONSTRUCTION). This is DATA-DIR-scoped, so it
+// stops a second instance on a DIFFERENT port from clobbering the token or running a second writer over
+// one store — the gap the same-port bind-before-write ordering below cannot cover on its own.
+acquireSingleInstanceLock(dataDir);
 
 const token = generateToken();
 const gate = securityGate({ token, port: PORT });

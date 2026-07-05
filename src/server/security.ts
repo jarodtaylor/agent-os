@@ -117,7 +117,7 @@ export function generateToken(): string {
  * — e.g. in a test that writes a token without ever opening a store.
  */
 export function writeTokenFile(dataDir: string, token: string): void {
-  mkdirSync(dataDir, { recursive: true });
+  mkdirSync(dataDir, { recursive: true, mode: 0o700 }); // owner-only — same rationale as store/db.ts#openDb
   const path = tokenPath(dataDir);
   rmSync(path, { force: true });
   writeFileSync(path, token, { mode: 0o600 });

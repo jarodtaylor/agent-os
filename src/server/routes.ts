@@ -28,7 +28,10 @@ export function createRoutes({ repo, gate }: RouteDeps) {
         // reply. No brain data comes back to the caller either way (non-sensitive by design).
         await repo.hitRate();
         return c.json({ ok: true, store: "reachable", ts: Date.now() });
-      } catch {
+      } catch (err) {
+        // Fail closed (503, never a false ok:true) AND leave a server-side breadcrumb — a persistently
+        // unreachable store should surface in the process log, not vanish into a silent catch.
+        console.error("[agent-os] /status store probe failed:", err);
         return c.json({ ok: false, store: "unreachable", ts: Date.now() }, 503);
       }
     });

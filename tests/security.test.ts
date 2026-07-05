@@ -228,7 +228,10 @@ describe("scenario 7 — dev=prod: bun run src/server/index.ts", () => {
     "the spawned server serves /health and gates /status, with no bundle/dev-server involved",
     async () => {
       const port = await getFreePort();
-      const dataDir = mkdtempSync(join(tmpdir(), "server-boot-"));
+      // Point the boot at a dir that does NOT exist yet, so the server itself must create it — that's
+      // what makes the 0700 assertion below meaningful (mkdtemp would pre-create it at 0700 and mask it).
+      const dataRoot = mkdtempSync(join(tmpdir(), "server-boot-"));
+      const dataDir = join(dataRoot, "agent-os");
       const indexPath = join(import.meta.dir, "..", "src", "server", "index.ts");
 
       const proc = Bun.spawn({
@@ -247,10 +250,21 @@ describe("scenario 7 — dev=prod: bun run src/server/index.ts", () => {
 
         const status = await fetch(`http://127.0.0.1:${port}/status`); // no token
         expect(status.status).toBe(403);
+
+        // A gated request WITH the current token, over the REAL loopback socket — exercises the real
+        // getConnInfo socket-peer path (127.0.0.1 passes the loopback check) that the in-memory
+        // app.request() tests can't reach, and confirms the loopback bind actually serves gated traffic.
+        const token = readFileSync(tokenPath(dataDir), "utf8");
+        const authed = await fetch(`http://127.0.0.1:${port}/status`, { headers: { "x-agent-os-token": token } });
+        expect(authed.status).toBe(200);
+        expect(await authed.json()).toMatchObject({ ok: true, store: "reachable" });
+
+        // The data dir the boot created holds the brain + token — it must be owner-only (0700).
+        expect(statSync(dataDir).mode & 0o777).toBe(0o700);
       } finally {
         proc.kill();
         await proc.exited;
-        rmSync(dataDir, { recursive: true, force: true });
+        rmSync(dataRoot, { recursive: true, force: true });
       }
     },
     15_000,

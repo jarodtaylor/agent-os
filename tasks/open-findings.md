@@ -60,6 +60,26 @@ promotion trigger so the right fix lands when its usage model is real, not specu
 
 ---
 
+## Deferred — U3 server residuals (2026-07-04, ce-code-review incl. a Codex cross-model pass)
+
+Surfaced by the U3 review (security + adversarial at session tier, correctness/reliability/standards, plus
+a Codex gpt-5.5 adversarial pass). The headline finds — 0.0.0.0 bind → loopback-only; world-readable data
+dir → 0700 dir; unlogged /status catch — were FIXED in the branch. These two are deferred with triggers.
+
+- [~] **U3-R1 — [note → U6] Concurrent-boot token clobber** (`src/server/index.ts`). `writeTokenFile` runs
+  BEFORE the port bind, so if two `bun run index.ts` race, the loser (crashes EADDRINUSE) can still write
+  the token file LAST — leaving `agent-os.token` pointing at the dead process while the live server accepts
+  only its own in-memory token, so every same-machine CLI/hook call 403s until restart. Harmless in-slice:
+  nothing reads the token yet, and U15's launchd runs a single instance. **Promotion trigger:** U6 (the
+  first real token consumer) — restructure to bind-THEN-write (an explicit `Bun.serve` after a successful
+  listen), or rely on launchd single-instance (KeepAlive) and document the invariant.
+- [~] **U3-R2 — [low] `AGENT_OS_PORT=0` silently coerced to the default** (`index.ts`: `Number(env) || 4319`
+  treats `0`/NaN as falsy). A caller asking for an ephemeral port gets the fixed default. Benign — a
+  discoverable daemon needs a KNOWN port for the token/Host contract — but silent. **Promotion trigger:** if
+  an ephemeral-port mode is ever wanted, parse the env explicitly instead of `|| default`.
+
+---
+
 ## Fixed 2026-07-04 — Codex adversarial review (3 passes) + ce-code-review, folded into this branch
 
 **Contract (`src/contract/schema.ts`) — 2nd/3rd adversarial passes:**

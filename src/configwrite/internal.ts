@@ -2,9 +2,10 @@
  * configwrite internal foundation: the format vocabulary + where backups and the undo journal live.
  *
  * Both the mutation engine (`engine.ts`) and the undo journal (`undo.ts`) depend on these, so they
- * live in a dependency-free module. That keeps the import graph a strict DAG —
- * `engine → {internal, undo}`, `undo → internal`, `internal → paths` — with no cycle, and it keeps
- * `engine.ts` from having to reach into `undo.ts` for the data-dir location (an inverted dependency).
+ * live in a low-level module that depends on neither of them — its own only dependency is the leaf
+ * `paths` module. That keeps the import graph a strict DAG — `engine → {internal, undo}`,
+ * `undo → internal`, `internal → paths` — with no cycle, and it keeps `engine.ts` from having to
+ * reach into `undo.ts` for the data-dir location (an inverted dependency).
  */
 import { createHash } from "node:crypto";
 import { join } from "node:path";

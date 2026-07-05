@@ -39,8 +39,11 @@ export function openDb(path: string): OpenedDb {
     throw new Error("openDb requires a real file path: WAL and the store's concurrency guarantees are a no-op on ':memory:'");
   }
   // bun:sqlite won't create missing parent directories, so a first-run data-dir path would throw at
-  // `new Database` before the store ever opens. Create the parent up front (no-op if it exists).
-  mkdirSync(dirname(path), { recursive: true });
+  // `new Database` before the store ever opens. Create the parent up front (no-op if it exists),
+  // OWNER-ONLY (0700): this dir holds the brain (store.db carries secret-marked content) and the
+  // security token, so no other local user may traverse in. 0700's owner bits survive any umask, and
+  // a 0700 dir protects every file inside it regardless of the files' own modes.
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
 
   const sqlite = new Database(path);
   try {

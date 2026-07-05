@@ -34,6 +34,11 @@ const app = createRoutes({ repo, gate });
 // needed. Hono's `app.fetch` is a bound arrow-function property, so handing it off by reference
 // here (rather than `export default app`) is safe and is how `port` gets configured alongside it.
 export default {
+  // Bind loopback-only. Bun.serve defaults to 0.0.0.0 (ALL interfaces), which would make even the
+  // gate-exempt GET /health reachable off-box on an untrusted LAN — but the whole server is meant to
+  // be local-only (KTD9). 127.0.0.1 is the IPv4 loopback macOS callers reach via `127.0.0.1`/`localhost`;
+  // the gate's Host allowlist still lists `[::1]` as defense in depth for the Host header itself.
+  hostname: "127.0.0.1",
   port: PORT,
   fetch: app.fetch,
 };

@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { eq } from "drizzle-orm";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { Breadcrumb, Handoff } from "../src/contract/index";
 import { openDb, type OpenedDb } from "../src/store/db";
 import { createRepo, type Repo } from "../src/store/repo";
@@ -131,6 +131,9 @@ describe("openDb guards", () => {
     const opened = openDb(nested); // parent dirs don't exist yet — openDb must mkdir -p them
     try {
       expect(existsSync(nested)).toBe(true);
+      // Created owner-only (0700): the dir holds the brain (store.db has secret-marked content), so no
+      // other local user may traverse in. A 0700 dir protects every file inside it whatever their modes.
+      expect(statSync(dirname(nested)).mode & 0o777).toBe(0o700);
       expect(opened.db.select().from(projectsTable).all()).toEqual([]); // and it's a working db
     } finally {
       opened.close();

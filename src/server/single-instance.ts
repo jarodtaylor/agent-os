@@ -8,10 +8,13 @@
  * (b) run a second writer over one SQLite store. This lock is DATA-DIR-scoped, not port-scoped, so it
  * closes both: a second instance for a data dir already owned by a live process refuses to start.
  *
- * It is a personal-machine advisory lock (a pid file), not a distributed lock: it reliably catches the
- * real case — "I started a second instance while the first is running." A lock left by a CRASHED holder
- * is reclaimed (its pid is dead). The only residual is pid recycling or a crash in the microsecond
- * between create-and-write-pid; both are recoverable by deleting `agent-os.lock` by hand.
+ * It is a personal-machine advisory pid-file lock, not a distributed lock: it reliably catches the
+ * COMMON case — "I started a second instance while the first is running" — and reclaims a lock left by a
+ * CRASHED holder (dead pid). Its known edges — a stale-reclaim TOCTOU under simultaneous crash-recovery,
+ * and a pid-recycle false-positive that could refuse a legitimate restart — are a TRACKED FAST-FOLLOW: a
+ * real `flock` OS lock (held on an fd, auto-releasing on process exit, no pid games) lands in U15
+ * alongside launchd supervision. See open-findings U3-R3. Until then launchd runs a single supervised
+ * instance, and both edges are recoverable by deleting `agent-os.lock`.
  */
 import { closeSync, openSync, readFileSync, rmSync, writeSync } from "node:fs";
 import { join } from "node:path";

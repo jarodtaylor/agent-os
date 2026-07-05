@@ -76,6 +76,16 @@ dir → 0700 dir; unlogged /status catch — were FIXED in the branch. These two
   `Number(env) || 4319`, which silently defaulted only on `0`/NaN and passed negative / out-of-range values
   through to an opaque `Bun.serve` failure. Now any invalid value (unset, non-numeric, `<= 0`, `> 65535`)
   falls back to the default. (CodeRabbit + the R2 note converged.)
+- [~] **U3-R3 — [→ U15] Single-instance lock: pid-file → real `flock` OS lock** (`src/server/single-instance.ts`;
+  Codex 3rd adversarial pass; **GH issue #5**). The dataDir pid-file lock catches the COMMON double-run and
+  reclaims a crashed holder's stale lock, and the boot now acquires it BEFORE `openDb` touches the store
+  (that ordering bug was FIXED). Two edges remain, inherent to a pid-file: a stale-reclaim TOCTOU under
+  simultaneous crash-recovery, and a pid-recycle false-positive that could refuse a legitimate restart. Both
+  are rare on a personal launchd-supervised daemon and recoverable (`rm agent-os.lock`). **CTO call — pragmatic
+  now, tracked fast-follow, NOT silent debt:** launchd (U15) is the production single-instance guarantee,
+  nothing reads the token until U6, and a real `flock` lock means introducing Bun FFI (a focused change whose
+  natural home is U15, where launchd + the lock are one design). **Promotion trigger:** land the flock lock in
+  U15, NO LATER than before U6 ships a real token consumer. Tracked: GH issue #5.
 
 ---
 

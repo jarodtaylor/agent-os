@@ -13,7 +13,7 @@
  * one no listening server accepts. `openDb` (which creates the 0700 dataDir) runs first so the token
  * has a home to land in.
  */
-import { dbPath, resolveDataDir } from "../paths";
+import { dbPath, ensureDataDir, resolveDataDir } from "../paths";
 import { openDb } from "../store/db";
 import { createRepo } from "../store/repo";
 import { createRoutes } from "./routes";
@@ -29,13 +29,19 @@ const PORT = ((): number => {
 })();
 
 const dataDir = resolveDataDir();
+
+// Create the data dir (owner-only), THEN take the single-instance lock, THEN open the store. The order
+// is load-bearing: openDb opens SQLite + runs migrations, so a rejected second instance must be turned
+// away BEFORE it can touch or migrate the shared store. The lock is DATA-DIR-scoped (not port-scoped),
+// so it also stops a second instance on a DIFFERENT port from clobbering the token / running a second
+// writer (KTD9: one writer by construction). NOTE: this pid-file lock catches the common double-run; its
+// crash-recovery + pid-recycle edges are a tracked fast-follow — a real flock OS lock landing in U15
+// (open-findings U3-R3).
+ensureDataDir(dataDir);
+acquireSingleInstanceLock(dataDir);
+
 const { db } = openDb(dbPath(dataDir));
 const repo = createRepo(db);
-
-// One daemon per data dir (KTD9: one SQLite writer BY CONSTRUCTION). This is DATA-DIR-scoped, so it
-// stops a second instance on a DIFFERENT port from clobbering the token or running a second writer over
-// one store — the gap the same-port bind-before-write ordering below cannot cover on its own.
-acquireSingleInstanceLock(dataDir);
 
 const token = generateToken();
 const gate = securityGate({ token, port: PORT });

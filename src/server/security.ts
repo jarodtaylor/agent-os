@@ -24,11 +24,11 @@
  * can read the CURRENT token; a prior boot's token is never honored (scenario 4).
  */
 import { randomUUID, timingSafeEqual } from "node:crypto";
-import { chmodSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { renameSync, rmSync, writeFileSync } from "node:fs";
 import type { Context, MiddlewareHandler } from "hono";
 import { getConnInfo } from "hono/bun";
 import type { ConnInfo } from "hono/conninfo";
-import { tokenPath } from "../paths";
+import { ensureDataDir, tokenPath } from "../paths";
 
 const TOKEN_HEADER = "x-agent-os-token";
 
@@ -113,10 +113,7 @@ export function generateToken(): string {
  * store — without leaning on the boot ordering in `server/index.ts`.
  */
 export function writeTokenFile(dataDir: string, token: string): void {
-  // Owner-only, same rationale as store/db.ts#openDb — and chmod after mkdir because mkdirSync's
-  // `mode` only applies on CREATE, so a dir reused from a prior run must be tightened too.
-  mkdirSync(dataDir, { recursive: true, mode: 0o700 });
-  chmodSync(dataDir, 0o700);
+  ensureDataDir(dataDir); // owner-only 0700 (create + tighten a reused dir) — see ../paths
   const path = tokenPath(dataDir);
   // Atomic publish: write a fresh 0600 temp file, then rename it over the target. `rename` is atomic,
   // so a concurrent reader never observes a partial or empty token, and the result adopts the temp's

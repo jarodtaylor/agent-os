@@ -100,17 +100,17 @@ coupling (→ best-effort at all 3 sites), the `query_breadcrumbs` same-`ts` pag
 completion), the `/work-state` bare-text-500 contract (→ `/status`-style JSON 500), and the `LEAF_TYPES`/
 `ZodDef` duplication (→ shared `contract/zod-introspect.ts`). One finding is deferred with a trigger.
 
-- [~] **U4-R1 — [med, DORMANT] `hitRate` compares two disjoint sessionId namespaces** (`repo.ts`, adversarial).
-  `hitRate` = `consumed / (consumed ∪ breadcrumbSessions)`, where `consumed` = distinct `access_log.sessionId`
-  (written from the MCP transport UUID `extra.sessionId`) and `breadcrumbSessions` = distinct
-  `breadcrumbs.sessionId` (in production, U5's tailer harness session id) — DIFFERENT namespaces that never
-  intersect, so the numerator can't overlap the denominator population and the ratio measures nothing
-  coherent. **Dormant:** `/status` calls `hitRate()` only as a store-reachability probe and DISCARDS the
-  value; nothing surfaces it, so real impact today is zero. This qualifies the U2-R5 "stays global" decision:
-  the ratio isn't just unscoped, it's incoherent until the identity namespaces are reconciled. **Promotion
-  trigger:** before ANY consumer reads `hitRate` (the U11 view / a metrics surface) AND once U5 fixes the
-  breadcrumb `sessionId` namespace — reconcile ONE canonical session identity across the MCP session and the
-  tailer (or scope the ratio to a single writer), then it becomes measurable.
+- [~] **U4-R1 — [med, DORMANT] `hitRate` mixes session IDs from different producers** (`repo.ts`, adversarial).
+  Orthogonal to U2-R5's decision — that settled the ratio's SCOPE (global, not per-project); this is about the
+  session-id PRODUCERS. `hitRate` = `consumed / (consumed ∪ breadcrumbSessions)`, where `consumed` = distinct
+  `access_log.sessionId` (written from the MCP transport UUID `extra.sessionId`) and `breadcrumbSessions` =
+  distinct `breadcrumbs.sessionId` (in production, U5's tailer harness session id). The two producers mint IDs
+  in different namespaces, so the numerator can't overlap the breadcrumb population — the global ratio U2-R5
+  chose won't be MEASURABLE until the producers agree on one identity. **Dormant:** `/status` calls `hitRate()`
+  only as a store-reachability probe and DISCARDS the value; nothing surfaces it, so real impact today is zero.
+  **Promotion trigger:** before ANY consumer reads `hitRate` (the U11 view / a metrics surface) AND once U5
+  defines the breadcrumb `sessionId` namespace — reconcile ONE canonical session identity across the MCP
+  session and the tailer (or scope the ratio to a single writer).
 
 **Accepted tradeoff (conscious, not a deferred defect — noted for the PR):** idle eviction can fragment a
 quiet-but-active session into a new `sessionId` on reconnect (continuity is preserved — `readWorkState`

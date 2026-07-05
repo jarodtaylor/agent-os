@@ -34,9 +34,15 @@ import type * as z from "zod";
 import { Sensitivity, maxSensitivity, sensitivityRegistry } from "../contract/index";
 import { LEAF_TYPES, type ZodDef } from "../contract/zod-introspect";
 
-/** The masked-value sentinel. Encodes the effective level (honest signal of what was hidden, no leak). */
-function mask(level: Sensitivity): string {
-  return `[redacted:${level}]`;
+/**
+ * Mask a sensitive value, PRESERVING its shape so the redacted output still satisfies the contract: a
+ * sensitive ARRAY (e.g. `RuntimeTarget.configSurfaces`, marked as a whole) redacts element-wise to an array
+ * of sentinels, not a bare string that would fail re-validation. Scalars → the sentinel string, which
+ * encodes the effective level (an honest signal of WHAT was hidden, without leaking the value).
+ */
+function mask(value: unknown, level: Sensitivity): unknown {
+  const sentinel = `[redacted:${level}]`;
+  return Array.isArray(value) ? value.map(() => sentinel) : sentinel;
 }
 
 /** True when `level` is at least as restrictive as `threshold` (`Sensitivity.options` is most→least). */
@@ -68,7 +74,7 @@ function walk(value: unknown, schema: z.ZodType, recordSensitivity: Sensitivity 
   const meta = sensitivityRegistry.get(schema);
   if (meta) {
     const effective = recordSensitivity ? maxSensitivity(meta.level, recordSensitivity) : meta.level;
-    return atOrAboveThreshold(effective, threshold) ? mask(effective) : value;
+    return atOrAboveThreshold(effective, threshold) ? mask(value, effective) : value;
   }
 
   // 2. Not marked here → recurse by container type, carrying the corresponding sub-value.

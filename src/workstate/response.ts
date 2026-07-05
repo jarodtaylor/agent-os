@@ -78,7 +78,8 @@ export async function readWorkStateResponse(
       ts: opts.now ?? Date.now(),
     });
   } catch (err) {
-    console.error("[agent-os] logAccess failed (read_work_state):", err);
+    // Label with the actual caller — this shared path serves both `read_work_state` and `GET /work-state`.
+    console.error(`[agent-os] logAccess failed (${consumer.tool}):`, err);
   }
   return result;
 }

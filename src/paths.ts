@@ -3,7 +3,8 @@
  * `configwrite/internal.ts` unchanged — the server needs the same dataDir resolution config-write
  * already had, so it now lives in a dependency-free module both sides import from).
  */
-import { chmodSync, mkdirSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -36,6 +37,36 @@ export function dbPath(dataDir: string): string {
 /** Path to the per-boot security token file (see `server/security.ts`), written mode `0600`. */
 export function tokenPath(dataDir: string): string {
   return join(dataDir, "agent-os.token");
+}
+
+/** Path to the persisted machine-id file, written mode `0600`. */
+export function machineIdPath(dataDir: string): string {
+  return join(dataDir, "machine-id");
+}
+
+/**
+ * A STABLE, opaque per-machine id — the federation discriminator stamped onto every record (decision #13).
+ * PERSISTED (unlike the per-boot token) so it survives reboots, and a random UUID rather than
+ * `os.hostname()`: a hostname can carry the user's name (PII), and `machineId` is baked into every
+ * `Handoff`/`Breadcrumb` and returned through the read paths (unredacted — it isn't sensitivity-marked), so
+ * an opaque id federates cleanly without leaking a personal identifier. Minted `0600` on first boot.
+ */
+export function resolveMachineId(dataDir: string): string {
+  const path = machineIdPath(dataDir);
+  try {
+    return readFileSync(path, "utf8").trim();
+  } catch {
+    // First boot (or unreadable): mint + persist. `wx` is an exclusive create — if a concurrent boot won
+    // the race we read theirs instead, though the single-instance lock (U3) already precludes that.
+    ensureDataDir(dataDir);
+    const id = randomUUID();
+    try {
+      writeFileSync(path, id, { mode: 0o600, flag: "wx" });
+      return id;
+    } catch {
+      return readFileSync(path, "utf8").trim();
+    }
+  }
 }
 
 /**

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { Breadcrumb, WorkState } from "../src/contract/index";
+import { Breadcrumb, RuntimeTarget, WorkState } from "../src/contract/index";
 import { redact } from "../src/redact/apply";
 
 const REDACTED_SECRET = "[redacted:secret]";
@@ -106,5 +106,18 @@ describe("redact — policy + safety", () => {
 
   test("fails CLOSED when no union member matches (cannot locate sensitive fields)", () => {
     expect(() => redact({ lane: "bogus" } as unknown as typeof WorkState._output, WorkState)).toThrow();
+  });
+
+  test("masks a sensitive ARRAY element-wise, keeping it schema-valid (RuntimeTarget.configSurfaces)", () => {
+    // configSurfaces is `sensitive(z.array(z.string()), "path")` — marked as a WHOLE. At threshold `path` it
+    // must redact as an ARRAY (element-wise), not a bare string that would fail re-validation.
+    const target = RuntimeTarget.parse({
+      id: "cc", runtime: "claude-code", machineId: "m", source: "agent-os",
+      configSurfaces: ["/Users/jarod/.claude.json", "/Users/jarod/.claude/settings.json"],
+      capabilities: ["skill", "mcp"],
+    });
+    const r = redact(target, RuntimeTarget, { threshold: "path" });
+    expect(r.configSurfaces).toEqual(["[redacted:path]", "[redacted:path]"]);
+    expect(() => RuntimeTarget.parse(r)).not.toThrow(); // still a valid RuntimeTarget
   });
 });

@@ -91,6 +91,34 @@ dir → 0700 dir; unlogged /status catch — were FIXED in the branch. These two
 
 ---
 
+## Deferred — U4 residuals (2026-07-05, ce-code-review: 5 personas + a 3-persona simplify pass)
+
+The U4 review found NO redaction leak (security traced all 5 vectors; secret-level data is airtight) and
+cleared the redaction co-walk, freshness+cap, the deterministic tiebreak, and idle eviction. The real
+findings were FOLDED into the branch: the session-map leak (→ idle-TTL + size-cap eviction), the `logAccess`
+coupling (→ best-effort at all 3 sites), the `query_breadcrumbs` same-`ts` page split (→ boundary-group
+completion), the `/work-state` bare-text-500 contract (→ `/status`-style JSON 500), and the `LEAF_TYPES`/
+`ZodDef` duplication (→ shared `contract/zod-introspect.ts`). One finding is deferred with a trigger.
+
+- [~] **U4-R1 — [med, DORMANT] `hitRate` compares two disjoint sessionId namespaces** (`repo.ts`, adversarial).
+  `hitRate` = `consumed / (consumed ∪ breadcrumbSessions)`, where `consumed` = distinct `access_log.sessionId`
+  (written from the MCP transport UUID `extra.sessionId`) and `breadcrumbSessions` = distinct
+  `breadcrumbs.sessionId` (in production, U5's tailer harness session id) — DIFFERENT namespaces that never
+  intersect, so the numerator can't overlap the denominator population and the ratio measures nothing
+  coherent. **Dormant:** `/status` calls `hitRate()` only as a store-reachability probe and DISCARDS the
+  value; nothing surfaces it, so real impact today is zero. This qualifies the U2-R5 "stays global" decision:
+  the ratio isn't just unscoped, it's incoherent until the identity namespaces are reconciled. **Promotion
+  trigger:** before ANY consumer reads `hitRate` (the U11 view / a metrics surface) AND once U5 fixes the
+  breadcrumb `sessionId` namespace — reconcile ONE canonical session identity across the MCP session and the
+  tailer (or scope the ratio to a single writer), then it becomes measurable.
+
+**Accepted tradeoffs (conscious, not deferred defects — noted for the PR):** idle eviction can fragment a
+quiet-but-active session into a new `sessionId` on reconnect (continuity is preserved — `readWorkState`
+resolves by `ts`, sessionId-agnostic — only KTD8's one-row-per-session cleanliness is relaxed); and a page
+of `query_breadcrumbs` may slightly exceed `DEFAULT_TRAIL_CAP` to complete a same-`ts` boundary group.
+
+---
+
 ## Fixed 2026-07-04 — Codex adversarial review (3 passes) + ce-code-review, folded into this branch
 
 **Contract (`src/contract/schema.ts`) — 2nd/3rd adversarial passes:**

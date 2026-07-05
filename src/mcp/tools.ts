@@ -63,13 +63,22 @@ export function registerBrainTools(server: McpServer, deps: McpDeps): void {
     },
     async ({ project, source, cursor }, extra) => {
       const ts = now();
-      const sessionId = extra.sessionId ?? "unknown-session";
+      // A stateful transport always supplies a session id. If one is somehow absent, FAIL the write rather
+      // than persist under a shared sentinel: two sentinel writes would collide on the (project, sessionId)
+      // upsert key and silently clobber each other. Fail-closed — never reached in the stateful config.
+      const sessionId = extra.sessionId;
+      if (!sessionId) throw new Error("write_handoff requires an MCP session id");
       // U2-R1 (boundary layer 2): re-validate the FULLY-assembled record against the contract before it
-      // reaches the repo — never trust TS types at a write boundary, and this catches a bad server-supplied
-      // field (e.g. an empty sessionId) too.
+      // reaches the repo — never trust TS types at a write boundary.
       const handoff = Handoff.parse({ project, sessionId, machineId: deps.machineId, source, cursor, ts });
       await deps.repo.writeHandoff(handoff);
-      await deps.repo.logAccess({ sessionId, harness: harnessLabel(), tool: "write_handoff", project, ts });
+      // logAccess is best-effort (decision #4): the handoff is already durably committed, so a log failure
+      // must not report the successful write back to the agent as a failure.
+      try {
+        await deps.repo.logAccess({ sessionId, harness: harnessLabel(), tool: "write_handoff", project, ts });
+      } catch (err) {
+        console.error("[agent-os] logAccess failed (write_handoff):", err);
+      }
       return { content: [{ type: "text", text: JSON.stringify({ ok: true, project, sessionId }) }] };
     },
   );
@@ -86,13 +95,18 @@ export function registerBrainTools(server: McpServer, deps: McpDeps): void {
       // `since` to the last returned crumb's ts.
       const crumbs = await deps.repo.queryBreadcrumbs(project, since, DEFAULT_TRAIL_CAP);
       const redacted = crumbs.map((b) => redact(b, Breadcrumb));
-      await deps.repo.logAccess({
-        sessionId: extra.sessionId,
-        harness: harnessLabel(),
-        tool: "query_breadcrumbs",
-        project,
-        ts: now(),
-      });
+      // logAccess is best-effort (decision #4) — never gate the already-computed page on the audit write.
+      try {
+        await deps.repo.logAccess({
+          sessionId: extra.sessionId,
+          harness: harnessLabel(),
+          tool: "query_breadcrumbs",
+          project,
+          ts: now(),
+        });
+      } catch (err) {
+        console.error("[agent-os] logAccess failed (query_breadcrumbs):", err);
+      }
       return { content: [{ type: "text", text: JSON.stringify(redacted) }] };
     },
   );

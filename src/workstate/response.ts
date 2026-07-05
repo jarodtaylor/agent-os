@@ -65,15 +65,22 @@ export async function readWorkStateResponse(
   opts: WorkStateReadOptions = {},
 ): Promise<WorkStateResponse | null> {
   const ws = await repo.readWorkState(project, opts.limit ?? DEFAULT_TRAIL_CAP);
-  await repo.logAccess({
-    sessionId: consumer.sessionId,
-    harness: consumer.harness,
-    tool: consumer.tool,
-    project,
-    ts: opts.now ?? Date.now(),
-  });
-  if (!ws) return null;
-  return present(redact(ws, WorkState, { threshold: opts.threshold }));
+  const result = ws ? present(redact(ws, WorkState, { threshold: opts.threshold })) : null;
+  // logAccess is the consumption metric — a SECONDARY concern (decision #4). It must NOT gate the primary
+  // read: computed the result FIRST, and a failing/locked access_log now can't discard an already-built
+  // resume payload or report a successful read as a failure. Best-effort + logged, never thrown onward.
+  try {
+    await repo.logAccess({
+      sessionId: consumer.sessionId,
+      harness: consumer.harness,
+      tool: consumer.tool,
+      project,
+      ts: opts.now ?? Date.now(),
+    });
+  } catch (err) {
+    console.error("[agent-os] logAccess failed (read_work_state):", err);
+  }
+  return result;
 }
 
 /** Shape the redacted `WorkState` into the external response (snake_case envelope + derived freshness). */

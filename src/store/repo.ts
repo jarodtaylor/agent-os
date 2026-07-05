@@ -43,10 +43,11 @@ export interface Repo {
    *  most-recent-N breadcrumbs (U2-R6) — the external MCP/HTTP read path always passes one; omitted
    *  keeps the historical unbounded behaviour for in-process callers. */
   readWorkState(project: string, limit?: number): Promise<WorkState | null>;
-  /** Breadcrumbs for `project` STRICTLY AFTER `since` — a forward cursor: pass the last-seen ts to page
-   *  ahead without repeats. Ascending `(ts, id)`; `limit` caps ONE page to the OLDEST-N after `since` (NOT
-   *  most-recent-N: a forward pager must return the oldest unseen first, or a caller behind by more than a
-   *  page would silently skip the middle). Each row re-validated against `Breadcrumb` before return. */
+  /** Breadcrumbs for `project` STRICTLY AFTER `since` — a forward cursor: advance `since` to the last
+   *  returned crumb's ts to page ahead without repeats. Ascending `(ts, id)`; `limit` bounds ONE page to the
+   *  OLDEST unseen (not most-recent-N — that would skip the middle for a caller behind by >1 page). A page
+   *  that fills to `limit` is extended to include the rest of its boundary ts-group, so a same-ts run is never
+   *  split across the ts-only cursor (the page may then slightly exceed `limit`). Each row re-validated. */
   queryBreadcrumbs(project: string, since: number, limit?: number): Promise<Breadcrumb[]>;
   /** Round-trips a tailer's resume offset for one watched source file (upsert on `sourcePath`). */
   writeCaptureCursor(sourcePath: string, byteOffset: number): Promise<void>;
@@ -170,15 +171,36 @@ export function createRepo(db: Store): Repo {
     async queryBreadcrumbs(project, since, limit) {
       // A forward pager needs the OLDEST-N after the cursor (ascending) — a DIFFERENT shape from
       // selectBreadcrumbTrail's most-recent-N resume tail, so it can't reuse that selector: doing so would
-      // return the NEWEST-N and silently skip the middle for a caller behind by more than one page. Own
-      // ascending query, bounded by `limit`. Each row re-validated against the contract before it leaves.
-      const base = db
+      // return the NEWEST-N and silently skip the middle for a caller behind by more than one page.
+      const where = and(eq(breadcrumbs.project, project), gt(breadcrumbs.ts, since));
+      if (limit === undefined) {
+        const all = db.select().from(breadcrumbs).where(where).orderBy(asc(breadcrumbs.ts), asc(breadcrumbs.id)).all();
+        return all.map((row) => Breadcrumb.parse(breadcrumbRowToRecord(row)));
+      }
+      const page = db
         .select()
         .from(breadcrumbs)
-        .where(and(eq(breadcrumbs.project, project), gt(breadcrumbs.ts, since)))
-        .orderBy(asc(breadcrumbs.ts), asc(breadcrumbs.id));
-      const rows = (limit === undefined ? base : base.limit(limit)).all();
-      return rows.map((row) => Breadcrumb.parse(breadcrumbRowToRecord(row)));
+        .where(where)
+        .orderBy(asc(breadcrumbs.ts), asc(breadcrumbs.id))
+        .limit(limit)
+        .all();
+      // The caller advances `since` to the last returned crumb's TS (a ts-only cursor), but the sort key is
+      // (ts, id). If a group sharing one ts straddles the page boundary, the next page's gt(ts) would drop the
+      // same-ts remainder — silent loss. So when the page fills exactly, pull the rest of that boundary
+      // ts-group (`id` after the last returned id, matching the ascending sort) into THIS page — no ts-group
+      // is ever split. The page may then slightly exceed `limit`; that soft relaxation is bounded by one
+      // ts-group's size, and nothing writes breadcrumbs at volume until U5.
+      if (page.length === limit && limit > 0) {
+        const last = page[page.length - 1]!;
+        const rest = db
+          .select()
+          .from(breadcrumbs)
+          .where(and(eq(breadcrumbs.project, project), eq(breadcrumbs.ts, last.ts), gt(breadcrumbs.id, last.id)))
+          .orderBy(asc(breadcrumbs.id))
+          .all();
+        page.push(...rest);
+      }
+      return page.map((row) => Breadcrumb.parse(breadcrumbRowToRecord(row)));
     },
 
     async writeCaptureCursor(sourcePath, byteOffset) {

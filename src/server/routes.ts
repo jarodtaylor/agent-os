@@ -57,12 +57,24 @@ export function createRoutes({ repo, gate, machineId, now }: RouteDeps) {
     .get("/work-state", async (c) => {
       const project = c.req.query("project");
       if (!project) return c.json({ error: "project query param required" }, 400);
-      const resp = await readWorkStateResponse(repo, project, {
-        harness: c.req.header("x-agent-os-harness") ?? "http",
-        tool: "GET /work-state",
-        sessionId: c.req.header("x-agent-os-session") ?? undefined,
-      });
-      return c.json(resp);
+      try {
+        const resp = await readWorkStateResponse(
+          repo,
+          project,
+          {
+            harness: c.req.header("x-agent-os-harness") ?? "http",
+            tool: "GET /work-state",
+            sessionId: c.req.header("x-agent-os-session") ?? undefined,
+          },
+          { now: now?.() },
+        );
+        return c.json(resp);
+      } catch (err) {
+        // Fail closed with a JSON body (not Hono's bare-text default 500) so the U6 hook's res.json() still
+        // parses on the failure path, and leave a labeled server-side breadcrumb — mirrors /status.
+        console.error("[agent-os] /work-state failed:", err);
+        return c.json({ error: "internal error" }, 500);
+      }
     })
     // The Streamable-HTTP MCP endpoint. `c.req.raw` is the untouched Web Request (the gate reads only
     // headers, never the body), which the Fetch-native transport consumes and answers with a Response.

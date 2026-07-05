@@ -61,13 +61,17 @@ async function connect(clientName = "claude-code"): Promise<Client> {
   return client;
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function textOf(result: any): string {
-  const item = (result.content as Array<{ type: string; text?: string }>).find((x) => x.type === "text");
-  return item?.text ?? "";
+/** The MCP tool-result shape our tools return (a `text` content block). `callTool`'s declared return is a
+ *  broader union (CallToolResult | CompatibilityCallToolResult); our tools only ever emit text content, so
+ *  `call()` narrows to this — precise and `any`-free. */
+interface TextToolResult {
+  content: Array<{ type: string; text?: string }>;
 }
-function call(client: Client, name: string, args: Record<string, unknown>) {
-  return client.callTool({ name, arguments: args });
+function textOf(result: TextToolResult): string {
+  return result.content.find((x) => x.type === "text")?.text ?? "";
+}
+function call(client: Client, name: string, args: Record<string, unknown>): Promise<TextToolResult> {
+  return client.callTool({ name, arguments: args }) as Promise<TextToolResult>;
 }
 
 function handoff(over: Partial<Handoff> = {}): Handoff {
@@ -205,8 +209,8 @@ describe("session lifecycle", () => {
     await repo.writeBreadcrumb(crumb({ id: "x", ts: 1000, summary: "hi", sensitivity: "personal" }));
     expect(JSON.parse(textOf(await call(a, "read_work_state", { project: PROJECT }))).lane).toBe("raw");
 
-    // Advance past the 30-min idle TTL, then a NEW connection triggers the sweep that evicts `a`.
-    clock += 31 * 60 * 1000;
+    // Advance past the idle TTL (2h), then a NEW connection triggers the sweep that evicts `a`.
+    clock += 3 * 60 * 60 * 1000;
     await connect("codex");
 
     // `a`'s session is gone; its next call is rejected (the client would have to re-initialize).

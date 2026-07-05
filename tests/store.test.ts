@@ -457,4 +457,15 @@ describe("queryBreadcrumbs — forward pager", () => {
     for (let i = 1; i <= 4; i++) await repo.writeBreadcrumb(makeBreadcrumb({ id: `u${i}`, ts: i }));
     expect(await repo.queryBreadcrumbs(PROJ, 0)).toHaveLength(4);
   });
+
+  test("completes a same-ts group straddling the page boundary (no split across the ts-only cursor)", async () => {
+    // Three crumbs share ts=5, one at ts=9. A raw page size of 2 would split the ts=5 group; the boundary
+    // completion pulls the whole ts=5 group into page 1, so paging by ts (advance `since` to 5) loses nothing.
+    for (const id of ["a", "b", "c"]) await repo.writeBreadcrumb(makeBreadcrumb({ id, ts: 5, summary: id }));
+    await repo.writeBreadcrumb(makeBreadcrumb({ id: "d", ts: 9, summary: "d" }));
+    const page1 = await repo.queryBreadcrumbs(PROJ, 0, 2);
+    expect(page1.map((x) => x.summary)).toEqual(["a", "b", "c"]); // whole ts=5 group, soft cap to 3
+    const page2 = await repo.queryBreadcrumbs(PROJ, 5, 2); // advance cursor to the boundary ts
+    expect(page2.map((x) => x.summary)).toEqual(["d"]); // nothing from the ts=5 group was lost
+  });
 });

@@ -17,10 +17,13 @@
  *
  * POLICY — default `threshold` is `secret`: only `secret`-effective fields are masked, so the user's own
  * resume content (`personal` summaries, `path`s) still flows to their local, gate-protected agent — which
- * is the whole point of the substrate ("pick up where we left off"). The escalation above is what keeps
- * that safe: a secret hiding inside a nominally-`personal` field is caught and masked anyway. A stricter
- * consumer (a shared UI, federation in v1.1) passes a wider `threshold` (e.g. `personal`) without any
- * redesign.
+ * is the whole point of the substrate ("pick up where we left off"). The escalation above raises a field
+ * CLASSIFIED `secret` at capture (KTD2) even where its static mark is only `personal`. Note this is
+ * classification-driven, not content-scanning: a real secret whose capture-time `sensitivity` was mis-set
+ * to `personal` would NOT be masked at the default threshold — acceptable under the trust model (own
+ * harnesses, own local consumer), and the capture-time classifier (U5) is the layer that must get it right.
+ * A stricter consumer (a shared UI, federation in v1.1) passes a wider `threshold` (e.g. `personal`) without
+ * any redesign.
  *
  * Traversal mirrors `enumerateSensitive`'s fail-CLOSED walk: known containers recurse, leaf types pass
  * untouched, and an unrecognized zod node THROWS rather than risk passing an unredacted sensitive field.
@@ -29,6 +32,7 @@
  */
 import type * as z from "zod";
 import { Sensitivity, maxSensitivity, sensitivityRegistry } from "../contract/index";
+import { LEAF_TYPES, type ZodDef } from "../contract/zod-introspect";
 
 /** The masked-value sentinel. Encodes the effective level (honest signal of what was hidden, no leak). */
 function mask(level: Sensitivity): string {
@@ -58,26 +62,6 @@ export interface RedactOptions {
 export function redact<T>(value: T, schema: z.ZodType, opts: RedactOptions = {}): T {
   return walk(value, schema, null, opts.threshold ?? "secret") as T;
 }
-
-/** The introspection surface read off a node's public `def` — same fields `enumerateSensitive` reads. */
-interface ZodDef {
-  type: string;
-  shape?: Record<string, z.ZodType>; // object
-  element?: z.ZodType; // array
-  innerType?: z.ZodType; // optional | nullable | default | prefault | readonly | catch
-  options?: z.ZodType[]; // union
-  left?: z.ZodType; // intersection
-  right?: z.ZodType; // intersection
-  items?: z.ZodType[]; // tuple
-  rest?: z.ZodType | null; // tuple
-  valueType?: z.ZodType; // record
-}
-
-/** Leaf zod types that terminate the walk untouched (allowlisted — mirrors the contract's `LEAF_TYPES`). */
-const LEAF_TYPES = new Set([
-  "string", "number", "boolean", "enum", "literal", "date", "bigint",
-  "null", "undefined", "symbol", "nan", "void", "any", "unknown",
-]);
 
 function walk(value: unknown, schema: z.ZodType, recordSensitivity: Sensitivity | null, threshold: Sensitivity): unknown {
   // 1. Marked sensitive at THIS node → mask, escalating by the enclosing record's capture-time sensitivity.

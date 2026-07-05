@@ -22,8 +22,17 @@ export function createBrainMcpServer(deps: McpDeps): McpServer {
 /** Evict a session idle longer than this (ms). The SDK only fires `onsessionclosed` on an explicit HTTP
  *  DELETE — which `Client.close()` does NOT send (verified in the installed SDK) — so a harness that just
  *  disconnects (process exit, CLI restart, network drop) would otherwise leak its transport + `McpServer`
- *  on this weeks-long daemon forever. A session idle this long is treated as abandoned. Tunable. */
-const SESSION_IDLE_MS = 30 * 60 * 1000;
+ *  on this weeks-long daemon forever. Deliberately GENEROUS (2h): a long working session can go a while
+ *  between brain-tool calls, and reaping it mid-session would fragment its continuity across a new
+ *  session id — the size cap below is the hard memory backstop, so the TTL can favour not reaping a
+ *  quiet-but-active session. Tunable. */
+const SESSION_IDLE_MS = 2 * 60 * 60 * 1000;
+
+/** Hard ceiling on concurrently-tracked sessions — the backstop the TTL alone can't give: a fast
+ *  reconnect/crash loop mints new sessions faster than the idle sweep reaps them (none is TTL-idle yet),
+ *  so at this ceiling the least-recently-seen is dropped to bound memory regardless of reconnect rate.
+ *  Never reached in normal single-user use. */
+const MAX_SESSIONS = 256;
 
 /**
  * A Fetch handler for the MCP endpoint. Keyed on `mcp-session-id`: a known session reuses its transport; an
@@ -37,22 +46,41 @@ const SESSION_IDLE_MS = 30 * 60 * 1000;
  * unauthenticated request can't spin up transports.
  *
  * Session lifetime: `onsessionclosed` only fires on an explicit DELETE, which real clients rarely send, and
- * there is no server-side disconnect signal to hook. So each session tracks `lastSeen` and `evictIdle`
- * sweeps abandoned sessions on every NEW connection — the map self-bounds without a background timer, and
- * only genuinely idle sessions are dropped (an active session touches `lastSeen` on each request; an evicted
- * one simply re-initializes on its next call).
+ * there is no server-side disconnect signal to hook. So each session tracks `lastSeen` and `reapExcess`
+ * runs on every NEW connection — an idle sweep (drop sessions past the TTL) plus a hard size cap (drop the
+ * least-recently-seen if a reconnect storm is still at the ceiling). The map self-bounds without a
+ * background timer; an active session touches `lastSeen` on each request, and an evicted one simply
+ * re-initializes on its next call.
  */
 export function createMcpHandler(deps: McpDeps): (req: Request) => Promise<Response> {
   const now = deps.now ?? Date.now;
   const sessions = new Map<string, { transport: WebStandardStreamableHTTPServerTransport; lastSeen: number }>();
 
-  const evictIdle = (): void => {
+  // Drop a session and best-effort-close its transport. Non-blocking (never stall a new connection), but
+  // LOGGED rather than swallowed — a recurring cleanup failure on the weeks-long daemon should surface in
+  // the process log, not vanish (mirrors /status's "leave a server-side breadcrumb" discipline).
+  const dropSession = (id: string, transport: WebStandardStreamableHTTPServerTransport): void => {
+    sessions.delete(id);
+    void transport.close().catch((err) => console.error("[agent-os] session cleanup failed:", err));
+  };
+
+  const reapExcess = (): void => {
     const cutoff = now() - SESSION_IDLE_MS;
     for (const [id, s] of sessions) {
-      if (s.lastSeen <= cutoff) {
-        sessions.delete(id);
-        void s.transport.close().catch(() => {}); // best-effort stream cleanup; never block a new connection
+      if (s.lastSeen <= cutoff) dropSession(id, s.transport); // idle sweep — the common case
+    }
+    // Hard cap: if a reconnect storm still leaves us at the ceiling, drop the least-recently-seen until under it.
+    while (sessions.size >= MAX_SESSIONS) {
+      let oldestId: string | undefined;
+      let oldestSeen = Infinity;
+      for (const [id, s] of sessions) {
+        if (s.lastSeen < oldestSeen) {
+          oldestSeen = s.lastSeen;
+          oldestId = id;
+        }
       }
+      if (oldestId === undefined) break;
+      dropSession(oldestId, sessions.get(oldestId)!.transport);
     }
   };
 
@@ -64,7 +92,7 @@ export function createMcpHandler(deps: McpDeps): (req: Request) => Promise<Respo
       return existing.transport.handleRequest(req);
     }
 
-    evictIdle(); // no clean disconnect signal exists (see above), so sweep abandoned sessions as new ones arrive
+    reapExcess(); // no clean disconnect signal exists (see above), so bound the map as new sessions arrive
 
     // Annotated (not inferred) because the session callbacks below reference `transport` in its own
     // initializer; block bodies keep them returning void, not `Map.set`/`.delete`'s value.

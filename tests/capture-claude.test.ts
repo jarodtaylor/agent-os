@@ -515,6 +515,8 @@ describe("D — secret shapes classify as secret and redact through the read pat
   const SECRETS: Array<[string, string]> = [
     ["classic sk- key", "OPENAI_FIXTURE_REDACTED"],
     ["Anthropic sk-ant- key", "ANTHROPIC_FIXTURE_REDACTED"],
+    ["OpenAI project sk-proj- key (dashed — Codex #2)", "OPENAI_PROJ_FIXTURE_REDACTED"],
+    ["OpenAI service-account sk-svcacct- key", "OPENAI_SVCACCT_FIXTURE_REDACTED"],
     ["Stripe sk_live_ key", `sk_live_${"0123456789".repeat(2)}`],
     ["GitHub ghp_ token", `ghp_${"0123456789".repeat(3)}abcd`],
     ["GitHub github_pat_ token", "GITHUB_PAT_FIXTURE_REDACTED"],
@@ -698,5 +700,43 @@ describe("J — a well-formed, typed, timestamped event with NO sessionId yields
   test("extractClaudeCode returns [] when sessionId is absent", () => {
     const noSession = { type: "user", cwd: PROJECT, timestamp: new Date(1_720_000_000_000).toISOString(), message: { role: "user", content: "orphaned prompt" } };
     expect(extract(noSession)).toEqual([]);
+  });
+});
+
+// ── K: extractor / contract failures are file-fatal (Codex cross-model gate) ───
+
+describe("K — extractor/contract failures abort the file pass, cursor un-advanced (no lost crumbs)", () => {
+  test("a throwing extractor propagates; the cursor is NOT advanced past the un-extracted line", async () => {
+    const path = writeJsonl("t.jsonl", [userPrompt("a valid, well-formed transcript line")]);
+    const throwing: TailerDeps = { repo, machineId: MACHINE, extractor: () => { throw new Error("extractor drift"); } };
+    await expect(tailFile(throwing, path)).rejects.toThrow("extractor drift");
+    expect(await repo.readCaptureCursor(path)).toBeNull(); // un-advanced → the valid line is retried, not lost
+    expect((await repo.queryBreadcrumbs(PROJECT, 0, "")).length).toBe(0);
+  });
+
+  test("an extractor yielding a contract-invalid crumb aborts the pass, cursor un-advanced", async () => {
+    const path = writeJsonl("t.jsonl", [userPrompt("a valid, well-formed transcript line")]);
+    // ts:-1 typechecks (number) but fails the schema's nonnegative() — a stand-in for ANY extractor-produced
+    // crumb that violates the contract. Like a throw, it must abort the pass, not be silently skipped past.
+    const badCrumb: TailerDeps = {
+      repo,
+      machineId: MACHINE,
+      extractor: () => [{ id: "x#p", project: PROJECT, sessionId: "s", source: "claude-code", kind: "note", summary: "x", ts: -1, sensitivity: "personal" }],
+    };
+    await expect(tailFile(badCrumb, path)).rejects.toThrow(/invalid breadcrumb/);
+    expect(await repo.readCaptureCursor(path)).toBeNull();
+    expect((await repo.queryBreadcrumbs(PROJECT, 0, "")).length).toBe(0);
+  });
+
+  test("an in-place rewrite to a different length is detected at the line boundary and re-tailed (Codex #3)", async () => {
+    const path = writeJsonl("t.jsonl", [userPrompt("the original session line")]);
+    expect(await tailFile(deps(), path)).toBe(1);
+    expect(await repo.readCaptureCursor(path)).toBeGreaterThan(0);
+    // Rewrite in place with DIFFERENT, longer content (a genuine rewrite, not an append): the old cursor now
+    // lands mid-line in the new bytes, so file[cursor-1] is no longer the '\n' the append-only invariant needs.
+    writeFileSync(path, `${JSON.stringify(userPrompt("a completely different and noticeably longer rewritten line, brand new content"))}\n`);
+    const written = await tailFile(deps(), path);
+    expect(written).toBeGreaterThan(0); // reset to 0 + re-tailed, NOT silently skipped past
+    expect((await summaries()).some((s) => s.includes("completely different"))).toBe(true);
   });
 });

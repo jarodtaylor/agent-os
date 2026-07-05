@@ -94,6 +94,19 @@ export async function tailFile(deps: TailerDeps, sourcePath: string): Promise<nu
     start = 0;
     await deps.repo.writeCaptureCursor(sourcePath, 0);
   }
+  if (start > 0) {
+    // Append-only invariant: the cursor always sits just past the '\n' that ended the last complete line, so
+    // `file[start-1]` must be that newline. If it isn't, the file was rewritten/rotated in place to the
+    // same-or-greater length (a `start > size` shrink is handled above), so the stale offset now points into
+    // unrelated bytes and a bare resume would skip the whole rewritten prefix. Re-tail from 0. Cheap,
+    // schema-free guard; the residual — a same-SHAPE rewrite that still leaves a '\n' at start-1 — needs the
+    // inode + prefix-hash fingerprint tracked in open-findings U5-R2.
+    const boundary = readRange(sourcePath, start - 1, 1);
+    if (boundary.length === 0 || boundary[0] !== NEWLINE) {
+      start = 0;
+      await deps.repo.writeCaptureCursor(sourcePath, 0);
+    }
+  }
 
   const buf = readRange(sourcePath, start, size - start);
 
@@ -111,26 +124,35 @@ export async function tailFile(deps: TailerDeps, sourcePath: string): Promise<nu
 
     const text = line.trim();
     if (!text) continue; // blank line
+    let event: unknown;
     try {
-      const event = JSON.parse(text);
-      for (const crumb of deps.extractor(event, { sourcePath, byteOffset: absOffset })) pending.push(crumb);
+      event = JSON.parse(text);
     } catch {
-      // Malformed JSON: skip this one line and keep tailing. The cursor still passes it (lastCompleteEnd
-      // already advanced above), so we never wedge the tail on a single bad line.
+      // Malformed JSON is the ONLY safely-skippable failure: the line's BYTES are corrupt, so re-reading the
+      // identical bytes would only fail again. Skip it; the cursor still passes it (lastCompleteEnd advanced).
+      continue;
     }
+    // Extraction runs OUTSIDE the parse catch. An extractor throw is a BUG / shape-drift on a VALID line, not
+    // a corrupt line — swallowing-and-advancing-past it would silently lose a real event. Letting it propagate
+    // aborts this file's pass before the cursor advances, so the line is retried after the fix (tailAll logs
+    // it per-file; other files keep tailing). Corrupt JSON above is the one failure we skip.
+    for (const crumb of deps.extractor(event, { sourcePath, byteOffset: absOffset })) pending.push(crumb);
   }
 
-  // VALIDATE first — a crumb that fails the contract is a bug in the extractor, NOT a transient fault. Skip
-  // it and keep the batch: re-deriving it next pass would only reproduce the same bad crumb, so there is
-  // nothing to wait for. This is the only failure the tailer is entitled to swallow.
-  const valid: Breadcrumb[] = [];
-  for (const crumb of pending) {
+  // VALIDATE + stamp machineId (the one field WE inject; the extractor never sees it). A crumb that fails the
+  // contract is an extractor bug on a VALID line — like an extractor throw, it must NOT be silently
+  // skipped-and-advanced-past (that loses the line for good). Propagate so the cursor is not advanced and the
+  // line is retried after the fix; this preserves no-lost-crumbs. Corrupt JSON in the scan above is the ONLY
+  // skippable failure. (machineId itself — a global precondition — is already guarded at the top of tailFile.)
+  const valid: Breadcrumb[] = pending.map((crumb) => {
     try {
-      valid.push(Breadcrumb.parse({ ...crumb, machineId: deps.machineId }));
+      return Breadcrumb.parse({ ...crumb, machineId: deps.machineId });
     } catch (err) {
-      console.error(`[agent-os] tailer: dropping malformed breadcrumb from ${sourcePath}:`, err);
+      throw new Error(
+        `[agent-os] tailer: extractor produced a contract-invalid breadcrumb from ${sourcePath} — aborting this file's pass, cursor unchanged for retry: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
-  }
+  });
 
   // WRITE-then-advance, and the writes are deliberately NOT wrapped: a store failure here is TRANSIENT
   // (SQLITE_BUSY under real concurrency, disk-full) and must PROPAGATE — so the cursor below is never

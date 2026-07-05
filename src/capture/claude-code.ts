@@ -35,8 +35,9 @@ import type { ExtractContext, ExtractedBreadcrumb } from "./tailer";
  *  - The keyword-assignment rule uses an IDENTIFIER boundary (`[^A-Za-z0-9]` + `[A-Za-z0-9_]*`), NOT `\b`:
  *    `_` is a regex word char, so a `\b`-gated `password` can't match inside `DATABASE_PASSWORD=` — the
  *    dominant real-world shape. The identifier form catches prefixed/suffixed names (`STRIPE_SECRET_KEY=`).
- *  - The `sk-ant-…` variant is anchored on the literal `sk-ant-` so a dashed Anthropic key is caught without
- *    loosening the bare `sk-[alnum]` rule to allow dashes (which would false-positive on hyphenated prose).
+ *  - The `sk-…` rule allows INTERNAL dashes (`sk-proj-…`, `sk-ant-api03-…`, `sk-svcacct-…`) — a bare
+ *    `sk-[alnum]` form missed real dashed provider keys. It requires the body to start alphanumeric and run
+ *    16+ chars, so a stray "sk-" in prose won't match; a coincidental long "sk-…" hit is over-classification.
  *  - The PEM / JWT / conn-string / Authorization rules are top-level alternatives NOT gated by `\b` (`\b`
  *    can't match before a leading `-` or `:`).
  * RESIDUAL (open-findings): regex classification cannot catch keyword-less, prefix-less high-entropy secrets
@@ -45,8 +46,7 @@ import type { ExtractContext, ExtractedBreadcrumb } from "./tailer";
  * masks EVERY personal summary) rather than trust this classifier.
  */
 const SECRET_PATTERNS: readonly RegExp[] = [
-  /\bsk-[A-Za-z0-9]{16,}\b/, // classic OpenAI-style key
-  /\bsk-ant-[A-Za-z0-9-]{20,}/, // Anthropic-style (dashed), anchored so prose can't false-positive
+  /\bsk-[A-Za-z0-9][A-Za-z0-9-]{15,}/, // OpenAI/Anthropic keys incl. DASHED variants (sk-proj-…, sk-ant-…, sk-svcacct-…)
   /\b[sr]k_(?:live|test)_[A-Za-z0-9]{16,}/, // Stripe secret / restricted key (underscore form)
   /\b(?:gh[posur]|github_pat)_[A-Za-z0-9_]{20,}/, // GitHub tokens (ghp_/gho_/ghu_/ghs_/ghr_/github_pat_)
   /\bAKIA[0-9A-Z]{16}\b/, // AWS access key id (the secret half has no fixed prefix — see RESIDUAL)

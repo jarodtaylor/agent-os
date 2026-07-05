@@ -134,15 +134,16 @@ keyset `(ts, id)`: lossless AND hard-bounded.)
   behavior-preserving simplify pass. **Promotion trigger:** live tailer / daemon wiring (U6 / boot sequence) —
   land the bounded-chunk read there. Surfaced by the U5 ce-simplify efficiency reviewer; conscious defer.
 
-- [~] **U5-R2 — [low] Same-length / longer transcript REWRITE between passes is undetected** (`src/capture/tailer.ts`).
-  The folded `start > size` reset catches a truncation/shrink, but a rewrite that keeps the file the SAME length
-  or LONGER (log rotation, an external edit replacing content) is not detected: byte `cursor` lands mid-line in
-  the new content, the straddling record is dropped as "malformed," and every complete line the rewrite wrote
-  below `cursor` is silently skipped. Does NOT fire for Claude Code (per-session transcripts are append-only —
-  verified empirically), so it is dead for U5; it becomes live for the Codex/U8 extractor if those logs rotate
-  in place. Fix when it triggers: persist a small identity fingerprint (inode + a hash of the first N bytes)
-  beside the offset and reset the cursor to 0 when it changes. **Promotion trigger:** U8/Codex capture over a
-  surface that rewrites/rotates in place. Surfaced by the U5 adversarial review (CASE B); conscious defer.
+- [~] **U5-R2 — [low] A same-SHAPE transcript rewrite between passes evades the line-boundary guard** (`src/capture/tailer.ts`).
+  Two guards now catch a rewritten transcript: `start > size` (a shrink) and the line-boundary check (byte
+  `cursor-1` must be the `\n` of the last complete line, else the file was rewritten → reset to 0). Together
+  they catch a truncation and any rewrite that shifts the byte at `cursor-1` off a newline — essentially every
+  real rotation/edit. The RESIDUAL: a same-SHAPE rewrite that still leaves a `\n` at exactly `cursor-1` (the new
+  content happens to carry a line boundary there too) resumes at a stale offset and skips the rewritten prefix.
+  Cannot fire for Claude Code (per-session transcripts are append-only — verified), so it is dead for U5; it
+  becomes live for the Codex/U8 extractor if those logs rotate/rewrite in place. Full fix: persist an inode +
+  first-N-bytes-hash fingerprint beside the offset and reset on change. **Promotion trigger:** U8/Codex capture
+  over a surface that rewrites/rotates in place. Surfaced by the U5 adversarial + Codex cross-model reviews.
 
 ---
 

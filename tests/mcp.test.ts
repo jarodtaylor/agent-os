@@ -198,3 +198,18 @@ describe("route/tool parity + gate + robustness", () => {
     expect(payload.lane).toBe("raw"); // the same session still serves a valid call
   });
 });
+
+describe("session lifecycle", () => {
+  test("an idle session is evicted on the next new connection (no leak on silent disconnect)", async () => {
+    const a = await connect("claude-code");
+    await repo.writeBreadcrumb(crumb({ id: "x", ts: 1000, summary: "hi", sensitivity: "personal" }));
+    expect(JSON.parse(textOf(await call(a, "read_work_state", { project: PROJECT }))).lane).toBe("raw");
+
+    // Advance past the 30-min idle TTL, then a NEW connection triggers the sweep that evicts `a`.
+    clock += 31 * 60 * 1000;
+    await connect("codex");
+
+    // `a`'s session is gone; its next call is rejected (the client would have to re-initialize).
+    await expect(a.callTool({ name: "read_work_state", arguments: { project: PROJECT } })).rejects.toThrow();
+  });
+});

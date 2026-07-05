@@ -44,8 +44,9 @@ export interface Repo {
    *  keeps the historical unbounded behaviour for in-process callers. */
   readWorkState(project: string, limit?: number): Promise<WorkState | null>;
   /** Breadcrumbs for `project` STRICTLY AFTER `since` — a forward cursor: pass the last-seen ts to page
-   *  ahead without repeats. Ascending `(ts, id)`, capped to the most-recent-N (`limit`, U2-R6), and each
-   *  row re-validated against `Breadcrumb` before return (never cast). */
+   *  ahead without repeats. Ascending `(ts, id)`; `limit` caps ONE page to the OLDEST-N after `since` (NOT
+   *  most-recent-N: a forward pager must return the oldest unseen first, or a caller behind by more than a
+   *  page would silently skip the middle). Each row re-validated against `Breadcrumb` before return. */
   queryBreadcrumbs(project: string, since: number, limit?: number): Promise<Breadcrumb[]>;
   /** Round-trips a tailer's resume offset for one watched source file (upsert on `sourcePath`). */
   writeCaptureCursor(sourcePath: string, byteOffset: number): Promise<void>;
@@ -167,11 +168,17 @@ export function createRepo(db: Store): Repo {
     },
 
     async queryBreadcrumbs(project, since, limit) {
-      // Reuses the one trail selector (`afterTs` = the cursor), so query-since and the resume tail share
-      // the same ordering + cap invariant. Validate each row against the contract before it leaves the repo.
-      return selectBreadcrumbTrail(db, project, since, limit).map((row) =>
-        Breadcrumb.parse(breadcrumbRowToRecord(row)),
-      );
+      // A forward pager needs the OLDEST-N after the cursor (ascending) — a DIFFERENT shape from
+      // selectBreadcrumbTrail's most-recent-N resume tail, so it can't reuse that selector: doing so would
+      // return the NEWEST-N and silently skip the middle for a caller behind by more than one page. Own
+      // ascending query, bounded by `limit`. Each row re-validated against the contract before it leaves.
+      const base = db
+        .select()
+        .from(breadcrumbs)
+        .where(and(eq(breadcrumbs.project, project), gt(breadcrumbs.ts, since)))
+        .orderBy(asc(breadcrumbs.ts), asc(breadcrumbs.id));
+      const rows = (limit === undefined ? base : base.limit(limit)).all();
+      return rows.map((row) => Breadcrumb.parse(breadcrumbRowToRecord(row)));
     },
 
     async writeCaptureCursor(sourcePath, byteOffset) {

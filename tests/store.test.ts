@@ -433,3 +433,28 @@ describe("projects registry — upserted as a side effect of writeHandoff/writeB
     expect(handoffRows[0]!.sessionId).toBe("s1");
   });
 });
+
+// ── queryBreadcrumbs — forward pager (U4) ─────────────────────────────────────
+
+describe("queryBreadcrumbs — forward pager", () => {
+  const PROJ = "/Users/jarod/proj";
+
+  test("returns the OLDEST-N strictly after `since`, ascending (NOT most-recent-N)", async () => {
+    // Ten crumbs at ts 1..10; a caller behind at since=0 asking for a page of 3 must get 1,2,3 — the
+    // oldest unseen — so advancing the cursor never skips the middle (the paging-loss trap).
+    for (let i = 1; i <= 10; i++) await repo.writeBreadcrumb(makeBreadcrumb({ id: `q${i}`, ts: i, summary: `e${i}` }));
+    const page = await repo.queryBreadcrumbs(PROJ, 0, 3);
+    expect(page.map((b) => b.summary)).toEqual(["e1", "e2", "e3"]);
+  });
+
+  test("`since` is exclusive; the next page continues without repeats", async () => {
+    for (let i = 1; i <= 5; i++) await repo.writeBreadcrumb(makeBreadcrumb({ id: `p${i}`, ts: i, summary: `e${i}` }));
+    const next = await repo.queryBreadcrumbs(PROJ, 3, 10); // strictly after ts 3
+    expect(next.map((b) => b.summary)).toEqual(["e4", "e5"]);
+  });
+
+  test("omitting `limit` returns the full unbounded trail after `since` (in-process callers)", async () => {
+    for (let i = 1; i <= 4; i++) await repo.writeBreadcrumb(makeBreadcrumb({ id: `u${i}`, ts: i }));
+    expect(await repo.queryBreadcrumbs(PROJ, 0)).toHaveLength(4);
+  });
+});

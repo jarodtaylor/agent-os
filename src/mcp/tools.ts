@@ -18,7 +18,7 @@ import * as z from "zod";
 import { Breadcrumb, Cursor, Handoff, Source } from "../contract/index";
 import { redact } from "../redact/apply";
 import type { Repo } from "../store/repo";
-import { readWorkStateResponse } from "../workstate/response";
+import { DEFAULT_TRAIL_CAP, readWorkStateResponse } from "../workstate/response";
 
 export interface McpDeps {
   repo: Repo;
@@ -82,7 +82,9 @@ export function registerBrainTools(server: McpServer, deps: McpDeps): void {
       inputSchema: { project: z.string().min(1), since: z.number().int().nonnegative() },
     },
     async ({ project, since }, extra) => {
-      const crumbs = await deps.repo.queryBreadcrumbs(project, since);
+      // Bound the response to one page (U2-R6) — the OLDEST-N after `since`; a caller pages by advancing
+      // `since` to the last returned crumb's ts.
+      const crumbs = await deps.repo.queryBreadcrumbs(project, since, DEFAULT_TRAIL_CAP);
       const redacted = crumbs.map((b) => redact(b, Breadcrumb));
       await deps.repo.logAccess({
         sessionId: extra.sessionId,

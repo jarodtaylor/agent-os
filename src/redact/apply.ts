@@ -88,7 +88,7 @@ function walk(value: unknown, schema: z.ZodType, recordSensitivity: Sensitivity 
   }
 
   // 2. Not marked here → recurse by container type, carrying the corresponding sub-value.
-  const def = (schema as unknown as { def: ZodDef }).def;
+  const def = schema.def as ZodDef;
   switch (def.type) {
     case "object": {
       if (value === null || typeof value !== "object") return value;

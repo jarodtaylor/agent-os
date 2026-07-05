@@ -33,10 +33,10 @@ Surfaced by the U2 review (correctness + adversarial at session tier, plus data-
 maintainability, project-standards). All are correct under the current locked design; each carries a
 promotion trigger so the right fix lands when its usage model is real, not speculatively.
 
-- [~] **U2-R1 — [note → U3/U4] Repo write methods don't re-validate inputs; only `readWorkState` parses.**
-  In-process TS types guard the write boundary today. **Promotion trigger (concrete, next units):** when
-  U3 (server) / U4 (MCP tools) write handoffs/breadcrumbs from external HTTP/MCP JSON, validate via the
-  contract zod schema at the write boundary *before* `repo.write*` — never trust TS types for untrusted input.
+- [x] **U2-R1 → FIXED (2026-07-05, U4) — external MCP writes validated at the boundary.** `write_handoff`
+  is the only external write path (KTD9), and it validates the untrusted payload against the contract twice:
+  the SDK checks `cursor`/`source` against `Cursor`/`Source` at tool-input, then `Handoff.parse` re-validates
+  the fully-assembled record before `repo.writeHandoff`. TS types are never trusted for the untrusted input.
 - [~] **U2-R2 — [low] Handoff upsert is latest-write-wins, not ts-guarded** (`repo.ts`). Correct under the
   single-writer, in-order v1. **Promotion trigger:** federation replay / multi-machine sync (v1.1) — then
   guard the upsert so an out-of-order *older* handoff can't clobber a newer one for the same session.
@@ -47,16 +47,18 @@ promotion trigger so the right fix lands when its usage model is real, not specu
 - [~] **U2-R4 — [low] `capture_cursor.byteOffset` has no monotonic guard** (`repo.ts`). A backwards write
   would cause re-reads; masked today by breadcrumb id-idempotency. **Promotion trigger:** a capture-lane
   bug or a non-idempotent raw lane makes re-reads harmful → add a `max(old, new)` guard on write.
-- [~] **U2-R5 — [low] `hitRate()` has no project scope** (`repo.ts`). The same sessionId across two
-  projects counts once — a self-documented approximation. **Promotion trigger:** U4 wires the real
-  per-tool consumption metric → decide project scoping then.
-- [~] **U2-R6 — [low] `readWorkState`'s raw breadcrumb trail is unbounded** (`repo.ts`, both
-  `selectBreadcrumbTrail` call sites; CodeRabbit). No `.limit()`, so a project with no curated handoff
-  (AE1) or a long gap between handoffs (AE2) materializes an ever-growing `rawTrailTail` into memory and
-  into the eventual MCP response. Correct + harmless in-slice: nothing writes breadcrumbs at volume until
-  U5, and the `(project, ts)` index keeps the scan sub-linear. **Promotion trigger:** U4 (MCP tool
-  response) / U6 (consumption) — cap the resume tail to a most-recent-N (or add a `limit` param to
-  `readWorkState`) sized by real resume needs and the payload ceiling, rather than guessing N now.
+- [x] **U2-R5 → DECIDED: hitRate stays GLOBAL (2026-07-05, U4).** U4 wired the real per-tool consumption
+  logging (every tool call + `/work-state` read appends to `access_log`). Decision: `hitRate` stays one
+  global ratio. VS6's success metric is per-HARNESS hit rate, and `access_log.harness` already carries that
+  discriminator (a per-harness breakdown is derivable when U8 needs it); per-PROJECT scoping has no slice-1
+  consumer. **Re-open trigger:** the human view (U11) or a metrics surface actually needs a per-project
+  breakdown → add a filtered variant then, rather than complicating the one ratio now.
+- [x] **U2-R6 → FIXED (2026-07-05, U4) — resume tail is capped.** `readWorkState` / `selectBreadcrumbTrail`
+  gained an optional `limit`; the shared external read path (`readWorkStateResponse`) passes
+  `DEFAULT_TRAIL_CAP` (50). The cap is applied at the QUERY (most-recent-N via `(ts,id) DESC LIMIT`, reversed
+  to ascending), so it bounds server memory as well as the payload, and keeping the newest-N preserves every
+  tail-derived field (`lastActivity`, the raw-lane primary). In-process callers that omit `limit` keep the
+  unbounded behaviour, so the U2 tests are unchanged. (`query_breadcrumbs` shares the same capped selector.)
 
 ---
 

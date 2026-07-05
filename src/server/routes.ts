@@ -21,8 +21,14 @@ export interface RouteDeps {
  */
 export function createRoutes({ repo, gate }: RouteDeps) {
   return new Hono()
+    // Fail closed BY CONSTRUCTION: the gate runs on EVERY route via `use("*")`, and `/health` is the
+    // ONE explicit exemption (liveness for launchd). This is order-independent — a future content route
+    // (U4's /work-state) is gated automatically and CANNOT ship ungated by forgetting a per-route
+    // middleware, which is the whole point of a security spine. An unknown path is gated too: the gate
+    // 403s a missing token before routing can 404 it.
+    .use("*", (c, next) => (c.req.path === "/health" ? next() : gate(c, next)))
     .get("/health", (c) => c.json({ ok: true }))
-    .get("/status", gate, async (c) => {
+    .get("/status", async (c) => {
       try {
         // A cheap, real read — proves the store is actually reachable rather than hardcoding a
         // reply. No brain data comes back to the caller either way (non-sensitive by design).

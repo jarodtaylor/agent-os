@@ -66,13 +66,12 @@ Surfaced by the U3 review (security + adversarial at session tier, correctness/r
 a Codex gpt-5.5 adversarial pass). The headline finds — 0.0.0.0 bind → loopback-only; world-readable data
 dir → 0700 dir; unlogged /status catch — were FIXED in the branch. These two are deferred with triggers.
 
-- [~] **U3-R1 — [note → U6] Concurrent-boot token clobber** (`src/server/index.ts`). `writeTokenFile` runs
-  BEFORE the port bind, so if two `bun run index.ts` race, the loser (crashes EADDRINUSE) can still write
-  the token file LAST — leaving `agent-os.token` pointing at the dead process while the live server accepts
-  only its own in-memory token, so every same-machine CLI/hook call 403s until restart. Harmless in-slice:
-  nothing reads the token yet, and U15's launchd runs a single instance. **Promotion trigger:** U6 (the
-  first real token consumer) — restructure to bind-THEN-write (an explicit `Bun.serve` after a successful
-  listen), or rely on launchd single-instance (KeepAlive) and document the invariant.
+- [x] **U3-R1 → FIXED (2026-07-04, Codex adversarial-review) — Concurrent-boot token clobber** (`index.ts`).
+  Restructured to bind-THEN-write: an explicit `Bun.serve` binds the port first (throws synchronously on
+  EADDRINUSE), so a port-race loser crashes before `writeTokenFile` runs and can't overwrite the live
+  instance's token with one no server accepts. `writeTokenFile` also now publishes atomically (temp-write +
+  rename) so a concurrent reader never sees a partial token. (Codex rated it medium + "fix before merge";
+  bind-before-publish is the correct design regardless.) Was deferred to U6; promoted + fixed instead.
 - [x] **U3-R2 → FIXED (2026-07-04, bot review) — `AGENT_OS_PORT` is now validated** (`index.ts`). Was
   `Number(env) || 4319`, which silently defaulted only on `0`/NaN and passed negative / out-of-range values
   through to an opaque `Bun.serve` failure. Now any invalid value (unset, non-numeric, `<= 0`, `> 65535`)

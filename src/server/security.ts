@@ -24,7 +24,7 @@
  * can read the CURRENT token; a prior boot's token is never honored (scenario 4).
  */
 import { randomUUID, timingSafeEqual } from "node:crypto";
-import { chmodSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import type { Context, MiddlewareHandler } from "hono";
 import { getConnInfo } from "hono/bun";
 import type { ConnInfo } from "hono/conninfo";
@@ -106,15 +106,11 @@ export function generateToken(): string {
 }
 
 /**
- * Write `token` to `tokenPath(dataDir)` at mode `0600`, guaranteed — even if a stale file from a
- * prior boot exists with a looser mode. `writeFileSync(..., {mode})` only APPLIES `mode` when it
- * creates the file; on an already-existing file it leaves the current mode untouched. Removing the
- * file first forces every write down the "creates a new file" path, so the mode is never inherited.
- *
- * Self-sufficient on the directory too (`mkdirSync` with `recursive: true`, a no-op if it already
- * exists): the boot sequence in `server/index.ts` already opens the store first (which creates the
- * dataDir as a side effect), but this function doesn't lean on that ordering to be correct standalone
- * — e.g. in a test that writes a token without ever opening a store.
+ * Publish `token` to `tokenPath(dataDir)` at mode `0600`, atomically (temp-write + rename — see the
+ * body for why that beats a direct overwrite on both the partial-read and the mode-inheritance fronts).
+ * Self-sufficient on the directory too (`mkdirSync` recursive + `chmodSync` to 0700, which tightens a
+ * reused dir), so it stays correct standalone — e.g. a test that writes a token without ever opening a
+ * store — without leaning on the boot ordering in `server/index.ts`.
  */
 export function writeTokenFile(dataDir: string, token: string): void {
   // Owner-only, same rationale as store/db.ts#openDb — and chmod after mkdir because mkdirSync's
@@ -122,6 +118,12 @@ export function writeTokenFile(dataDir: string, token: string): void {
   mkdirSync(dataDir, { recursive: true, mode: 0o700 });
   chmodSync(dataDir, 0o700);
   const path = tokenPath(dataDir);
-  rmSync(path, { force: true });
-  writeFileSync(path, token, { mode: 0o600 });
+  // Atomic publish: write a fresh 0600 temp file, then rename it over the target. `rename` is atomic,
+  // so a concurrent reader never observes a partial or empty token, and the result adopts the temp's
+  // inode + 0600 mode regardless of any prior file's mode (this subsumes the old rm-first fix for
+  // writeFileSync's mode only applying on create).
+  const tmp = `${path}.tmp`;
+  rmSync(tmp, { force: true });
+  writeFileSync(tmp, token, { mode: 0o600 });
+  renameSync(tmp, path);
 }

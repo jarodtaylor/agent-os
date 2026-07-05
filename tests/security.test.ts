@@ -131,6 +131,25 @@ describe("scenario 3 — token gate on /status; /health stays exempt", () => {
   });
 });
 
+// ── Fail-closed routing: the gate is default-on, not per-route (Codex adversarial-review finding) ──
+
+describe("fail-closed routing — every non-/health path is gated by construction", () => {
+  test("an unregistered path (the FUTURE /work-state) is gated: no token -> 403, not 404", async () => {
+    // The gate runs via use("*"), not a per-route middleware, so a route U4 hasn't added yet is ALREADY
+    // gated — the guarantee that U4's sensitive /work-state can't ship ungated by forgetting a middleware.
+    // Without a token the gate 403s before routing could 404 it.
+    const { app } = buildApp();
+    const res = await app.request("/work-state", { headers: { host: GOOD_HOST } });
+    expect(res.status).toBe(403);
+  });
+
+  test("...and WITH a valid token, the unknown path clears the gate and 404s (proves the gate ran)", async () => {
+    const { app, token } = buildApp();
+    const res = await app.request("/work-state", { headers: { host: GOOD_HOST, "x-agent-os-token": token } });
+    expect(res.status).toBe(404); // gate cleared; there is simply no such route yet
+  });
+});
+
 // ── Scenario 4: a prior-boot token is rejected; the CURRENT token succeeds ───
 
 describe("scenario 4 — per-boot token regeneration", () => {

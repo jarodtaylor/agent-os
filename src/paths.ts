@@ -3,7 +3,8 @@
  * `configwrite/internal.ts` unchanged — the server needs the same dataDir resolution config-write
  * already had, so it now lives in a dependency-free module both sides import from).
  */
-import { chmodSync, mkdirSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { chmodSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -36,6 +37,49 @@ export function dbPath(dataDir: string): string {
 /** Path to the per-boot security token file (see `server/security.ts`), written mode `0600`. */
 export function tokenPath(dataDir: string): string {
   return join(dataDir, "agent-os.token");
+}
+
+/** Path to the persisted machine-id file, written mode `0600`. */
+export function machineIdPath(dataDir: string): string {
+  return join(dataDir, "machine-id");
+}
+
+/**
+ * A STABLE, opaque per-machine id — the federation discriminator stamped onto every record (decision #13).
+ * PERSISTED (unlike the per-boot token) so it survives reboots, and a random UUID rather than
+ * `os.hostname()`: a hostname can carry the user's name (PII), and `machineId` is baked into every
+ * `Handoff`/`Breadcrumb` and returned through the read paths (unredacted — it isn't sensitivity-marked), so
+ * an opaque id federates cleanly without leaking a personal identifier. Minted `0600` on first boot.
+ */
+export function resolveMachineId(dataDir: string): string {
+  const path = machineIdPath(dataDir);
+  const existing = readMachineId(path);
+  if (existing) return existing;
+
+  // Absent or MALFORMED (empty/corrupt) → mint + persist, OVERWRITING any garbage. Re-minting on corruption
+  // is right: a garbage id would fail the contract's `machineId.min(1)` at the write boundary and break every
+  // write. Atomic temp-write + rename (adopts the temp's 0600 regardless of a prior file's mode, and never
+  // leaves a partial id) — same discipline as `writeTokenFile`. The single-instance lock (U3) makes the boot
+  // the sole writer, so there's no concurrent creator to race.
+  ensureDataDir(dataDir);
+  const id = randomUUID();
+  const tmp = `${path}.tmp`;
+  rmSync(tmp, { force: true });
+  writeFileSync(tmp, id, { mode: 0o600 });
+  renameSync(tmp, path);
+  return id;
+}
+
+/** Read a persisted machine-id, returning it only when it's a well-formed UUID; `null` (absent, unreadable,
+ *  or corrupt) tells `resolveMachineId` to mint a fresh one rather than trust garbage. */
+function readMachineId(path: string): string | null {
+  let raw: string;
+  try {
+    raw = readFileSync(path, "utf8").trim();
+  } catch {
+    return null;
+  }
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(raw) ? raw : null;
 }
 
 /**

@@ -14,8 +14,8 @@
  * on: a sync body runs to completion in one turn of the event loop, so two "concurrent" calls can
  * never interleave their statements — there is nothing for WAL's writer lock to contend with.
  */
-import { and, asc, desc, eq, gt, isNotNull } from "drizzle-orm";
-import { WorkState, type Breadcrumb, type Handoff } from "../contract/index";
+import { and, asc, desc, eq, gt, isNotNull, or } from "drizzle-orm";
+import { Breadcrumb, WorkState, type Handoff } from "../contract/index";
 import type { Store } from "./db";
 import { accessLog, breadcrumbs, captureCursor, handoffs, projects } from "./schema";
 
@@ -39,8 +39,16 @@ export interface Repo {
    *  the curated primary, with any STRICTLY NEWER breadcrumbs riding along as `rawTrailTail` (AE2);
    *  no handoff but breadcrumbs exist falls back to an uncurated `lane: "raw"` state built from the
    *  whole trail (AE1); neither existing returns `null`. The assembled object is validated against
-   *  `WorkState` before it is returned — never cast. */
-  readWorkState(project: string): Promise<WorkState | null>;
+   *  `WorkState` before it is returned — never cast. `limit`, when given, caps `rawTrailTail` to the
+   *  most-recent-N breadcrumbs (U2-R6) — the external MCP/HTTP read path always passes one; omitted
+   *  keeps the historical unbounded behaviour for in-process callers. */
+  readWorkState(project: string, limit?: number): Promise<WorkState | null>;
+  /** Breadcrumbs for `project` AFTER the keyset cursor `(sinceTs, sinceId)` — a forward pager: advance the
+   *  cursor to the last returned crumb's `(ts, id)` to page ahead. The first page starts from `(0, "")`. Keyed
+   *  on the FULL sort key `(ts, id)`, so a page is BOTH lossless (a same-ts group spanning a boundary resumes
+   *  exactly — no silent skip) AND hard-bounded by `limit` (no boundary-group bloat). Ascending; each row
+   *  re-validated against `Breadcrumb` before return. */
+  queryBreadcrumbs(project: string, sinceTs: number, sinceId: string, limit?: number): Promise<Breadcrumb[]>;
   /** Round-trips a tailer's resume offset for one watched source file (upsert on `sourcePath`). */
   writeCaptureCursor(sourcePath: string, byteOffset: number): Promise<void>;
   /** `null` when the path has never been recorded — distinct from an offset of `0`. */
@@ -108,7 +116,7 @@ export function createRepo(db: Store): Repo {
       });
     },
 
-    async readWorkState(project) {
+    async readWorkState(project, limit) {
       // Current handoff = ORDER BY ts DESC, sessionId DESC LIMIT 1 — a deterministic tiebreak
       // when two sessions on the same project close at the identical ts (scenario 2).
       const handoffRow = db
@@ -121,7 +129,7 @@ export function createRepo(db: Store): Repo {
 
       if (handoffRow) {
         // AE2: only breadcrumbs STRICTLY newer than the curated handoff ride along as the raw tail.
-        const rawTrail = selectBreadcrumbTrail(db, project, handoffRow.ts);
+        const rawTrail = selectBreadcrumbTrail(db, project, handoffRow.ts, limit);
 
         const lastActivity = rawTrail.reduce((max, row) => Math.max(max, row.ts), handoffRow.ts);
 
@@ -140,7 +148,7 @@ export function createRepo(db: Store): Repo {
       }
 
       // AE1: no curated handoff — fall back to the raw trail itself, if any exists.
-      const allCrumbs = selectBreadcrumbTrail(db, project);
+      const allCrumbs = selectBreadcrumbTrail(db, project, undefined, limit);
 
       if (allCrumbs.length === 0) return null;
 
@@ -158,6 +166,20 @@ export function createRepo(db: Store): Repo {
         rawTrailTail: allCrumbs.map(breadcrumbRowToRecord),
       };
       return WorkState.parse(candidate);
+    },
+
+    async queryBreadcrumbs(project, sinceTs, sinceId, limit) {
+      // KEYSET pagination on the FULL sort key `(ts, id)` — the cursor matches the sort key, so a page is
+      // both LOSSLESS (a same-ts group spanning a boundary resumes exactly, no silent skip) and HARD-BOUNDED
+      // (`LIMIT` is never exceeded — no "complete the boundary group" bloat). The caller advances the cursor
+      // to the last returned crumb's `(ts, id)`. A ts-only cursor can't do both at once; `(ts, id)` can.
+      const where = and(
+        eq(breadcrumbs.project, project),
+        or(gt(breadcrumbs.ts, sinceTs), and(eq(breadcrumbs.ts, sinceTs), gt(breadcrumbs.id, sinceId))),
+      );
+      const base = db.select().from(breadcrumbs).where(where).orderBy(asc(breadcrumbs.ts), asc(breadcrumbs.id));
+      const rows = (limit === undefined ? base : base.limit(limit)).all();
+      return rows.map((row) => Breadcrumb.parse(breadcrumbRowToRecord(row)));
     },
 
     async writeCaptureCursor(sourcePath, byteOffset) {
@@ -227,16 +249,29 @@ export function createRepo(db: Store): Repo {
  * can't drift apart. `afterTs` bounds the scan to events STRICTLY newer than a handoff (AE2's curated
  * tail); omitted, it returns the whole trail (AE1's fallback).
  *
- * The row set is intentionally UNBOUNDED here (no `.limit()`): the right cap — how much trail an agent
- * needs to resume, and the MCP response ceiling — is a consumption decision owned by U4/U6, and nothing
- * writes breadcrumbs at volume until U5. Deferred with a promotion trigger (open-findings U2-R6); the
- * `(project, ts)` index keeps the scan itself sub-linear meanwhile.
+ * `limit` caps the result to the most-recent-N breadcrumbs (U2-R6): the external read path bounds both
+ * server memory and the MCP/HTTP payload, while in-process callers that omit it keep the full trail.
+ * Capping is applied at the QUERY (`ORDER BY (ts,id) DESC LIMIT N`, then reversed back to ascending for
+ * the resume view) so it bounds memory too, not just the response — and because it keeps the NEWEST N,
+ * every field `readWorkState` derives from the tail (`lastActivity`, the raw-lane primary record) is
+ * preserved. Omitted, the scan stays unbounded; the `(project, ts)` index keeps it sub-linear meanwhile.
  */
-function selectBreadcrumbTrail(db: Store, project: string, afterTs?: number) {
+function selectBreadcrumbTrail(db: Store, project: string, afterTs?: number, limit?: number) {
   const where =
     afterTs === undefined
       ? eq(breadcrumbs.project, project)
       : and(eq(breadcrumbs.project, project), gt(breadcrumbs.ts, afterTs));
+  if (limit !== undefined) {
+    // Most-recent-N: take the newest by (ts, id) DESC, then restore ascending order for the resume view.
+    return db
+      .select()
+      .from(breadcrumbs)
+      .where(where)
+      .orderBy(desc(breadcrumbs.ts), desc(breadcrumbs.id))
+      .limit(limit)
+      .all()
+      .reverse();
+  }
   return db.select().from(breadcrumbs).where(where).orderBy(asc(breadcrumbs.ts), asc(breadcrumbs.id)).all();
 }
 

@@ -433,3 +433,39 @@ describe("projects registry — upserted as a side effect of writeHandoff/writeB
     expect(handoffRows[0]!.sessionId).toBe("s1");
   });
 });
+
+// ── queryBreadcrumbs — forward pager (U4) ─────────────────────────────────────
+
+describe("queryBreadcrumbs — keyset forward pager", () => {
+  const PROJ = "/Users/jarod/proj";
+
+  test("returns the OLDEST-N after the cursor, ascending (not most-recent-N)", async () => {
+    // Ten crumbs at ts 1..10; a caller at the start asking for a page of 3 gets 1,2,3 — the oldest unseen.
+    for (let i = 1; i <= 10; i++) await repo.writeBreadcrumb(makeBreadcrumb({ id: `q${i}`, ts: i, summary: `e${i}` }));
+    const page = await repo.queryBreadcrumbs(PROJ, 0, "", 3);
+    expect(page.map((b) => b.summary)).toEqual(["e1", "e2", "e3"]);
+  });
+
+  test("the keyset cursor pages forward without repeats or gaps", async () => {
+    for (let i = 1; i <= 5; i++) await repo.writeBreadcrumb(makeBreadcrumb({ id: `p${i}`, ts: i, summary: `e${i}` }));
+    const next = await repo.queryBreadcrumbs(PROJ, 3, "p3", 10); // resume after the (ts=3, id="p3") crumb
+    expect(next.map((b) => b.summary)).toEqual(["e4", "e5"]);
+  });
+
+  test("omitting `limit` returns the full unbounded trail after the cursor (in-process callers)", async () => {
+    for (let i = 1; i <= 4; i++) await repo.writeBreadcrumb(makeBreadcrumb({ id: `u${i}`, ts: i }));
+    expect(await repo.queryBreadcrumbs(PROJ, 0, "")).toHaveLength(4);
+  });
+
+  test("a same-ts group spans pages LOSSLESSLY, each page hard-capped", async () => {
+    // Three crumbs share ts=5, one at ts=9. Page size 2: the keyset returns EXACTLY 2 (hard cap, no boundary
+    // bloat), and advancing the cursor to the last (ts, id) picks up the same-ts remainder — nothing lost.
+    for (const id of ["a", "b", "c"]) await repo.writeBreadcrumb(makeBreadcrumb({ id, ts: 5, summary: id }));
+    await repo.writeBreadcrumb(makeBreadcrumb({ id: "d", ts: 9, summary: "d" }));
+    const page1 = await repo.queryBreadcrumbs(PROJ, 0, "", 2);
+    expect(page1.map((x) => x.summary)).toEqual(["a", "b"]); // exactly 2 — hard cap
+    const last = page1[page1.length - 1]!;
+    const page2 = await repo.queryBreadcrumbs(PROJ, last.ts, last.id, 2);
+    expect(page2.map((x) => x.summary)).toEqual(["c", "d"]); // c@5 (same ts) NOT lost, d@9 next
+  });
+});

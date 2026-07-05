@@ -1,4 +1,5 @@
 import * as z from "zod";
+import { LEAF_TYPES, type ZodDef } from "./zod-introspect";
 
 /**
  * Seam #1: the single source of truth for every record the substrate reads or writes.
@@ -58,26 +59,6 @@ export function sensitive<T extends z.ZodType>(inner: T, level: Sensitivity): T 
 export interface SensitiveField {
   path: string;
   level: Sensitivity;
-}
-
-/** Leaf zod types that terminate a walk (allowlisted — see `walk` for why traversal fails CLOSED). */
-const LEAF_TYPES = new Set([
-  "string", "number", "boolean", "enum", "literal", "date", "bigint",
-  "null", "undefined", "symbol", "nan", "void", "any", "unknown",
-]);
-
-/** The introspection fields `walk` reads off a node's public `def`, typed narrowly (no `any`). */
-interface ZodDef {
-  type: string;
-  shape?: Record<string, z.ZodType>; // object
-  element?: z.ZodType; // array
-  innerType?: z.ZodType; // optional | nullable | default | prefault | readonly | catch
-  options?: z.ZodType[]; // union
-  left?: z.ZodType; // intersection
-  right?: z.ZodType; // intersection
-  items?: z.ZodType[]; // tuple
-  rest?: z.ZodType | null; // tuple
-  valueType?: z.ZodType; // record
 }
 
 /**

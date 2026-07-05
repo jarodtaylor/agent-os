@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "acf6068f-5dcc-4a4c-984d-10a478f0ebe0",
+  "id": "31c56199-da42-4013-a094-34696b7fe727",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "tables": {
     "access_log": {
@@ -123,7 +123,16 @@
           "autoincrement": false
         }
       },
-      "indexes": {},
+      "indexes": {
+        "breadcrumbs_project_ts_idx": {
+          "name": "breadcrumbs_project_ts_idx",
+          "columns": [
+            "project",
+            "ts"
+          ],
+          "isUnique": false
+        }
+      },
       "foreignKeys": {},
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
@@ -220,7 +229,16 @@
           "autoincrement": false
         }
       },
-      "indexes": {},
+      "indexes": {
+        "handoffs_project_ts_idx": {
+          "name": "handoffs_project_ts_idx",
+          "columns": [
+            "project",
+            "ts"
+          ],
+          "isUnique": false
+        }
+      },
       "foreignKeys": {},
       "compositePrimaryKeys": {
         "handoffs_project_session_id_pk": {

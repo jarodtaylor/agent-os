@@ -405,5 +405,12 @@ describe("projects registry — upserted as a side effect of writeHandoff/writeB
     const rows = opened.db.select().from(projectsTable).where(eq(projectsTable.name, project)).all();
     expect(rows.length).toBe(1); // still just one registry row
     expect(rows[0]!.createdAt).toBe(1000); // first-seen ts, not the later 5000
+
+    // Lock the handoffs upsert-on-(project, sessionId) invariant: the second write for the SAME
+    // session collapses to one row with the latest values (repo.ts's "latest write wins per session").
+    const handoffRows = opened.db.select().from(handoffsTable).where(eq(handoffsTable.project, project)).all();
+    expect(handoffRows.length).toBe(1);
+    expect(handoffRows[0]!.ts).toBe(5000);
+    expect(handoffRows[0]!.sessionId).toBe("s1");
   });
 });

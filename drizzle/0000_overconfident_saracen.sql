@@ -19,6 +19,7 @@ CREATE TABLE `breadcrumbs` (
 	`sensitivity` text NOT NULL
 );
 --> statement-breakpoint
+CREATE INDEX `breadcrumbs_project_ts_idx` ON `breadcrumbs` (`project`,`ts`);--> statement-breakpoint
 CREATE TABLE `capture_cursor` (
 	`source_path` text PRIMARY KEY NOT NULL,
 	`byte_offset` integer NOT NULL,
@@ -37,6 +38,7 @@ CREATE TABLE `handoffs` (
 	PRIMARY KEY(`project`, `session_id`)
 );
 --> statement-breakpoint
+CREATE INDEX `handoffs_project_ts_idx` ON `handoffs` (`project`,`ts`);--> statement-breakpoint
 CREATE TABLE `inventory` (
 	`runtime` text NOT NULL,
 	`kind` text NOT NULL,

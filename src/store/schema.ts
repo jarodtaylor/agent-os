@@ -11,7 +11,7 @@
  * its DEFAULT mode (plain `number`), never `{ mode: "timestamp" }` — timestamp mode round-trips a
  * `Date` on read, which fails the contract's `z.number().int()` at `WorkState.parse()` in repo.ts.
  */
-import { integer, primaryKey, sqliteTable, text } from "drizzle-orm/sqlite-core";
+import { index, integer, primaryKey, sqliteTable, text } from "drizzle-orm/sqlite-core";
 import type { BreadcrumbKind, ItemKind, Runtime, Sensitivity, Source } from "../contract/index";
 
 /**
@@ -45,7 +45,11 @@ export const handoffs = sqliteTable(
     cursorNext: text("cursor_next").notNull(),
     ts: integer("ts").notNull(),
   },
-  (table) => [primaryKey({ columns: [table.project, table.sessionId] })],
+  (table) => [
+    primaryKey({ columns: [table.project, table.sessionId] }),
+    // The current-handoff query filters by project and orders by ts — index it so it never scans.
+    index("handoffs_project_ts_idx").on(table.project, table.ts),
+  ],
 );
 
 /**
@@ -53,17 +57,23 @@ export const handoffs = sqliteTable(
  * (`ON CONFLICT(id) DO NOTHING` in repo.ts) so re-reading the same source line after a tailer
  * restart never duplicates a row.
  */
-export const breadcrumbs = sqliteTable("breadcrumbs", {
-  id: text("id").primaryKey(),
-  project: text("project").notNull(),
-  sessionId: text("session_id").notNull(),
-  machineId: text("machine_id").notNull(),
-  source: text("source").$type<Source>().notNull(),
-  kind: text("kind").$type<BreadcrumbKind>().notNull(),
-  summary: text("summary").notNull(),
-  ts: integer("ts").notNull(),
-  sensitivity: text("sensitivity").$type<Sensitivity>().notNull(),
-});
+export const breadcrumbs = sqliteTable(
+  "breadcrumbs",
+  {
+    id: text("id").primaryKey(),
+    project: text("project").notNull(),
+    sessionId: text("session_id").notNull(),
+    machineId: text("machine_id").notNull(),
+    source: text("source").$type<Source>().notNull(),
+    kind: text("kind").$type<BreadcrumbKind>().notNull(),
+    summary: text("summary").notNull(),
+    ts: integer("ts").notNull(),
+    sensitivity: text("sensitivity").$type<Sensitivity>().notNull(),
+  },
+  // Append-only, and read by readWorkState as project-scoped, ts-ordered range scans (AE1/AE2).
+  // Index the (project, ts) hot path so those reads stay sub-linear as the trail grows unbounded.
+  (table) => [index("breadcrumbs_project_ts_idx").on(table.project, table.ts)],
+);
 
 /**
  * One observed stack item, one row per natural key. Unlike breadcrumbs, this is a true upsert

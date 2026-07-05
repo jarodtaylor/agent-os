@@ -226,6 +226,11 @@ export function createRepo(db: Store): Repo {
  * (the AE1/AE2 tiebreak invariant the tests pin) is expressed, so `readWorkState`'s two call sites
  * can't drift apart. `afterTs` bounds the scan to events STRICTLY newer than a handoff (AE2's curated
  * tail); omitted, it returns the whole trail (AE1's fallback).
+ *
+ * The row set is intentionally UNBOUNDED here (no `.limit()`): the right cap — how much trail an agent
+ * needs to resume, and the MCP response ceiling — is a consumption decision owned by U4/U6, and nothing
+ * writes breadcrumbs at volume until U5. Deferred with a promotion trigger (open-findings U2-R6); the
+ * `(project, ts)` index keeps the scan itself sub-linear meanwhile.
  */
 function selectBreadcrumbTrail(db: Store, project: string, afterTs?: number) {
   const where =

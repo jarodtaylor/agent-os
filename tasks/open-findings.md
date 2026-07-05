@@ -50,6 +50,13 @@ promotion trigger so the right fix lands when its usage model is real, not specu
 - [~] **U2-R5 — [low] `hitRate()` has no project scope** (`repo.ts`). The same sessionId across two
   projects counts once — a self-documented approximation. **Promotion trigger:** U4 wires the real
   per-tool consumption metric → decide project scoping then.
+- [~] **U2-R6 — [low] `readWorkState`'s raw breadcrumb trail is unbounded** (`repo.ts`, both
+  `selectBreadcrumbTrail` call sites; CodeRabbit). No `.limit()`, so a project with no curated handoff
+  (AE1) or a long gap between handoffs (AE2) materializes an ever-growing `rawTrailTail` into memory and
+  into the eventual MCP response. Correct + harmless in-slice: nothing writes breadcrumbs at volume until
+  U5, and the `(project, ts)` index keeps the scan sub-linear. **Promotion trigger:** U4 (MCP tool
+  response) / U6 (consumption) — cap the resume tail to a most-recent-N (or add a `limit` param to
+  `readWorkState`) sized by real resume needs and the payload ceiling, rather than guessing N now.
 
 ---
 

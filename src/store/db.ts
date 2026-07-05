@@ -43,11 +43,18 @@ export function openDb(path: string): OpenedDb {
   mkdirSync(dirname(path), { recursive: true });
 
   const sqlite = new Database(path);
-  sqlite.exec("PRAGMA journal_mode = WAL;");
-  sqlite.exec("PRAGMA busy_timeout = 5000;");
+  try {
+    sqlite.exec("PRAGMA journal_mode = WAL;");
+    sqlite.exec("PRAGMA busy_timeout = 5000;");
 
-  const db = drizzle({ client: sqlite, schema });
-  migrate(db, { migrationsFolder: MIGRATIONS_FOLDER });
+    const db = drizzle({ client: sqlite, schema });
+    migrate(db, { migrationsFolder: MIGRATIONS_FOLDER });
 
-  return { db, close: () => sqlite.close() };
+    return { db, close: () => sqlite.close() };
+  } catch (err) {
+    // A failing pragma or migration would otherwise leak the open handle — fd + WAL lock — with no
+    // `close()` handed back for the caller to release, so a retry can't recover cleanly. Close first.
+    sqlite.close();
+    throw err;
+  }
 }

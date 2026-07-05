@@ -74,6 +74,14 @@ function writeJsonl(name: string, events: unknown[], opts: { trailingNewline?: b
 const summaries = async (project = PROJECT): Promise<string[]> =>
   (await repo.queryBreadcrumbs(project, 0, "")).map((b) => b.summary);
 
+// Pure-extractor helpers: assert kind/summary/sensitivity straight off `extractClaudeCode` with no DB
+// round-trip. Sensitivity is fixed at extraction (the store persists it unchanged), so these are exact for
+// the classification/floor/ordering checks that don't need the read path.
+const CTX = { sourcePath: "/x/y.jsonl", byteOffset: 0 };
+const extract = (event: unknown) => extractClaudeCode(event, CTX);
+/** The single crumb a lone `tool_use` block produces. */
+const tuCrumb = (name: string, input: Record<string, unknown>) => extract(assistant([toolUse(name, input)]))[0]!;
+
 // ── Scenario 1: resume from cursor after a restart, no duplicates ─────────────
 
 describe("scenario 1 — resume from the capture cursor across a restart without duplicating", () => {
@@ -169,7 +177,9 @@ describe("scenario 4 — a transcript with no clean session end still yields a t
     expect(written).toBe(3);
     // Trail ends at the last activity, not at any "session-end" sentinel (there is none).
     expect(crumbs.at(-1)!.summary).toBe("Bash: run the suite");
-    expect(crumbs.every((c) => c.kind !== "session-end")).toBe(true);
+    // The full crumb-kind sequence for this fixture — a real invariant (prompt → edit → tool-call), unlike the
+    // former `every(kind !== "session-end")` which was vacuous (that kind is never emitted on the raw lane).
+    expect(crumbs.map((c) => c.kind)).toEqual(["user-prompt", "file-edit", "tool-call"]);
   });
 });
 
@@ -254,15 +264,17 @@ describe("scenario 7 — a bun-test result becomes a digest breadcrumb carrying 
     expect(all).toContain("→ 163 pass, 1 fail");
   });
 
-  test("a non-zero exit / error result is digested as an error signal", async () => {
+  test("a STRING result is digested via the string-result surface (is_error is NOT consulted on this branch)", async () => {
     const path = writeJsonl("t.jsonl", [
       assistant([toolUse("Bash", { command: "bun run build", description: "typecheck" })]),
-      toolResult("Error: Exit code 1\nsrc/x.ts(9,3): error TS2322: Type mismatch", { isError: true }),
+      // A string toolUseResult hits `resultDigest`'s FIRST branch, which never looks at is_error — so it
+      // digests as an error signal even though the sibling tool_result block here is NOT flagged is_error.
+      // (The is_error-driven OBJECT branch is covered separately below.)
+      toolResult("Error: Exit code 1\nsrc/x.ts(9,3): error TS2322: Type mismatch"),
     ]);
     await tailFile(deps(), path);
     const digest = (await summaries()).find((s) => s.startsWith("→"));
-    expect(digest).toBeDefined();
-    expect(digest).toContain("Exit code 1");
+    expect(digest).toBe("→ Error: Exit code 1"); // exact: firstLine of the string, `→ `-prefixed, clipped
   });
 
   test("an interrupted command is digested as interrupted", async () => {
@@ -404,5 +416,287 @@ describe("tailAll + discoverTranscripts", () => {
     expect(total).toBe(2);
     expect(await summaries("/proj/a")).toEqual(["in file a"]);
     expect(await summaries("/proj/b")).toEqual(["in file b"]);
+  });
+});
+
+// ── A: toolSummary — every tool family + the two default branches ──────────────
+
+describe("A — toolSummary covers every tool family with exact one-liners", () => {
+  test("file-edit families are lean basenames; MultiEdit shares Edit's return", () => {
+    const edit = tuCrumb("Edit", { file_path: "/a/b/foo.ts", old_string: "x", new_string: "y" });
+    const multi = tuCrumb("MultiEdit", { file_path: "/a/b/foo.ts", edits: [{ old_string: "x", new_string: "y" }] });
+    expect(edit).toMatchObject({ kind: "file-edit", summary: "Edit foo.ts" });
+    expect(multi).toMatchObject({ kind: "file-edit", summary: "Edit foo.ts" }); // identical shape — locks the shared return
+    expect(multi.summary).toBe(edit.summary);
+    expect(tuCrumb("Write", { file_path: "/a/b/bar.ts" })).toMatchObject({ kind: "file-edit", summary: "Write bar.ts" });
+    expect(tuCrumb("NotebookEdit", { notebook_path: "/a/b/analysis.ipynb" })).toMatchObject({ kind: "file-edit", summary: "Edit analysis.ipynb" });
+  });
+
+  test("read + search families — Read / Glob / Grep", () => {
+    expect(tuCrumb("Read", { file_path: "/p/schema.ts" })).toMatchObject({ kind: "tool-call", summary: "Read schema.ts" });
+    expect(tuCrumb("Glob", { pattern: "**/*.ts" })).toMatchObject({ kind: "tool-call", summary: "Glob **/*.ts" });
+    expect(tuCrumb("Grep", { pattern: "TODO" })).toMatchObject({ kind: "tool-call", summary: "Grep TODO" });
+  });
+
+  test("delegation families — Agent / Task / Skill", () => {
+    expect(tuCrumb("Agent", { subagent_type: "Explore", description: "find the bug" }).summary).toBe("Agent[Explore]: find the bug");
+    expect(tuCrumb("Task", { description: "ship the feature" }).summary).toBe("Task: ship the feature");
+    expect(tuCrumb("Skill", { skill: "review" }).summary).toBe("Skill: review"); // note: Skill applies no clip
+  });
+
+  test("messaging + tool-discovery families — SendMessage / ToolSearch", () => {
+    expect(tuCrumb("SendMessage", { to: "reviewer", content: "please look" }).summary).toBe("SendMessage → reviewer: please look");
+    expect(tuCrumb("ToolSearch", { query: "notebook edit" }).summary).toBe("ToolSearch: notebook edit");
+  });
+
+  test("the two default branches — an mcp__ prefix and an unknown tool name", () => {
+    expect(tuCrumb("mcp__context7__query-docs", { query: "zod discriminated union" }).summary).toBe("mcp__context7__query-docs: zod discriminated union");
+    expect(tuCrumb("mcp__context7__resolve-library-id", { libraryName: "zod" }).summary).toBe("mcp__context7__resolve-library-id: zod"); // the `?? i.libraryName` fallback
+    expect(tuCrumb("TotallyUnknownTool", { whatever: 1 })).toMatchObject({ kind: "tool-call", summary: "TotallyUnknownTool" }); // bare name
+  });
+});
+
+// ── B: resultDigest branches (agent / object-isError / bare scalar) ────────────
+
+describe("B — resultDigest branch coverage", () => {
+  test("a subagent result digests to an agent verdict pointer (string / array / empty content / agentId)", () => {
+    const [strC] = extract(toolResult({ agentType: "code-reviewer", content: "LGTM ship it\nsecond line" }));
+    expect(strC).toMatchObject({ kind: "note", summary: "→ agent[code-reviewer]: LGTM ship it", sensitivity: "personal" });
+
+    const [arrC] = extract(toolResult({ agentType: "reviewer", content: [{ type: "text", text: "first block" }, { type: "text", text: "second block" }] }));
+    expect(arrC!.summary).toBe("→ agent[reviewer]: first block second block"); // array-content blocks joined with a space
+
+    const [doneC] = extract(toolResult({ agentType: "reviewer" }));
+    expect(doneC!.summary).toBe("→ agent[reviewer] done"); // absent content → " done" fallback (a space, no colon)
+
+    const [idC] = extract(toolResult({ agentId: "sub-1", content: "did the thing" }));
+    expect(idC!.summary).toBe("→ agent[?]: did the thing"); // agentId triggers the branch; agentType absent → "?"
+  });
+
+  test("the is_error OBJECT branch digests a Bash-shaped result as an error signal", () => {
+    // { stdout, stderr, interrupted } with the SIBLING tool_result block flagged is_error → the object branch
+    // (distinct from the string-result surface above).
+    const [crumb] = extract(toolResult({ stdout: "", stderr: "boom: compile failed\nmore detail", interrupted: false }, { isError: true }));
+    expect(crumb).toMatchObject({ kind: "note", summary: "→ error: boom: compile failed", sensitivity: "personal" });
+
+    // Fallback sub-branch: stderr empty → the digest detail comes from stdout's first line (`stderr || stdout`).
+    const [fromStdout] = extract(toolResult({ stdout: "fatal: not a git repo\ntrace", stderr: "", interrupted: false }, { isError: true }));
+    expect(fromStdout!.summary).toBe("→ error: fatal: not a git repo");
+  });
+
+  test("a bare-scalar result (0 / false) passes the call-site guard but yields no digest crumb", () => {
+    // `ev.toolUseResult != null` is TRUE for 0 and false, so branch 2 calls resultDigest — which declines
+    // (not a string, not an object) and returns null, so no crumb is emitted.
+    expect(extract(toolResult(0))).toEqual([]);
+    expect(extract(toolResult(false))).toEqual([]);
+  });
+});
+
+// ── C: assistant text-block narration ─────────────────────────────────────────
+
+describe("C — an assistant text block becomes a note, ordered among tool_use blocks", () => {
+  test("mixed text + tool_use: text → note (personal), slot order preserved", async () => {
+    const path = writeJsonl("t.jsonl", [assistant([
+      { type: "text", text: "Now I'll run the tests." },
+      toolUse("Bash", { command: "bun test", description: "run tests" }),
+    ])]);
+    await tailFile(deps(), path);
+    const crumbs = await repo.queryBreadcrumbs(PROJECT, 0, "");
+    expect(crumbs.map((c) => c.kind)).toEqual(["note", "tool-call"]); // text (slot 0) precedes tool_use (slot 1)
+    expect(crumbs[0]).toMatchObject({ kind: "note", summary: "Now I'll run the tests.", sensitivity: "personal" });
+    expect(crumbs[1]!.summary).toBe("Bash: run tests");
+  });
+});
+
+// ── D: secret classification (the security-critical set) ──────────────────────
+
+describe("D — secret shapes classify as secret and redact through the read path", () => {
+  // [label, secret] — each embedded in a user prompt. A MISS here is a real code bug: report it, don't weaken.
+  const SECRETS: Array<[string, string]> = [
+    ["classic sk- key", "OPENAI_FIXTURE_REDACTED"],
+    ["Anthropic sk-ant- key", "ANTHROPIC_FIXTURE_REDACTED"],
+    ["Stripe sk_live_ key", `sk_live_${"0123456789".repeat(2)}`],
+    ["GitHub ghp_ token", `ghp_${"0123456789".repeat(3)}abcd`],
+    ["GitHub github_pat_ token", "GITHUB_PAT_FIXTURE_REDACTED"],
+    ["AWS AKIA key", "AKIAIOSFODNN7EXAMPLE"], // AKIA + exactly 16 [0-9A-Z]
+    ["Google AIza key", `AIza${"0123456789".repeat(3)}01234`], // AIza + exactly 35 chars
+    ["Slack xox token", "SLACK_FIXTURE_REDACTED"],
+    ["JWT", "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NSJ9.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"],
+    ["postgres conn-string", "postgres://user:pass@db.example.com:5432/app"],
+    ["Authorization Bearer header", "Authorization: Bearer abc123.def456.ghi789"],
+    ["PEM private-key header", "-----BEGIN RSA PRIVATE KEY-----"],
+    ["prefixed-identifier assignment (boundary regression)", "DATABASE_PASSWORD=hunter2"],
+  ];
+  for (const [label, secret] of SECRETS) {
+    test(`classifies ${label} as secret and redact() masks it`, async () => {
+      const path = writeJsonl("t.jsonl", [userPrompt(`context ${secret} here`)]);
+      await tailFile(deps(), path);
+      const [crumb] = await repo.queryBreadcrumbs(PROJECT, 0, "");
+      expect(crumb).toBeDefined();
+      expect(crumb!.sensitivity).toBe("secret"); // capture-time classification escalated it
+      const masked = redact(crumb!, Breadcrumb);
+      expect(masked.summary).toBe("[redacted:secret]"); // secret-effective → masked at the default threshold
+      expect(masked.summary).not.toContain(secret);
+    });
+  }
+
+  test("a secret in a Bash command (no description) escalates the crumb but never leaks into the summary", async () => {
+    const secret = `ghp_${"0123456789".repeat(3)}abcd`;
+    // No description → the summary is the command's FIRST line only; the secret sits on line 2, so it is
+    // absent from the summary — yet toolCrumb classifies on the RAW input, so the crumb is still secret.
+    const path = writeJsonl("t.jsonl", [assistant([toolUse("Bash", { command: `echo starting\nexport TOKEN=${secret}` })])]);
+    await tailFile(deps(), path);
+    const [crumb] = await repo.queryBreadcrumbs(PROJECT, 0, "");
+    expect(crumb!.summary).toBe("Bash: echo starting");
+    expect(crumb!.summary).not.toContain(secret);
+    expect(crumb!.sensitivity).toBe("secret");
+  });
+
+  test("a secret in a Write payload escalates the file-edit crumb but never leaks into the summary", async () => {
+    const secret = "sk-abcdefghijklmnop1234567890";
+    const path = writeJsonl("t.jsonl", [assistant([toolUse("Write", { file_path: "/p/.env", content: `SESSION_KEY=${secret}\n` })])]);
+    await tailFile(deps(), path);
+    const [crumb] = await repo.queryBreadcrumbs(PROJECT, 0, "");
+    expect(crumb!.summary).toBe("Write .env"); // lean basename — the payload (and its secret) is never in the summary
+    expect(crumb!.summary).not.toContain(secret);
+    expect(crumb!.sensitivity).toBe("secret"); // file-edit floor is "path", escalated to secret on the raw input
+  });
+});
+
+// ── E: non-secret sensitivity floors ──────────────────────────────────────────
+
+describe("E — non-secret sensitivity floors", () => {
+  test("file-edit crumbs (Edit / Write) floor at 'path' when no secret is present", () => {
+    expect(tuCrumb("Edit", { file_path: "/p/foo.ts", old_string: "a", new_string: "b" }).sensitivity).toBe("path");
+    expect(tuCrumb("Write", { file_path: "/p/bar.ts", content: "plain content, no secret" }).sensitivity).toBe("path");
+  });
+
+  test("tool-call / note / user-prompt crumbs floor at 'personal' when no secret is present", () => {
+    expect(tuCrumb("Bash", { command: "ls -la", description: "list files" }).sensitivity).toBe("personal");
+    expect(tuCrumb("Read", { file_path: "/p/x.ts" }).sensitivity).toBe("personal");
+    expect(extract(assistant([{ type: "text", text: "let me think about this" }]))[0]!.sensitivity).toBe("personal");
+    expect(extract(userPrompt("a normal directive"))[0]!.sensitivity).toBe("personal");
+  });
+});
+
+// ── F: multi-byte UTF-8 byte accuracy (tailer core invariant) ──────────────────
+
+describe("F — the cursor is a BYTE offset, so multi-byte content resumes exactly", () => {
+  test("a multi-byte line advances the cursor by byte length, and a later line resumes without desync", async () => {
+    const line1 = JSON.stringify(userPrompt("deploy 🚀 the café build")); // 🚀 = 4 bytes, é = 2 bytes
+    const line2 = JSON.stringify(userPrompt("second 🎉 prompt"));
+    // Split line2 inside its ASCII header (`{"uuid":`) so no surrogate pair is bisected — the emoji stays whole
+    // in `tail`. A naive UTF-16 `.length` cursor would mis-place the resume because line1 is multi-byte.
+    const head = line2.slice(0, 8);
+    const tail = line2.slice(8);
+
+    const path = join(root, "utf8.jsonl");
+    writeFileSync(path, `${line1}\n${head}`); // line1 complete + a partial line2
+
+    const w1 = await tailFile(deps(), path);
+    expect(w1).toBe(1); // only the complete line1
+    const consumed = `${line1}\n`;
+    expect(await repo.readCaptureCursor(path)).toBe(Buffer.byteLength(consumed)); // BYTES, not UTF-16 units
+    expect(Buffer.byteLength(consumed)).toBeGreaterThan(consumed.length); // proof: multi-byte really is present
+    expect(await summaries()).toEqual(["deploy 🚀 the café build"]);
+
+    appendFileSync(path, `${tail}\n`); // the rest of line2 arrives
+    const w2 = await tailFile(deps(), path);
+    expect(w2).toBe(1);
+    expect(await summaries()).toEqual(["deploy 🚀 the café build", "second 🎉 prompt"]); // resumed exactly, no desync
+    expect(await repo.readCaptureCursor(path)).toBe(Buffer.byteLength(`${line1}\n${line2}\n`)); // final byte EOF
+  });
+});
+
+// ── G: tailer resilience ──────────────────────────────────────────────────────
+
+describe("G — tailer resilience (nonexistent / dir-trap / truncation / mid-sweep / empty machineId)", () => {
+  test("tailFile on a nonexistent path returns 0 and does not throw", async () => {
+    expect(await tailFile(deps(), join(root, "nope", "ghost.jsonl"))).toBe(0);
+  });
+
+  test("tailAll over a nonexistent path returns 0 and does not throw", async () => {
+    expect(await tailAll(deps(), [join(root, "nope", "ghost.jsonl")])).toBe(0);
+  });
+
+  test("discoverTranscripts skips a DIRECTORY named *.jsonl and still returns real transcripts", () => {
+    const projRoot = join(root, "projects");
+    const good = join(projRoot, "-good");
+    const trap = join(projRoot, "-trap");
+    mkdirSync(good, { recursive: true });
+    mkdirSync(join(trap, "notafile.jsonl"), { recursive: true }); // a directory whose name ends in .jsonl
+    writeFileSync(join(good, "real.jsonl"), "");
+    const found = discoverTranscripts(projRoot);
+    expect(found).toContain(join(good, "real.jsonl")); // the good file still surfaces
+    expect(found).not.toContain(join(trap, "notafile.jsonl")); // the .jsonl directory is filtered out (isFile)
+  });
+
+  test("a file truncated below the cursor resets and re-tails the new, shorter content", async () => {
+    const path = writeJsonl("t.jsonl", [userPrompt("original line one is fairly long"), userPrompt("original line two is fairly long")]);
+    expect(await tailFile(deps(), path)).toBe(2);
+    const cursorAfter = await repo.readCaptureCursor(path);
+
+    const shortLine = JSON.stringify(userPrompt("brand new short line"));
+    writeFileSync(path, `${shortLine}\n`); // rewrite SHORTER than the persisted cursor (rotate/rewrite)
+    expect(statSync(path).size).toBeLessThan(cursorAfter!); // precondition: really shrank below the cursor
+
+    expect(await tailFile(deps(), path)).toBe(1); // reset to 0, re-tailed the reclaimed range
+    expect(await summaries()).toContain("brand new short line"); // the new content was NOT lost
+    expect(await repo.readCaptureCursor(path)).toBe(statSync(path).size); // cursor reset to the new EOF
+  });
+
+  test("a faulting file mid-sweep does not abort tailAll — files ordered after it still tail", async () => {
+    const pGood = writeJsonl("good1.jsonl", [userPrompt("good one", { cwd: "/good1" })]);
+    const pPoison = writeJsonl("poison.jsonl", [userPrompt("poison", { cwd: "/poison" })]);
+    const pGood2 = writeJsonl("good2.jsonl", [userPrompt("good two", { cwd: "/good2" })]);
+    // A store whose breadcrumb write throws for exactly the poison project — a deterministic per-file fault.
+    const poisonDeps: TailerDeps = {
+      machineId: MACHINE,
+      extractor: extractClaudeCode,
+      repo: { ...repo, writeBreadcrumb: async (b) => { if (b.project === "/poison") throw new Error("boom"); return repo.writeBreadcrumb(b); } },
+    };
+    const total = await tailAll(poisonDeps, [pGood, pPoison, pGood2]);
+    expect(total).toBe(2); // good1 + good2; the poison file aborted only itself
+    expect(await summaries("/good1")).toEqual(["good one"]);
+    expect(await summaries("/good2")).toEqual(["good two"]); // ordered AFTER poison — the sweep continued
+    expect(await summaries("/poison")).toEqual([]); // poison's crumb never landed
+    expect(await repo.readCaptureCursor(pPoison)).toBeNull(); // its cursor stayed un-advanced (retried next sweep)
+  });
+
+  test("tailFile with an empty machineId throws and leaves the cursor un-advanced", async () => {
+    const path = writeJsonl("t.jsonl", [userPrompt("would be dropped")]);
+    const badDeps: TailerDeps = { repo, extractor: extractClaudeCode, machineId: "" };
+    await expect(tailFile(badDeps, path)).rejects.toThrow(/empty machineId/);
+    expect(await repo.readCaptureCursor(path)).toBeNull(); // never reached the cursor write
+  });
+
+  test("tailAll with an empty machineId swallows the throw — 0 crumbs, cursor un-advanced, no throw", async () => {
+    const path = writeJsonl("t.jsonl", [userPrompt("healthy line")]);
+    const badDeps: TailerDeps = { repo, extractor: extractClaudeCode, machineId: "" };
+    expect(await tailAll(badDeps, [path])).toBe(0); // caught + logged, not thrown
+    expect(await summaries()).toEqual([]);
+    expect(await repo.readCaptureCursor(path)).toBeNull();
+  });
+});
+
+// ── H: >=100-block ordering (the slot-width fix) ───────────────────────────────
+
+describe("H — an assistant event with >=100 blocks keeps emission order in the trail", () => {
+  test("105 blocks read back in exact emission order (slot zero-padded to 3, so '100' sorts after '099')", async () => {
+    const N = 105;
+    const blocks = Array.from({ length: N }, (_, n) => toolUse("Read", { file_path: `/p/f${String(n).padStart(3, "0")}.ts` }));
+    const path = writeJsonl("t.jsonl", [assistant(blocks)]);
+    await tailFile(deps(), path);
+    const expected = Array.from({ length: N }, (_, n) => `Read f${String(n).padStart(3, "0")}.ts`);
+    expect(await summaries()).toEqual(expected); // slot width 3 keeps "#100" after "#099"; the old width-2 stopped at 12
+  });
+});
+
+// ── J: missing-sessionId guard ────────────────────────────────────────────────
+
+describe("J — a well-formed, typed, timestamped event with NO sessionId yields no crumbs", () => {
+  test("extractClaudeCode returns [] when sessionId is absent", () => {
+    const noSession = { type: "user", cwd: PROJECT, timestamp: new Date(1_720_000_000_000).toISOString(), message: { role: "user", content: "orphaned prompt" } };
+    expect(extract(noSession)).toEqual([]);
   });
 });

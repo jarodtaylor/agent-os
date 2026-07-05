@@ -4,7 +4,7 @@
  * already had, so it now lives in a dependency-free module both sides import from).
  */
 import { randomUUID } from "node:crypto";
-import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -53,20 +53,33 @@ export function machineIdPath(dataDir: string): string {
  */
 export function resolveMachineId(dataDir: string): string {
   const path = machineIdPath(dataDir);
+  const existing = readMachineId(path);
+  if (existing) return existing;
+
+  // Absent or MALFORMED (empty/corrupt) → mint + persist, OVERWRITING any garbage. Re-minting on corruption
+  // is right: a garbage id would fail the contract's `machineId.min(1)` at the write boundary and break every
+  // write. Atomic temp-write + rename (adopts the temp's 0600 regardless of a prior file's mode, and never
+  // leaves a partial id) — same discipline as `writeTokenFile`. The single-instance lock (U3) makes the boot
+  // the sole writer, so there's no concurrent creator to race.
+  ensureDataDir(dataDir);
+  const id = randomUUID();
+  const tmp = `${path}.tmp`;
+  rmSync(tmp, { force: true });
+  writeFileSync(tmp, id, { mode: 0o600 });
+  renameSync(tmp, path);
+  return id;
+}
+
+/** Read a persisted machine-id, returning it only when it's a well-formed UUID; `null` (absent, unreadable,
+ *  or corrupt) tells `resolveMachineId` to mint a fresh one rather than trust garbage. */
+function readMachineId(path: string): string | null {
+  let raw: string;
   try {
-    return readFileSync(path, "utf8").trim();
+    raw = readFileSync(path, "utf8").trim();
   } catch {
-    // First boot (or unreadable): mint + persist. `wx` is an exclusive create — if a concurrent boot won
-    // the race we read theirs instead, though the single-instance lock (U3) already precludes that.
-    ensureDataDir(dataDir);
-    const id = randomUUID();
-    try {
-      writeFileSync(path, id, { mode: 0o600, flag: "wx" });
-      return id;
-    } catch {
-      return readFileSync(path, "utf8").trim();
-    }
+    return null;
   }
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(raw) ? raw : null;
 }
 
 /**

@@ -27,8 +27,8 @@ export function lockPath(dataDir: string): string {
 /**
  * Acquire the data dir's single-instance lock. Throws if another LIVE instance already holds it. A
  * stale lock (its recorded pid is dead) is reclaimed. Returns a release fn to call on clean shutdown
- * (and in tests). `dataDir` must already exist — the boot sequence opens the store (which creates it)
- * first.
+ * (and in tests). `dataDir` must already exist — the boot sequence calls `ensureDataDir` up front,
+ * before this lock and before the store opens.
  */
 export function acquireSingleInstanceLock(dataDir: string): () => void {
   const path = lockPath(dataDir);

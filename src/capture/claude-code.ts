@@ -56,15 +56,12 @@ function classify(text: string, floor: Sensitivity): Sensitivity {
 // ─────────────────────────────────────────────────────────────────────────────
 
 const basename = (p: unknown): string => {
-  const s = typeof p === "string" ? p : "";
+  const s = str(p);
   return s.split("/").filter(Boolean).pop() ?? s;
 };
-const oneLine = (s: unknown): string => (typeof s === "string" ? s : "").replace(/\s+/g, " ").trim();
+const oneLine = (s: unknown): string => str(s).replace(/\s+/g, " ").trim();
 const clip = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n)}…` : s);
-const firstLine = (s: unknown): string => {
-  const str = typeof s === "string" ? s : "";
-  return oneLine(str.split("\n").find((l) => l.trim()) ?? "");
-};
+const firstLine = (s: unknown): string => oneLine(str(s).split("\n").find((l) => l.trim()) ?? "");
 
 /**
  * User string-content events that are command scaffolding or teammate idle-pings, not real prompts (spike
@@ -160,16 +157,17 @@ function resultDigest(result: unknown, isError: boolean): CrumbCore | null {
   // Bash-family result: { stdout, stderr, interrupted }. The observation layer the spike proved is the #1 gap.
   if (typeof r.stdout === "string" || typeof r.stderr === "string") {
     const out = `${str(r.stdout)}\n${str(r.stderr)}`;
-    const sensitivity = classify(out, "personal");
     const pass = out.match(/(\d+)\s+pass/i);
     const fail = out.match(/(\d+)\s+fail/i);
+    // classify() scans up to 7 regexes over the full output — only pay it on a branch that emits a crumb
+    // (a plain successful command is the common case and returns null below).
     if (pass || fail) {
-      return { kind: "note", summary: `→ ${pass?.[1] ?? "0"} pass, ${fail?.[1] ?? "0"} fail`, sensitivity };
+      return { kind: "note", summary: `→ ${pass?.[1] ?? "0"} pass, ${fail?.[1] ?? "0"} fail`, sensitivity: classify(out, "personal") };
     }
-    if (r.interrupted === true) return { kind: "note", summary: "→ interrupted", sensitivity };
+    if (r.interrupted === true) return { kind: "note", summary: "→ interrupted", sensitivity: classify(out, "personal") };
     if (isError) {
       const detail = firstLine(str(r.stderr) || str(r.stdout)) || "non-zero exit";
-      return { kind: "note", summary: `→ error: ${clip(detail, 120)}`, sensitivity };
+      return { kind: "note", summary: `→ error: ${clip(detail, 120)}`, sensitivity: classify(out, "personal") };
     }
     return null; // plain success — the tool-call crumb already carries the action; a digest adds nothing
   }

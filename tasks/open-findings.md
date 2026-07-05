@@ -121,6 +121,21 @@ keyset `(ts, id)`: lossless AND hard-bounded.)
 
 ---
 
+## Deferred — U5 residuals (2026-07-05, ce-simplify-code)
+
+- [~] **U5-R1 — [low] Cold-start / backlog tail reads a file's whole unread range in one allocation**
+  (`src/capture/tailer.ts` `readRange`/`tailFile`). On the FIRST tail of a file (cursor 0) or after daemon
+  downtime, the "delta" is the entire unread range, buffered in one `Buffer.allocUnsafe(size - start)` before
+  any write. Peak is bounded PER FILE — the buffer + its crumbs are call-scoped and GC'd between files, so peak
+  ≈ the largest single transcript (~5 MB in this repo), NOT all historical files summed — so it is not an OOM
+  risk today. A bounded-chunk read (loop chunks to EOF, advancing the cursor each) is the right shape once the
+  live tailer sweeps every historical transcript on first boot; the clean fix must also handle the
+  giant-single-line edge (one event larger than the chunk), so it belongs WITH the wiring, not in a
+  behavior-preserving simplify pass. **Promotion trigger:** live tailer / daemon wiring (U6 / boot sequence) —
+  land the bounded-chunk read there. Surfaced by the U5 ce-simplify efficiency reviewer; conscious defer.
+
+---
+
 ## Fixed 2026-07-04 — Codex adversarial review (3 passes) + ce-code-review, folded into this branch
 
 **Contract (`src/contract/schema.ts`) — 2nd/3rd adversarial passes:**

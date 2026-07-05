@@ -73,10 +73,10 @@ dir → 0700 dir; unlogged /status catch — were FIXED in the branch. These two
   nothing reads the token yet, and U15's launchd runs a single instance. **Promotion trigger:** U6 (the
   first real token consumer) — restructure to bind-THEN-write (an explicit `Bun.serve` after a successful
   listen), or rely on launchd single-instance (KeepAlive) and document the invariant.
-- [~] **U3-R2 — [low] `AGENT_OS_PORT=0` silently coerced to the default** (`index.ts`: `Number(env) || 4319`
-  treats `0`/NaN as falsy). A caller asking for an ephemeral port gets the fixed default. Benign — a
-  discoverable daemon needs a KNOWN port for the token/Host contract — but silent. **Promotion trigger:** if
-  an ephemeral-port mode is ever wanted, parse the env explicitly instead of `|| default`.
+- [x] **U3-R2 → FIXED (2026-07-04, bot review) — `AGENT_OS_PORT` is now validated** (`index.ts`). Was
+  `Number(env) || 4319`, which silently defaulted only on `0`/NaN and passed negative / out-of-range values
+  through to an opaque `Bun.serve` failure. Now any invalid value (unset, non-numeric, `<= 0`, `> 65535`)
+  falls back to the default. (CodeRabbit + the R2 note converged.)
 
 ---
 

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { eq } from "drizzle-orm";
-import { existsSync, mkdtempSync, rmSync, statSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { Breadcrumb, Handoff } from "../src/contract/index";
@@ -135,6 +135,22 @@ describe("openDb guards", () => {
       // other local user may traverse in. A 0700 dir protects every file inside it whatever their modes.
       expect(statSync(dirname(nested)).mode & 0o777).toBe(0o700);
       expect(opened.db.select().from(projectsTable).all()).toEqual([]); // and it's a working db
+    } finally {
+      opened.close();
+    }
+  });
+
+  test("tightens an ALREADY-EXISTING looser data dir to 0700 (not just on create)", () => {
+    const dir = join(root, "preexisting");
+    mkdirSync(dir, { recursive: true });
+    chmodSync(dir, 0o755); // force a looser mode regardless of the runner's umask
+    expect(statSync(dir).mode & 0o777).toBe(0o755); // precondition: the reused dir starts traversable
+
+    const opened = openDb(join(dir, "store.db"));
+    try {
+      // openDb must chmod a REUSED dir down to owner-only — mkdirSync's `mode` only applies on create,
+      // so a 0755 dir left by an earlier run/version would otherwise stay world-traversable.
+      expect(statSync(dir).mode & 0o777).toBe(0o700);
     } finally {
       opened.close();
     }

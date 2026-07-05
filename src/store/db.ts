@@ -10,7 +10,7 @@
 import { Database } from "bun:sqlite";
 import { drizzle } from "drizzle-orm/bun-sqlite";
 import { migrate } from "drizzle-orm/bun-sqlite/migrator";
-import { mkdirSync } from "node:fs";
+import { chmodSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import * as schema from "./schema";
 
@@ -42,8 +42,12 @@ export function openDb(path: string): OpenedDb {
   // `new Database` before the store ever opens. Create the parent up front (no-op if it exists),
   // OWNER-ONLY (0700): this dir holds the brain (store.db carries secret-marked content) and the
   // security token, so no other local user may traverse in. 0700's owner bits survive any umask, and
-  // a 0700 dir protects every file inside it regardless of the files' own modes.
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  // a 0700 dir protects every file inside it regardless of the files' own modes. The chmod is NOT
+  // redundant with the mkdir mode: mkdirSync's `mode` applies only when it CREATES the dir, so a dir
+  // reused from a prior run (or an older version that made it 0755) must be tightened too.
+  const dir = dirname(path);
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  chmodSync(dir, 0o700);
 
   const sqlite = new Database(path);
   try {

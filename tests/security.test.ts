@@ -242,7 +242,15 @@ describe("scenario 7 — dev=prod: bun run src/server/index.ts", () => {
       });
 
       try {
-        await waitForHealth(port);
+        try {
+          await waitForHealth(port);
+        } catch (err) {
+          // Surface the spawned server's stderr on a boot/health failure so CI shows WHY, not just an
+          // opaque timeout. Kill first so reading the stderr stream doesn't block on a still-live process.
+          proc.kill();
+          console.error("[boot test] server stderr:", await new Response(proc.stderr).text());
+          throw err;
+        }
 
         const health = await fetch(`http://127.0.0.1:${port}/health`);
         expect(health.status).toBe(200);

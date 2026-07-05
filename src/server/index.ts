@@ -17,7 +17,13 @@ import { createRepo } from "../store/repo";
 import { createRoutes } from "./routes";
 import { generateToken, securityGate, writeTokenFile } from "./security";
 
-const PORT = Number(process.env.AGENT_OS_PORT) || 4319;
+const PORT = ((): number => {
+  const n = Number(process.env.AGENT_OS_PORT);
+  // A discoverable daemon needs a KNOWN port (the token + Host-allowlist contract keys off it), so any
+  // invalid value — unset, non-numeric, <= 0, or > 65535 — falls back to the default rather than
+  // slipping through to an opaque Bun.serve startup failure.
+  return Number.isInteger(n) && n > 0 && n <= 65535 ? n : 4319;
+})();
 
 const dataDir = resolveDataDir();
 const { db } = openDb(dbPath(dataDir));

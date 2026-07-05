@@ -24,7 +24,7 @@
  * can read the CURRENT token; a prior boot's token is never honored (scenario 4).
  */
 import { randomUUID, timingSafeEqual } from "node:crypto";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import type { Context, MiddlewareHandler } from "hono";
 import { getConnInfo } from "hono/bun";
 import type { ConnInfo } from "hono/conninfo";
@@ -117,7 +117,10 @@ export function generateToken(): string {
  * — e.g. in a test that writes a token without ever opening a store.
  */
 export function writeTokenFile(dataDir: string, token: string): void {
-  mkdirSync(dataDir, { recursive: true, mode: 0o700 }); // owner-only — same rationale as store/db.ts#openDb
+  // Owner-only, same rationale as store/db.ts#openDb — and chmod after mkdir because mkdirSync's
+  // `mode` only applies on CREATE, so a dir reused from a prior run must be tightened too.
+  mkdirSync(dataDir, { recursive: true, mode: 0o700 });
+  chmodSync(dataDir, 0o700);
   const path = tokenPath(dataDir);
   rmSync(path, { force: true });
   writeFileSync(path, token, { mode: 0o600 });

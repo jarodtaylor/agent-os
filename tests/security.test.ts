@@ -164,6 +164,9 @@ describe("scenario 4 — per-boot token regeneration", () => {
 
 // ── Scenario 6: token file mode is 0600 ───────────────────────────────────────
 
+// Scenario 5 ("/work-state matches the read_work_state MCP tool") is intentionally absent here: the
+// sensitive route + the KTD2 redaction pass were deferred from U3 to U4 (decision #17), so it becomes a
+// U4 cross-check. That is why the numbering runs 4 -> 6.
 describe("scenario 6 — token file mode is 0600", () => {
   test("a freshly written token file is mode 0600", () => {
     const dataDir = join(root, "data-mode");

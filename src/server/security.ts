@@ -49,57 +49,52 @@ export interface SecurityGateOptions {
 /** The one middleware enforcing loopback + Host + per-boot token on every route it's applied to. */
 export function securityGate(opts: SecurityGateOptions): MiddlewareHandler {
   const getConn = opts.getConn ?? getConnInfo;
+  // Both depend only on construction-time opts, so build them ONCE per gate instance instead of
+  // reallocating a Set and re-encoding the token buffer on every request (mirrors the module-scope
+  // LOOPBACK_ADDRESSES). Precomputing the expected buffer does not weaken timing-safety — that is a
+  // property of the compare, not of how the buffer was built.
+  const allowedHosts = buildAllowedHosts(opts.port);
+  const expectedTokenBuf = Buffer.from(opts.token, "utf8");
 
   return async (c, next) => {
     const address = getConn(c).remote.address;
-    if (!isLoopbackAddress(address)) {
-      return c.json({ error: "forbidden", reason: "non-loopback source" }, 403);
-    }
-
-    if (!isAllowedHost(c.req.header("host"), opts.port)) {
-      return c.json({ error: "forbidden", reason: "disallowed host" }, 403);
-    }
-
-    if (!tokenMatches(c.req.header(TOKEN_HEADER), opts.token)) {
-      return c.json({ error: "forbidden", reason: "invalid or missing token" }, 403);
-    }
-
+    if (!isLoopbackAddress(address)) return forbidden(c, "non-loopback source");
+    if (!allowedHosts.has((c.req.header("host") ?? "").toLowerCase())) return forbidden(c, "disallowed host");
+    if (!tokenMatches(c.req.header(TOKEN_HEADER), expectedTokenBuf)) return forbidden(c, "invalid or missing token");
     await next();
   };
+}
+
+/** One fail-closed 403 shape for every gate rejection, so a future check can't emit a differently
+ *  shaped body. `reason` is safe to return — it never contains the expected token. */
+function forbidden(c: Context, reason: string) {
+  return c.json({ error: "forbidden", reason }, 403);
 }
 
 function isLoopbackAddress(address: string | undefined): boolean {
   return address !== undefined && LOOPBACK_ADDRESSES.has(address.toLowerCase());
 }
 
-/** Allows `localhost`/`127.0.0.1`/`[::1]`, bare or qualified with this server's own port. Anything
- *  else — including a public DNS name that merely resolves to 127.0.0.1, the rebind attack — is
- *  refused. IPv6 literals require the bracketed form (`[::1]`); a bare `::1` is not valid Host
- *  syntax (RFC 3986) and is deliberately not special-cased in. */
-function isAllowedHost(hostHeader: string | undefined, port: number): boolean {
-  if (!hostHeader) return false;
-  const allowed = new Set([
-    "localhost",
-    "127.0.0.1",
-    "[::1]",
-    `localhost:${port}`,
-    `127.0.0.1:${port}`,
-    `[::1]:${port}`,
-  ]);
-  return allowed.has(hostHeader.toLowerCase());
+/** The Host values this server answers to: `localhost`/`127.0.0.1`/`[::1]`, bare or qualified with
+ *  this server's own port. Anything else — including a public DNS name that merely resolves to
+ *  127.0.0.1, the rebind attack — is refused by the gate's `.has()` lookup. IPv6 literals require the
+ *  bracketed form (`[::1]`); a bare `::1` is not valid Host syntax (RFC 3986) and is deliberately not
+ *  special-cased in. Built once per gate instance (it depends only on the bound port). */
+function buildAllowedHosts(port: number): Set<string> {
+  const names = ["localhost", "127.0.0.1", "[::1]"];
+  return new Set([...names, ...names.map((n) => `${n}:${port}`)]);
 }
 
 /**
  * Timing-safe compare with an explicit length guard. `crypto.timingSafeEqual` THROWS on mismatched
  * buffer lengths rather than returning false, so an unguarded call would turn a wrong-LENGTH token
  * into a 500 instead of a clean 403 — and falling back to `===` on a length mismatch would
- * reintroduce the timing side-channel this exists to close. A missing header is rejected before
- * either buffer is even built.
+ * reintroduce the timing side-channel this exists to close. A missing header is rejected before the
+ * provided buffer is even built. `expectedBuf` is precomputed once at gate construction.
  */
-function tokenMatches(provided: string | undefined, expected: string): boolean {
+function tokenMatches(provided: string | undefined, expectedBuf: Buffer): boolean {
   if (provided === undefined) return false;
   const providedBuf = Buffer.from(provided, "utf8");
-  const expectedBuf = Buffer.from(expected, "utf8");
   if (providedBuf.length !== expectedBuf.length) return false;
   return timingSafeEqual(providedBuf, expectedBuf);
 }

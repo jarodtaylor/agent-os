@@ -39,8 +39,10 @@ export interface Repo {
    *  the curated primary, with any STRICTLY NEWER breadcrumbs riding along as `rawTrailTail` (AE2);
    *  no handoff but breadcrumbs exist falls back to an uncurated `lane: "raw"` state built from the
    *  whole trail (AE1); neither existing returns `null`. The assembled object is validated against
-   *  `WorkState` before it is returned — never cast. */
-  readWorkState(project: string): Promise<WorkState | null>;
+   *  `WorkState` before it is returned — never cast. `limit`, when given, caps `rawTrailTail` to the
+   *  most-recent-N breadcrumbs (U2-R6) — the external MCP/HTTP read path always passes one; omitted
+   *  keeps the historical unbounded behaviour for in-process callers. */
+  readWorkState(project: string, limit?: number): Promise<WorkState | null>;
   /** Round-trips a tailer's resume offset for one watched source file (upsert on `sourcePath`). */
   writeCaptureCursor(sourcePath: string, byteOffset: number): Promise<void>;
   /** `null` when the path has never been recorded — distinct from an offset of `0`. */
@@ -108,7 +110,7 @@ export function createRepo(db: Store): Repo {
       });
     },
 
-    async readWorkState(project) {
+    async readWorkState(project, limit) {
       // Current handoff = ORDER BY ts DESC, sessionId DESC LIMIT 1 — a deterministic tiebreak
       // when two sessions on the same project close at the identical ts (scenario 2).
       const handoffRow = db
@@ -121,7 +123,7 @@ export function createRepo(db: Store): Repo {
 
       if (handoffRow) {
         // AE2: only breadcrumbs STRICTLY newer than the curated handoff ride along as the raw tail.
-        const rawTrail = selectBreadcrumbTrail(db, project, handoffRow.ts);
+        const rawTrail = selectBreadcrumbTrail(db, project, handoffRow.ts, limit);
 
         const lastActivity = rawTrail.reduce((max, row) => Math.max(max, row.ts), handoffRow.ts);
 
@@ -140,7 +142,7 @@ export function createRepo(db: Store): Repo {
       }
 
       // AE1: no curated handoff — fall back to the raw trail itself, if any exists.
-      const allCrumbs = selectBreadcrumbTrail(db, project);
+      const allCrumbs = selectBreadcrumbTrail(db, project, undefined, limit);
 
       if (allCrumbs.length === 0) return null;
 
@@ -227,16 +229,29 @@ export function createRepo(db: Store): Repo {
  * can't drift apart. `afterTs` bounds the scan to events STRICTLY newer than a handoff (AE2's curated
  * tail); omitted, it returns the whole trail (AE1's fallback).
  *
- * The row set is intentionally UNBOUNDED here (no `.limit()`): the right cap — how much trail an agent
- * needs to resume, and the MCP response ceiling — is a consumption decision owned by U4/U6, and nothing
- * writes breadcrumbs at volume until U5. Deferred with a promotion trigger (open-findings U2-R6); the
- * `(project, ts)` index keeps the scan itself sub-linear meanwhile.
+ * `limit` caps the result to the most-recent-N breadcrumbs (U2-R6): the external read path bounds both
+ * server memory and the MCP/HTTP payload, while in-process callers that omit it keep the full trail.
+ * Capping is applied at the QUERY (`ORDER BY (ts,id) DESC LIMIT N`, then reversed back to ascending for
+ * the resume view) so it bounds memory too, not just the response — and because it keeps the NEWEST N,
+ * every field `readWorkState` derives from the tail (`lastActivity`, the raw-lane primary record) is
+ * preserved. Omitted, the scan stays unbounded; the `(project, ts)` index keeps it sub-linear meanwhile.
  */
-function selectBreadcrumbTrail(db: Store, project: string, afterTs?: number) {
+function selectBreadcrumbTrail(db: Store, project: string, afterTs?: number, limit?: number) {
   const where =
     afterTs === undefined
       ? eq(breadcrumbs.project, project)
       : and(eq(breadcrumbs.project, project), gt(breadcrumbs.ts, afterTs));
+  if (limit !== undefined) {
+    // Most-recent-N: take the newest by (ts, id) DESC, then restore ascending order for the resume view.
+    return db
+      .select()
+      .from(breadcrumbs)
+      .where(where)
+      .orderBy(desc(breadcrumbs.ts), desc(breadcrumbs.id))
+      .limit(limit)
+      .all()
+      .reverse();
+  }
   return db.select().from(breadcrumbs).where(where).orderBy(asc(breadcrumbs.ts), asc(breadcrumbs.id)).all();
 }
 

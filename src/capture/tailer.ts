@@ -68,7 +68,16 @@ const NEWLINE = 0x0a; // '\n'
  *    past it (re-reading a byte-for-byte-identical bad line would only fail again).
  */
 export async function tailFile(deps: TailerDeps, sourcePath: string): Promise<number> {
-  const start = (await deps.repo.readCaptureCursor(sourcePath)) ?? 0;
+  // machineId is stamped onto EVERY crumb (contract federation, min-length 1). Guard this global precondition
+  // ONCE up front: an empty/misconfigured machineId would fail Breadcrumb.parse for the WHOLE batch, and the
+  // per-crumb "validate + skip" loop below (right for a line-specific extractor bug) would then drop every
+  // crumb while the cursor still advanced past them — a silent, total, unrecoverable loss. Throwing here
+  // (caught + logged per-file by tailAll, so the cursor is never reached) makes the misconfig loud + lossless.
+  if (!deps.machineId) {
+    throw new Error("[agent-os] tailer: empty machineId — refusing to tail (would drop every breadcrumb)");
+  }
+
+  let start = (await deps.repo.readCaptureCursor(sourcePath)) ?? 0;
 
   let size: number;
   try {
@@ -76,7 +85,15 @@ export async function tailFile(deps: TailerDeps, sourcePath: string): Promise<nu
   } catch {
     return 0; // file vanished or is unreadable this pass — nothing to do
   }
-  if (start >= size) return 0; // offset already at EOF (covers the empty-file and no-new-bytes cases)
+  if (start === size) return 0; // at EOF, no new bytes (covers the empty-file and no-new-bytes cases)
+  if (start > size) {
+    // File shrank below the cursor (truncate / rotate / rewrite): the stored offset now points past EOF, and
+    // a bare `>=` would strand it there forever, silently losing every event written into the reclaimed low
+    // range. Reset to re-tail from the new beginning; stable ids + idempotent append dedupe any unchanged
+    // prefix. Persist the reset now so a no-complete-line pass can't re-loop on the stale high offset.
+    start = 0;
+    await deps.repo.writeCaptureCursor(sourcePath, 0);
+  }
 
   const buf = readRange(sourcePath, start, size - start);
 
@@ -128,10 +145,19 @@ export async function tailFile(deps: TailerDeps, sourcePath: string): Promise<nu
   return valid.length;
 }
 
-/** Tail each file once, in order; returns the total crumbs written across all of them. */
+/** Tail each file once, in order; returns the total crumbs written across all of them. One unreadable or
+ *  vanished transcript is skipped (logged) rather than aborting the sweep — the module's resilience contract,
+ *  and it keeps a single bad file from crashing the U6 daemon loop. A store-write fault inside `tailFile`
+ *  still leaves that file's cursor un-advanced, so the caught region is retried on the next sweep. */
 export async function tailAll(deps: TailerDeps, sourcePaths: string[]): Promise<number> {
   let total = 0;
-  for (const sourcePath of sourcePaths) total += await tailFile(deps, sourcePath);
+  for (const sourcePath of sourcePaths) {
+    try {
+      total += await tailFile(deps, sourcePath);
+    } catch (err) {
+      console.error(`[agent-os] tailer: skipping ${sourcePath} this pass:`, err);
+    }
+  }
   return total;
 }
 
@@ -154,8 +180,10 @@ export function discoverTranscripts(root: string): string[] {
   for (const dir of subdirs) {
     const dirPath = join(root, dir);
     try {
-      for (const name of readdirSync(dirPath)) {
-        if (name.endsWith(".jsonl")) files.push(join(dirPath, name));
+      for (const entry of readdirSync(dirPath, { withFileTypes: true })) {
+        // withFileTypes so a DIRECTORY named `*.jsonl` is never handed to the tailer (openSync -> EISDIR,
+        // which would abort every sweep at that file until it's removed).
+        if (entry.isFile() && entry.name.endsWith(".jsonl")) files.push(join(dirPath, entry.name));
       }
     } catch {
       // unreadable subdir — skip it, keep sweeping the rest

@@ -121,7 +121,7 @@ keyset `(ts, id)`: lossless AND hard-bounded.)
 
 ---
 
-## Deferred — U5 residuals (2026-07-05, ce-simplify-code)
+## Deferred — U5 residuals (2026-07-05, ce-simplify + ce-code-review)
 
 - [~] **U5-R1 — [low] Cold-start / backlog tail reads a file's whole unread range in one allocation**
   (`src/capture/tailer.ts` `readRange`/`tailFile`). On the FIRST tail of a file (cursor 0) or after daemon
@@ -133,6 +133,16 @@ keyset `(ts, id)`: lossless AND hard-bounded.)
   giant-single-line edge (one event larger than the chunk), so it belongs WITH the wiring, not in a
   behavior-preserving simplify pass. **Promotion trigger:** live tailer / daemon wiring (U6 / boot sequence) —
   land the bounded-chunk read there. Surfaced by the U5 ce-simplify efficiency reviewer; conscious defer.
+
+- [~] **U5-R2 — [low] Same-length / longer transcript REWRITE between passes is undetected** (`src/capture/tailer.ts`).
+  The folded `start > size` reset catches a truncation/shrink, but a rewrite that keeps the file the SAME length
+  or LONGER (log rotation, an external edit replacing content) is not detected: byte `cursor` lands mid-line in
+  the new content, the straddling record is dropped as "malformed," and every complete line the rewrite wrote
+  below `cursor` is silently skipped. Does NOT fire for Claude Code (per-session transcripts are append-only —
+  verified empirically), so it is dead for U5; it becomes live for the Codex/U8 extractor if those logs rotate
+  in place. Fix when it triggers: persist a small identity fingerprint (inode + a hash of the first N bytes)
+  beside the offset and reset the cursor to 0 when it changes. **Promotion trigger:** U8/Codex capture over a
+  surface that rewrites/rotates in place. Surfaced by the U5 adversarial review (CASE B); conscious defer.
 
 ---
 

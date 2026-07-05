@@ -29,21 +29,34 @@ import type { ExtractContext, ExtractedBreadcrumb } from "./tailer";
 
 /**
  * Patterns that force a crumb's captured content to `secret` so the redaction pass masks it at the default
- * threshold. Adapted from the spike's classifier. Two deliberate shapes:
- *  - The `sk-ant-…` variant is anchored on the literal `sk-ant-` so it can catch a dashed Anthropic key
- *    WITHOUT the bare `sk-[alnum]` rule being loosened to allow dashes (which would false-positive on
- *    hyphenated prose like "task-force-2024-…").
- *  - The PEM header is a top-level alternative, NOT gated by a `\b` word boundary — `\b` cannot match before
- *    a leading `-`, so a `\b`-gated version silently fails to flag a real private-key header.
+ * threshold. Expanded per the U5 security review — the raw lane captures prompts + tool I/O VERBATIM, so a
+ * MISSED secret lands in a `personal`-floor summary that default-threshold redaction never masks. Non-obvious
+ * shapes:
+ *  - The keyword-assignment rule uses an IDENTIFIER boundary (`[^A-Za-z0-9]` + `[A-Za-z0-9_]*`), NOT `\b`:
+ *    `_` is a regex word char, so a `\b`-gated `password` can't match inside `DATABASE_PASSWORD=` — the
+ *    dominant real-world shape. The identifier form catches prefixed/suffixed names (`STRIPE_SECRET_KEY=`).
+ *  - The `sk-ant-…` variant is anchored on the literal `sk-ant-` so a dashed Anthropic key is caught without
+ *    loosening the bare `sk-[alnum]` rule to allow dashes (which would false-positive on hyphenated prose).
+ *  - The PEM / JWT / conn-string / Authorization rules are top-level alternatives NOT gated by `\b` (`\b`
+ *    can't match before a leading `-` or `:`).
+ * RESIDUAL (open-findings): regex classification cannot catch keyword-less, prefix-less high-entropy secrets
+ * (a raw 40-char AWS secret, an opaque base64 blob). Over-classification is the intended KTD2 fail-safe
+ * direction; the durable mitigation for any NON-local consumer is to read at `threshold:personal` (which
+ * masks EVERY personal summary) rather than trust this classifier.
  */
 const SECRET_PATTERNS: readonly RegExp[] = [
   /\bsk-[A-Za-z0-9]{16,}\b/, // classic OpenAI-style key
   /\bsk-ant-[A-Za-z0-9-]{20,}/, // Anthropic-style (dashed), anchored so prose can't false-positive
-  /\bghp_[A-Za-z0-9]{20,}\b/, // GitHub personal access token
-  /\bAKIA[0-9A-Z]{16}\b/, // AWS access key id
-  /\bxox[baprs]-[A-Za-z0-9-]{10,}/, // Slack token
+  /\b[sr]k_(?:live|test)_[A-Za-z0-9]{16,}/, // Stripe secret / restricted key (underscore form)
+  /\b(?:gh[posur]|github_pat)_[A-Za-z0-9_]{20,}/, // GitHub tokens (ghp_/gho_/ghu_/ghs_/ghr_/github_pat_)
+  /\bAKIA[0-9A-Z]{16}\b/, // AWS access key id (the secret half has no fixed prefix — see RESIDUAL)
+  /\bAIza[0-9A-Za-z_-]{35}\b/, // Google API key
+  /\bxox[baprsce]-[A-Za-z0-9-]{10,}/, // Slack token
+  /eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/, // JWT (base64url header.payload.signature)
+  /:\/\/[^\s:@\/]+:[^\s@\/]+@/, // connection string with inline credentials (scheme://user:pass@host)
   /-----BEGIN [A-Z ]*PRIVATE KEY-----/, // PEM private-key header
-  /\b(api[_-]?key|secret|token|password)\b\s*[:=]/i, // key:value / key=value secret assignment
+  /\bAuthorization:\s*(?:Bearer|Basic)\s+[A-Za-z0-9._~+\/=-]+/i, // HTTP Authorization header
+  /(?:^|[^A-Za-z0-9])[A-Za-z0-9_]*(?:api[_-]?key|secret|token|password|passwd|pwd|credential)[A-Za-z0-9_]*\s*[:=]/i, // key=value / prefixed-identifier secret assignment
 ];
 
 /** `secret` if any secret pattern matches `text`, else the caller's `floor`. */
@@ -265,8 +278,12 @@ export function extractClaudeCode(event: unknown, ctx: ExtractContext): Extracte
 
   // 3. Assistant blocks — tool_use → action crumb, text → terse narration note.
   if (ev.type === "assistant" && Array.isArray(message.content)) {
-    (message.content as Record<string, unknown>[]).forEach((block, index) => {
-      const slot = String(index).padStart(2, "0"); // zero-padded — see the `eventId` note on (ts, id) ordering
+    const blocks = message.content as Record<string, unknown>[];
+    // Pad the slot to the widest index so the store's STRING ordering on id matches numeric block order even
+    // at >=100 blocks (a fixed width of 2 sorts "100" before "99"); see the `eventId` note on (ts, id).
+    const slotWidth = String(Math.max(blocks.length - 1, 0)).length;
+    blocks.forEach((block, index) => {
+      const slot = String(index).padStart(slotWidth, "0");
       if (block?.type === "tool_use") {
         emit(slot, toolCrumb(block.name, block.input));
       } else if (block?.type === "text") {

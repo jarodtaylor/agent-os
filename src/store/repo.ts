@@ -15,7 +15,7 @@
  * never interleave their statements — there is nothing for WAL's writer lock to contend with.
  */
 import { and, asc, desc, eq, gt, isNotNull } from "drizzle-orm";
-import { WorkState, type Breadcrumb, type Handoff } from "../contract/index";
+import { Breadcrumb, WorkState, type Handoff } from "../contract/index";
 import type { Store } from "./db";
 import { accessLog, breadcrumbs, captureCursor, handoffs, projects } from "./schema";
 
@@ -43,6 +43,10 @@ export interface Repo {
    *  most-recent-N breadcrumbs (U2-R6) — the external MCP/HTTP read path always passes one; omitted
    *  keeps the historical unbounded behaviour for in-process callers. */
   readWorkState(project: string, limit?: number): Promise<WorkState | null>;
+  /** Breadcrumbs for `project` STRICTLY AFTER `since` — a forward cursor: pass the last-seen ts to page
+   *  ahead without repeats. Ascending `(ts, id)`, capped to the most-recent-N (`limit`, U2-R6), and each
+   *  row re-validated against `Breadcrumb` before return (never cast). */
+  queryBreadcrumbs(project: string, since: number, limit?: number): Promise<Breadcrumb[]>;
   /** Round-trips a tailer's resume offset for one watched source file (upsert on `sourcePath`). */
   writeCaptureCursor(sourcePath: string, byteOffset: number): Promise<void>;
   /** `null` when the path has never been recorded — distinct from an offset of `0`. */
@@ -160,6 +164,14 @@ export function createRepo(db: Store): Repo {
         rawTrailTail: allCrumbs.map(breadcrumbRowToRecord),
       };
       return WorkState.parse(candidate);
+    },
+
+    async queryBreadcrumbs(project, since, limit) {
+      // Reuses the one trail selector (`afterTs` = the cursor), so query-since and the resume tail share
+      // the same ordering + cap invariant. Validate each row against the contract before it leaves the repo.
+      return selectBreadcrumbTrail(db, project, since, limit).map((row) =>
+        Breadcrumb.parse(breadcrumbRowToRecord(row)),
+      );
     },
 
     async writeCaptureCursor(sourcePath, byteOffset) {

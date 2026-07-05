@@ -13,6 +13,7 @@
  * one no listening server accepts. `openDb` (which creates the 0700 dataDir) runs first so the token
  * has a home to land in.
  */
+import { hostname } from "node:os";
 import { dbPath, ensureDataDir, resolveDataDir } from "../paths";
 import { openDb } from "../store/db";
 import { createRepo } from "../store/repo";
@@ -45,7 +46,10 @@ const repo = createRepo(db);
 
 const token = generateToken();
 const gate = securityGate({ token, port: PORT });
-const app = createRoutes({ repo, gate });
+// machineId is this machine's federation discriminator (decision #13), stamped onto every record the MCP
+// write path persists. os.hostname() is the v1 source — stable per machine and good enough while the
+// substrate is single-machine; a persisted federation UUID is the v1.1 refinement when sync arrives.
+const app = createRoutes({ repo, gate, machineId: hostname() });
 
 // Bind loopback-only, BEFORE publishing the token. `hostname: "127.0.0.1"` because Bun.serve otherwise
 // defaults to 0.0.0.0 (all interfaces), which would expose the gate-exempt /health off-box (KTD9 is

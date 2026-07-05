@@ -14,7 +14,7 @@
  * on: a sync body runs to completion in one turn of the event loop, so two "concurrent" calls can
  * never interleave their statements — there is nothing for WAL's writer lock to contend with.
  */
-import { and, asc, desc, eq, gt, isNotNull } from "drizzle-orm";
+import { and, asc, desc, eq, gt, isNotNull, or } from "drizzle-orm";
 import { Breadcrumb, WorkState, type Handoff } from "../contract/index";
 import type { Store } from "./db";
 import { accessLog, breadcrumbs, captureCursor, handoffs, projects } from "./schema";
@@ -43,12 +43,12 @@ export interface Repo {
    *  most-recent-N breadcrumbs (U2-R6) — the external MCP/HTTP read path always passes one; omitted
    *  keeps the historical unbounded behaviour for in-process callers. */
   readWorkState(project: string, limit?: number): Promise<WorkState | null>;
-  /** Breadcrumbs for `project` STRICTLY AFTER `since` — a forward cursor: advance `since` to the last
-   *  returned crumb's ts to page ahead without repeats. Ascending `(ts, id)`; `limit` bounds ONE page to the
-   *  OLDEST unseen (not most-recent-N — that would skip the middle for a caller behind by >1 page). A page
-   *  that fills to `limit` is extended to include the rest of its boundary ts-group, so a same-ts run is never
-   *  split across the ts-only cursor (the page may then slightly exceed `limit`). Each row re-validated. */
-  queryBreadcrumbs(project: string, since: number, limit?: number): Promise<Breadcrumb[]>;
+  /** Breadcrumbs for `project` AFTER the keyset cursor `(sinceTs, sinceId)` — a forward pager: advance the
+   *  cursor to the last returned crumb's `(ts, id)` to page ahead. The first page starts from `(0, "")`. Keyed
+   *  on the FULL sort key `(ts, id)`, so a page is BOTH lossless (a same-ts group spanning a boundary resumes
+   *  exactly — no silent skip) AND hard-bounded by `limit` (no boundary-group bloat). Ascending; each row
+   *  re-validated against `Breadcrumb` before return. */
+  queryBreadcrumbs(project: string, sinceTs: number, sinceId: string, limit?: number): Promise<Breadcrumb[]>;
   /** Round-trips a tailer's resume offset for one watched source file (upsert on `sourcePath`). */
   writeCaptureCursor(sourcePath: string, byteOffset: number): Promise<void>;
   /** `null` when the path has never been recorded — distinct from an offset of `0`. */
@@ -168,39 +168,18 @@ export function createRepo(db: Store): Repo {
       return WorkState.parse(candidate);
     },
 
-    async queryBreadcrumbs(project, since, limit) {
-      // A forward pager needs the OLDEST-N after the cursor (ascending) — a DIFFERENT shape from
-      // selectBreadcrumbTrail's most-recent-N resume tail, so it can't reuse that selector: doing so would
-      // return the NEWEST-N and silently skip the middle for a caller behind by more than one page.
-      const where = and(eq(breadcrumbs.project, project), gt(breadcrumbs.ts, since));
-      if (limit === undefined) {
-        const all = db.select().from(breadcrumbs).where(where).orderBy(asc(breadcrumbs.ts), asc(breadcrumbs.id)).all();
-        return all.map((row) => Breadcrumb.parse(breadcrumbRowToRecord(row)));
-      }
-      const page = db
-        .select()
-        .from(breadcrumbs)
-        .where(where)
-        .orderBy(asc(breadcrumbs.ts), asc(breadcrumbs.id))
-        .limit(limit)
-        .all();
-      // The caller advances `since` to the last returned crumb's TS (a ts-only cursor), but the sort key is
-      // (ts, id). If a group sharing one ts straddles the page boundary, the next page's gt(ts) would drop the
-      // same-ts remainder — silent loss. So when the page fills exactly, pull the rest of that boundary
-      // ts-group (`id` after the last returned id, matching the ascending sort) into THIS page — no ts-group
-      // is ever split. The page may then slightly exceed `limit`; that soft relaxation is bounded by one
-      // ts-group's size, and nothing writes breadcrumbs at volume until U5.
-      if (page.length === limit && limit > 0) {
-        const last = page[page.length - 1]!;
-        const rest = db
-          .select()
-          .from(breadcrumbs)
-          .where(and(eq(breadcrumbs.project, project), eq(breadcrumbs.ts, last.ts), gt(breadcrumbs.id, last.id)))
-          .orderBy(asc(breadcrumbs.id))
-          .all();
-        page.push(...rest);
-      }
-      return page.map((row) => Breadcrumb.parse(breadcrumbRowToRecord(row)));
+    async queryBreadcrumbs(project, sinceTs, sinceId, limit) {
+      // KEYSET pagination on the FULL sort key `(ts, id)` — the cursor matches the sort key, so a page is
+      // both LOSSLESS (a same-ts group spanning a boundary resumes exactly, no silent skip) and HARD-BOUNDED
+      // (`LIMIT` is never exceeded — no "complete the boundary group" bloat). The caller advances the cursor
+      // to the last returned crumb's `(ts, id)`. A ts-only cursor can't do both at once; `(ts, id)` can.
+      const where = and(
+        eq(breadcrumbs.project, project),
+        or(gt(breadcrumbs.ts, sinceTs), and(eq(breadcrumbs.ts, sinceTs), gt(breadcrumbs.id, sinceId))),
+      );
+      const base = db.select().from(breadcrumbs).where(where).orderBy(asc(breadcrumbs.ts), asc(breadcrumbs.id));
+      const rows = (limit === undefined ? base : base.limit(limit)).all();
+      return rows.map((row) => Breadcrumb.parse(breadcrumbRowToRecord(row)));
     },
 
     async writeCaptureCursor(sourcePath, byteOffset) {

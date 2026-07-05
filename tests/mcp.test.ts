@@ -165,7 +165,7 @@ describe("query_breadcrumbs (real client)", () => {
   test("returns redacted crumbs strictly after `since`", async () => {
     await repo.writeBreadcrumb(crumb({ id: "old", ts: 1000, summary: "old note", sensitivity: "personal" }));
     await repo.writeBreadcrumb(crumb({ id: "new", ts: 2000, summary: "SECRET=zzz", sensitivity: "secret" }));
-    const crumbs = JSON.parse(textOf(await call(await connect(), "query_breadcrumbs", { project: PROJECT, since: 1500 })));
+    const crumbs = JSON.parse(textOf(await call(await connect(), "query_breadcrumbs", { project: PROJECT, since_ts: 1500 })));
     expect(crumbs).toHaveLength(1);
     expect(crumbs[0].id).toBe("new");
     expect(crumbs[0].summary).toBe("[redacted:secret]");

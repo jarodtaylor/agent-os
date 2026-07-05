@@ -112,10 +112,12 @@ completion), the `/work-state` bare-text-500 contract (→ `/status`-style JSON 
   breadcrumb `sessionId` namespace — reconcile ONE canonical session identity across the MCP session and the
   tailer (or scope the ratio to a single writer), then it becomes measurable.
 
-**Accepted tradeoffs (conscious, not deferred defects — noted for the PR):** idle eviction can fragment a
+**Accepted tradeoff (conscious, not a deferred defect — noted for the PR):** idle eviction can fragment a
 quiet-but-active session into a new `sessionId` on reconnect (continuity is preserved — `readWorkState`
-resolves by `ts`, sessionId-agnostic — only KTD8's one-row-per-session cleanliness is relaxed); and a page
-of `query_breadcrumbs` may slightly exceed `DEFAULT_TRAIL_CAP` to complete a same-`ts` boundary group.
+resolves by `ts`, sessionId-agnostic — only KTD8's one-row-per-session cleanliness is relaxed). (The Codex
+adversarial pass then found the session cap had a check-before-insert TOCTOU and the earlier same-`ts` page
+completion could exceed the cap; both were folded — the cap now enforces at insertion, and the pager is
+keyset `(ts, id)`: lossless AND hard-bounded.)
 
 ---
 

@@ -46,11 +46,11 @@ const MAX_SESSIONS = 256;
  * unauthenticated request can't spin up transports.
  *
  * Session lifetime: `onsessionclosed` only fires on an explicit DELETE, which real clients rarely send, and
- * there is no server-side disconnect signal to hook. So each session tracks `lastSeen` and `reapExcess`
- * runs on every NEW connection — an idle sweep (drop sessions past the TTL) plus a hard size cap (drop the
- * least-recently-seen if a reconnect storm is still at the ceiling). The map self-bounds without a
- * background timer; an active session touches `lastSeen` on each request, and an evicted one simply
- * re-initializes on its next call.
+ * there is no server-side disconnect signal to hook. So each session tracks `lastSeen`: a new connection
+ * first `sweepIdle`s sessions past the TTL, and each insert `enforceCap`s a hard size ceiling (drop the
+ * least-recently-seen). The cap runs AT INSERTION, not pre-connect, so concurrent initializes can't bypass
+ * it. The map self-bounds without a background timer; an active session touches `lastSeen` on each request,
+ * and an evicted one simply re-initializes on its next call.
  */
 export function createMcpHandler(deps: McpDeps): (req: Request) => Promise<Response> {
   const now = deps.now ?? Date.now;
@@ -64,13 +64,19 @@ export function createMcpHandler(deps: McpDeps): (req: Request) => Promise<Respo
     void transport.close().catch((err) => console.error("[agent-os] session cleanup failed:", err));
   };
 
-  const reapExcess = (): void => {
+  const sweepIdle = (): void => {
     const cutoff = now() - SESSION_IDLE_MS;
     for (const [id, s] of sessions) {
-      if (s.lastSeen <= cutoff) dropSession(id, s.transport); // idle sweep — the common case
+      if (s.lastSeen <= cutoff) dropSession(id, s.transport); // free abandoned sessions — the common case
     }
-    // Hard cap: if a reconnect storm still leaves us at the ceiling, drop the least-recently-seen until under it.
-    while (sessions.size >= MAX_SESSIONS) {
+  };
+
+  // Enforce the hard cap by dropping the least-recently-seen until at/under it. Called AT INSERTION
+  // (onsessioninitialized), which runs synchronously per new session — so a burst of concurrent initializes
+  // can't bypass it. A pre-connect check could: all of them would clear it (map still under cap) before any
+  // of them inserts, then each adds a session. Enforcing at the insert point is correct by construction.
+  const enforceCap = (): void => {
+    while (sessions.size > MAX_SESSIONS) {
       let oldestId: string | undefined;
       let oldestSeen = Infinity;
       for (const [id, s] of sessions) {
@@ -92,7 +98,7 @@ export function createMcpHandler(deps: McpDeps): (req: Request) => Promise<Respo
       return existing.transport.handleRequest(req);
     }
 
-    reapExcess(); // no clean disconnect signal exists (see above), so bound the map as new sessions arrive
+    sweepIdle(); // no clean disconnect signal exists (see above), so free abandoned sessions as new ones arrive
 
     // Annotated (not inferred) because the session callbacks below reference `transport` in its own
     // initializer; block bodies keep them returning void, not `Map.set`/`.delete`'s value.
@@ -100,6 +106,7 @@ export function createMcpHandler(deps: McpDeps): (req: Request) => Promise<Respo
       sessionIdGenerator: () => randomUUID(),
       onsessioninitialized: (id) => {
         sessions.set(id, { transport, lastSeen: now() });
+        enforceCap(); // hard-bound the map AT the insert point (concurrent-init-safe — see enforceCap)
       },
       onsessionclosed: (id) => {
         sessions.delete(id);

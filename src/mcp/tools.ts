@@ -87,13 +87,17 @@ export function registerBrainTools(server: McpServer, deps: McpDeps): void {
     "query_breadcrumbs",
     {
       title: "Query breadcrumbs",
-      description: "Raw-lane breadcrumbs for a project strictly after `since` (a forward cursor), redacted.",
-      inputSchema: { project: z.string().min(1), since: z.number().int().nonnegative() },
+      description: "Raw-lane breadcrumbs for a project after a keyset cursor (a forward pager), redacted.",
+      inputSchema: {
+        project: z.string().min(1),
+        since_ts: z.number().int().nonnegative().default(0),
+        since_id: z.string().default(""),
+      },
     },
-    async ({ project, since }, extra) => {
-      // Bound the response to one page (U2-R6) — the OLDEST-N after `since`; a caller pages by advancing
-      // `since` to the last returned crumb's ts.
-      const crumbs = await deps.repo.queryBreadcrumbs(project, since, DEFAULT_TRAIL_CAP);
+    async ({ project, since_ts, since_id }, extra) => {
+      // Keyset cursor (since_ts, since_id): advance both to the last returned crumb's (ts, id) to page ahead.
+      // One page is hard-bounded to DEFAULT_TRAIL_CAP (U2-R6) and lossless across same-ts boundaries.
+      const crumbs = await deps.repo.queryBreadcrumbs(project, since_ts, since_id, DEFAULT_TRAIL_CAP);
       const redacted = crumbs.map((b) => redact(b, Breadcrumb));
       // logAccess is best-effort (decision #4) — never gate the already-computed page on the audit write.
       try {

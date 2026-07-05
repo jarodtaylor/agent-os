@@ -10,8 +10,8 @@
 import { Database } from "bun:sqlite";
 import { drizzle } from "drizzle-orm/bun-sqlite";
 import { migrate } from "drizzle-orm/bun-sqlite/migrator";
-import { mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { ensureDataDir } from "../paths";
 import * as schema from "./schema";
 
 // Resolved relative to THIS file (Bun's `import.meta.dir`), not `process.cwd()`, so `openDb()`
@@ -38,9 +38,9 @@ export function openDb(path: string): OpenedDb {
   if (path === ":memory:") {
     throw new Error("openDb requires a real file path: WAL and the store's concurrency guarantees are a no-op on ':memory:'");
   }
-  // bun:sqlite won't create missing parent directories, so a first-run data-dir path would throw at
-  // `new Database` before the store ever opens. Create the parent up front (no-op if it exists).
-  mkdirSync(dirname(path), { recursive: true });
+  // bun:sqlite won't create the parent dir, and it must already exist (owner-only) before we open the
+  // store. `ensureDataDir` centralizes the 0700 discipline (create + tighten a reused dir) — see ../paths.
+  ensureDataDir(dirname(path));
 
   const sqlite = new Database(path);
   try {

@@ -34,9 +34,9 @@ const dataDir = resolveDataDir();
 // is load-bearing: openDb opens SQLite + runs migrations, so a rejected second instance must be turned
 // away BEFORE it can touch or migrate the shared store. The lock is DATA-DIR-scoped (not port-scoped),
 // so it also stops a second instance on a DIFFERENT port from clobbering the token / running a second
-// writer (KTD9: one writer by construction). NOTE: this pid-file lock catches the common double-run; its
-// crash-recovery + pid-recycle edges are a tracked fast-follow — a real flock OS lock landing in U15
-// (open-findings U3-R3).
+// writer (KTD9: one writer by construction). It's a real OS `flock` held on an fd for the process
+// lifetime, auto-releasing on exit — clean OR crashed — so we intentionally DISCARD the returned
+// release fn here; process exit is the release. See single-instance.ts / open-findings U3-R3.
 ensureDataDir(dataDir);
 acquireSingleInstanceLock(dataDir);
 

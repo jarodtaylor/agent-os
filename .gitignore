@@ -21,16 +21,12 @@ build/
 .env.local
 .env.*.local
 
-# Local aggregated data (personal — never commit, when it exists)
-src/data/the data file
-
 # Session handoff scratch — mid-work resume cursor written by /handoff.
 # Local-only; the canonical state is START-HERE.md + DECISIONS.md.
 docs/HANDOFF.local.md
 
 # Optional local reference snapshot at repo ROOT (kept out of git).
-# Anchored with a leading slash so it does NOT also ignore docs/reference/
-# (the committed, distilled studied-template teardown that CLAUDE.md points to).
+# Leading slash anchors it to the root so it does not also match docs/reference/.
 /reference/
 
 # OS / editor
@@ -44,3 +40,4 @@ docs/HANDOFF.local.md
 /tasks/
 /.claude/
 /docs/reference/
+/docs/FEATURE-SLATE.md

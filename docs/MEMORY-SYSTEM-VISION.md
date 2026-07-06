@@ -8,7 +8,7 @@
 > memory-architecture phase (v1.1) starts.
 >
 > This is the **"unified memory" anchor** of the Agent OS and, in my (CTO) view, the strongest
-> candidate for its **headline feature** — the equivalent of what the Dream engine is to a studied template.
+> candidate for its **headline feature** — the piece the whole OS gets judged by.
 > The goal: a single **"Agent Brain" shared by all of Jarod's agents** (Claude, Codex, Hermes, OpenClaw).
 
 ## The vision: a 4-layer Agent Brain
@@ -24,7 +24,7 @@
 
 1. **The write path is the product — not the read path.** The brain's quality is bounded entirely by
    L4. The **"Wrap-Up" skill is the single highest-leverage component**: it's what turns raw activity
-   into curated truth. a studied template *observes* memory (pretty read-only visualization) but has **no write path** — this is
+   into curated truth. The studied template *observes* memory (a polished read-only visualization) but has **no write path** — this is
    exactly where our version wins.
 2. **Re-cut the layer axis from *time-horizon* to *mutability + latency + cost*.** The sharp L2/L3 test:
    *is this curated truth I will edit* (→ L2) or *an immutable record I will retrieve* (→ L3)? Resolves

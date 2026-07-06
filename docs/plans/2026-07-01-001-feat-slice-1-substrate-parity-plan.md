@@ -14,7 +14,7 @@ execution: code
 ## Goal Capsule
 
 - **Objective:** Build slice 1 of Agent OS: a shared, agent-legible work-state substrate (the Brain seed — the v1 flagship) plus the parity-enabling half of Observe+Control, as a thin vertical slice on Claude Code first, then broadened to Codex writes and four-runtime read inventory.
-- **Authority hierarchy:** This plan's Product Contract > `STRATEGY.md` (North Star) > `docs/DECISIONS.md` (decisions 1–10 + fork resolutions recorded here) > `docs/FEATURE-SLATE.md` / `docs/MEMORY-SYSTEM-VISION.md` (design grounding) > `docs/reference/studied-template/` (borrow/avoid reference).
+- **Authority hierarchy:** This plan's Product Contract > `STRATEGY.md` (North Star) > `docs/DECISIONS.md` (decisions 1–10 + fork resolutions recorded here) > `docs/MEMORY-SYSTEM-VISION.md` (design grounding) > the studied template's teardown notes (local; borrow/avoid reference).
 - **Stop conditions:** Stop and surface (do not guess) if: a harness surface behaves differently than the Planning Contract records (e.g., transcript JSONL shape, hook payloads); a mutation cannot be made reversible; the MCP SDK v1 API cannot express a needed tool shape; or any work would decide a still-deferred fork (remote adapter, memory routing, full gateway, run-steering).
 - **Execution profile:** Thin vertical slice to a felt checkpoint (fresh Claude Code session resumes a real project unprompted) before broadening. Greenfield repo — no legacy constraints, but every seam ships remote-ready per decision #2.
 - **Tail ownership:** Implementer owns green tests, the Verification Contract's behavioral scenarios, and removing dead-end experiment code before declaring done.
@@ -134,7 +134,7 @@ flowchart TB
 - Plugin propagation — parity actions (R10) cover skills and MCP servers; plugins are observed (R7) but not yet propagated. Promotes when the typed plugin/MCP registry (slate row 8 / §7.2) lands.
 - Dream prescription engine — deferred; the Brain seed is the v1 flagship (fork resolved 2026-07-01).
 - Hermes/OpenClaw native writes — v1.1, via Hermes's `localhost:9119` API (write surface needs discovery) and OpenClaw's own format.
-- Remote runtimes / Rung 3, A2A export adapter — per `docs/FEATURE-SLATE.md` §5; seams stay remote-ready.
+- Remote runtimes / Rung 3, A2A export adapter — deferred (design grounding kept local); seams stay remote-ready.
 
 **Outside this product's identity**
 
@@ -269,7 +269,7 @@ Sequencing: **U13 runs first and gates everything** — a throwaway spike that v
 - **Dependencies:** U1, U2.
 - **Files:** `src/server/index.ts`, `src/server/security.ts`, `src/server/routes.ts`, `tests/security.test.ts`.
 - **Approach:** `Bun.serve` + Hono; one middleware enforcing loopback remote address, Host-header allowlist (anti DNS-rebind), and per-boot token (`0600` file, `X-Agent-OS-Token`) on every content-returning and mutating route — health only exempt. (The token-gated `GET /work-state?project=` route was **deferred to U4** — decision #17 — so it ships alongside the MCP `read_work_state` tool and shares one redaction choke-point + response presenter.) Hono RPC type export for the view.
-- **Test scenarios:** non-loopback source rejected; bad Host header rejected; missing/wrong token rejected on content and mutation routes while health stays exempt; a token from a prior boot is rejected while a fresh token-file read succeeds; token file mode is `0600`; server starts from a production build (no dev-server dependency) — the anti-`the dev-server config` check.
+- **Test scenarios:** non-loopback source rejected; bad Host header rejected; missing/wrong token rejected on content and mutation routes while health stays exempt; a token from a prior boot is rejected while a fresh token-file read succeeds; token file mode is `0600`; server starts from a production build (no dev-server dependency) — the anti-dev-server-dependency check.
 - **Verification:** `bun test` green; `bun run build && bun run start` serves health + a store-backed route.
 
 ### U4. Brain MCP server + work-state tools + the redaction choke-point
@@ -439,7 +439,7 @@ Per-unit: each unit's Verification line, plus its test scenarios implemented (or
 
 ## Sources / Research
 
-- `docs/FEATURE-SLATE.md` — §2 seams, §3 P0 rows, §7 gateway/board; effort verdicts.
-- `docs/reference/studied-template/the rebuild notes.md` — write-path discipline (the save path), typed-contract lessons (Gotchas #5–#7, #10), crash-safe scanner composition, dev-middleware failure.
+- Internal feature-slate notes (kept local) — the two seams, the P0 rows, the gateway/board integration; effort verdicts.
+- The studied template's rebuild notes (kept local) — write-path discipline, typed-contract lessons (Gotchas #5–#7, #10), crash-safe scanner composition, dev-middleware failure.
 - `docs/MEMORY-SYSTEM-VISION.md` notes 5, 9, 10 — brain-as-MCP-server; slice-1 lanes as Wrap-Up/L3 seeds.
 - Research (2026-07): MCP TS SDK v1.29 Streamable HTTP session pattern (v2 beta warning); Claude Code hooks — SessionStart `additionalContext` injection, SessionEnd reasons, transcript paths, MCP registration split across `~/.claude.json` vs `settings.json`; Codex `config.toml` `[mcp_servers]`, session rollout JSONL, `features.hooks` (unverified detail); zod v4 native `z.toJSONSchema`; Drizzle + `bun:sqlite` sync driver + WAL.

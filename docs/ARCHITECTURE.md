@@ -1,7 +1,7 @@
 # Agent OS — Whole-System Architecture
 
 > The cohesion map: every major component, how they connect, what's built when, and where slice 1 fits.
-> Produced **2026-07-02** (decision #12) by consolidating `STRATEGY.md`, `FEATURE-SLATE.md`, `MEMORY-SYSTEM-VISION.md`, the slice-1 plan, and the a studied template teardown mining (`reference/studied-template-mined-ideas.md`) into one picture. Jarod affirmed the exit condition: *"I see the whole, and slice 1 is the right first cut."*
+> Produced **2026-07-02** (decision #12) by consolidating `STRATEGY.md`, `MEMORY-SYSTEM-VISION.md`, the slice-1 plan, and the studied template's teardown notes (kept local) into one picture. Jarod affirmed the exit condition: *"I see the whole, and slice 1 is the right first cut."*
 > **This is the anti-drift reference — measure new work against it.** Living doc; update it as the build teaches us. (The interactive v0.3 map was the working surface it was authored from.)
 
 ## One-liner
@@ -74,4 +74,4 @@ Coherent concerns with no clean home in the four tracks, reserved so future idea
 **The Brain seed + the parity-enabling half of Observe+Control.** A shared, typed, MCP-native work-state substrate (curated handoff + automatic raw trail) any agent resumes from, plus 4-runtime inventory and Claude→Codex parity actions — one thin vertical slice to a felt checkpoint (a fresh session picks up where the last left off, unprompted). Plan: `plans/2026-07-01-001-feat-slice-1-substrate-parity-plan.md`. The 4 extensibility hooks (#13) are now build constraints on the slice.
 
 ## Room to grow — the promise
-The two seams **are** the extensibility mechanism. New capability = a contract section + an adapter method. New harness = a new adapter + entry files. Remote machine = one more adapter over a transport. a studied template is the **reference and inspiration, never a 1:1 port** — its ideas (and ones we haven't thought of yet) plug into this same spine. Everything deferred/reserved **deepens** this spine later; it never replaces it (decision #9). Mined idea backlog + "boxes to avoid": `reference/studied-template-mined-ideas.md`.
+The two seams **are** the extensibility mechanism. New capability = a contract section + an adapter method. New harness = a new adapter + entry files. Remote machine = one more adapter over a transport. The studied template is the **reference and inspiration, never a 1:1 port** — its ideas (and ones we haven't thought of yet) plug into this same spine. Everything deferred/reserved **deepens** this spine later; it never replaces it (decision #9). Mined idea backlog + "boxes to avoid" live in local notes (kept out of the repo).

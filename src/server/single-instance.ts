@@ -53,12 +53,17 @@ function resolveFlock(): FlockFn {
   return boundFlock;
 }
 
-function bindFlock(): FlockFn | null {
-  // macOS exposes libc symbols through libSystem; Linux through libc. `suffix` covers odd Linux layouts.
-  const candidates =
-    process.platform === "darwin"
-      ? ["libSystem.dylib", "/usr/lib/libSystem.B.dylib"]
-      : ["libc.so.6", `libc.${suffix}`];
+// macOS exposes libc symbols through libSystem; Linux through libc. `suffix` covers odd Linux layouts.
+function flockLibCandidates(): string[] {
+  return process.platform === "darwin"
+    ? ["libSystem.dylib", "/usr/lib/libSystem.B.dylib"]
+    : ["libc.so.6", `libc.${suffix}`];
+}
+
+// Exported so a test can drive the fail-closed path with a REAL dlopen failure (a bogus candidate) —
+// no `bun:ffi` mock, which doesn't take effect outside the test runner anyway. Returns null when no
+// candidate library exposes a bindable `flock`; resolveFlock turns that null into the distinct throw.
+export function bindFlock(candidates: string[] = flockLibCandidates()): FlockFn | null {
   for (const path of candidates) {
     try {
       const { symbols } = dlopen(path, {

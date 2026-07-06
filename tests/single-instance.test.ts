@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { acquireSingleInstanceLock } from "../src/server/single-instance";
+import { acquireSingleInstanceLock, bindFlock } from "../src/server/single-instance";
 
 // Each test gets its own temp data dir; all are cleaned up afterward.
 const dirs: string[] = [];
@@ -15,10 +15,11 @@ function tempDir(): string {
   dirs.push(dir);
   return dir;
 }
-afterEach(() => {
+afterEach(async () => {
   for (const h of holders.splice(0)) {
     try {
       h.kill("SIGKILL");
+      await h.exited; // reap before the next test — no lingering zombie even after a timeout/hang
     } catch {
       /* already exited */
     }
@@ -92,5 +93,14 @@ describe("single-instance lock — one daemon per data dir (KTD9)", () => {
     acquireSingleInstanceLock(dir)(); // acquire, then immediately release
     const release = acquireSingleInstanceLock(dir); // must not throw
     release();
+  });
+});
+
+describe("flock FFI bind — fail-closed when the OS primitive can't be bound", () => {
+  test("bindFlock returns null when no candidate library exposes flock", () => {
+    // The fail-closed root: when the bind can't resolve `flock`, it returns null — and resolveFlock
+    // turns that null into the distinct "could not bind the OS file lock" throw (refuse to start,
+    // never proceed unguarded). Driven with a REAL dlopen failure on a bogus path (no bun:ffi mock).
+    expect(bindFlock(["/nonexistent/no-such-libflock.dylib"])).toBeNull();
   });
 });

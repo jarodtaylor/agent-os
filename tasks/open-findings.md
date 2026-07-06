@@ -121,6 +121,38 @@ keyset `(ts, id)`: lossless AND hard-bounded.)
 
 ---
 
+## Deferred — U5 residuals (2026-07-05, ce-simplify + ce-code-review)
+
+- [~] **U5-R1 — [low] Cold-start / backlog tail reads a file's whole unread range in one allocation**
+  (`src/capture/tailer.ts` `readRange`/`tailFile`). On the FIRST tail of a file (cursor 0) or after daemon
+  downtime, the "delta" is the entire unread range, buffered in one `Buffer.allocUnsafe(size - start)` before
+  any write. Peak is bounded PER FILE — the buffer + its crumbs are call-scoped and GC'd between files, so peak
+  ≈ the largest single transcript (~5 MB in this repo), NOT all historical files summed — so it is not an OOM
+  risk today. A bounded-chunk read (loop chunks to EOF, advancing the cursor each) is the right shape once the
+  live tailer sweeps every historical transcript on first boot; the clean fix must also handle the
+  giant-single-line edge (one event larger than the chunk), so it belongs WITH the wiring, not in a
+  behavior-preserving simplify pass. **Promotion trigger:** live tailer / daemon wiring (U6 / boot sequence) —
+  land the bounded-chunk read there. Surfaced by the U5 ce-simplify efficiency reviewer; conscious defer.
+
+- [~] **U5-R2 — [low] In-place rewrite safety (same-shape detection + same-UUID identity) — OUT OF CONTRACT for U5, a U8 concern** (`src/capture/tailer.ts` + the store's per-id append).
+  The tailer's no-lost-crumbs guarantee is scoped to APPEND-ONLY inputs (documented in `tailFile`). Two guards
+  catch a rewritten transcript — `start > size` (a shrink) and the line-boundary check (byte `cursor-1` must be
+  the last complete line's `\n`, else reset to 0) — covering truncation and any rewrite that shifts the byte at
+  `cursor-1`. TWO residuals remain, both requiring generation-aware identity, both raised by the Codex cross-
+  model gate: (1) a same-SHAPE rewrite that still leaves a `\n` at `cursor-1` evades detection; (2) even when a
+  rewrite IS detected and re-tailed, if it preserved event UUIDs the re-derived crumbs collide on id with the
+  old rows and the store's `ON CONFLICT DO NOTHING` keeps the first-written content (first-write-wins), so the
+  rewrite isn't reflected. NEITHER can fire for Claude Code: transcripts are append-only and `--resume` copies
+  events VERBATIM to a NEW path (identical content — no divergence). Full fix (at U8, where rotation is real):
+  persist a per-file generation fingerprint (inode + first-N-bytes hash) beside the cursor, reset on change, and
+  fold the generation into crumb identity so a rewritten generation writes fresh rows. Deliberately NOT fixed in
+  U5 — the fix would touch U2's `ON CONFLICT DO NOTHING`, the same idempotency primitive the at-least-once retry
+  depends on, to close a case CC cannot produce (advisor-affirmed: fixing now is riskier than deferring).
+  **Promotion trigger:** U8/Codex capture over a rotating/rewriting surface. Surfaced + re-flagged by the Codex
+  cross-model gate (2× no-ship); overridden as a scoped defer under the narrowed append-only invariant.
+
+---
+
 ## Fixed 2026-07-04 — Codex adversarial review (3 passes) + ce-code-review, folded into this branch
 
 **Contract (`src/contract/schema.ts`) — 2nd/3rd adversarial passes:**

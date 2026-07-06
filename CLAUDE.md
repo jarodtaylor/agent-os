@@ -31,5 +31,5 @@ Uses the **compound-engineering** plugin: `ce-strategy` (North Star) → `ce-bra
 - Structural graph queryable via codebase-memory MCP, project key `Users-jarod-Code-personal-studied-template` (persists independent of the folder).
 - The raw code is only rarely needed — the distillation covers ~95%.
 
-## Current phase (2026-07-01, end of day)
-Planning complete through `ce-plan`: slice 1 has an **implementation-ready plan** at `docs/plans/2026-07-01-001-feat-slice-1-substrate-parity-plan.md` (Brain seed flagship, thin vertical slice, CC+Codex writes — decision #11). **Next: `ce-work`, starting with U13's gating spike, on a feature branch.** Code era begins — feature branches + PRs from here (docs-to-main exception ended).
+## Current phase (2026-07-05)
+`ce-work` on the slice-1 plan (`docs/plans/2026-07-01-001-feat-slice-1-substrate-parity-plan.md`). **Shipped + merged: U13 gate → U1 → U14 → U2 → U3 → U4 → U5** — the Brain-seed substrate, its agent-consumption (MCP + redaction), and the raw-lane capture. **Next: `ce-work` U6** (Claude Code consumption + clean-end hooks). This line is a coarse pointer — **always read `docs/START-HERE.md` first** for live state. Code era: feature branches + PRs.

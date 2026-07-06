@@ -38,3 +38,9 @@ docs/HANDOFF.local.md
 *.log
 .vscode/
 .idea/
+
+# Kept local-only — excluded from the public repo (build-in-public = the Agent OS build itself)
+/CLAUDE.md
+/tasks/
+/.claude/
+/docs/reference/

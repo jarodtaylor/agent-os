@@ -172,7 +172,7 @@ function resultDigest(result: unknown, isError: boolean): CrumbCore | null {
     const out = `${str(r.stdout)}\n${str(r.stderr)}`;
     const pass = out.match(/(\d+)\s+pass/i);
     const fail = out.match(/(\d+)\s+fail/i);
-    // classify() scans up to 7 regexes over the full output — only pay it on a branch that emits a crumb
+    // classify() runs every SECRET_PATTERN over the full output — only pay it on a branch that emits a crumb
     // (a plain successful command is the common case and returns null below).
     if (pass || fail) {
       return { kind: "note", summary: `→ ${pass?.[1] ?? "0"} pass, ${fail?.[1] ?? "0"} fail`, sensitivity: classify(out, "personal") };

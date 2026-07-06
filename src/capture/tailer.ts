@@ -51,7 +51,8 @@ const NEWLINE = 0x0a; // '\n'
 
 /**
  * Read `sourcePath` from its persisted `capture_cursor` offset to EOF, persist every extracted breadcrumb,
- * then advance the cursor. Returns the number of crumbs written this pass.
+ * then advance the cursor. Returns the count of validated crumbs SUBMITTED to the store this pass — the
+ * per-id idempotent append may dedupe some, so this is not necessarily the number of net-new rows.
  *
  * Invariants (KTD4 + U2):
  *  - BYTE-ACCURATE. The cursor is a byte offset; lines are framed on the `\n` byte and every offset is

@@ -523,7 +523,9 @@ describe("D — secret shapes classify as secret and redact through the read pat
     ["AWS AKIA key", "AKIAIOSFODNN7EXAMPLE"], // AKIA + exactly 16 [0-9A-Z]
     ["Google AIza key", `AIza${"0123456789".repeat(3)}01234`], // AIza + exactly 35 chars
     ["Slack xox token", "SLACK_FIXTURE_REDACTED"],
-    ["JWT", "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NSJ9.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"],
+    // Synthetic JWT — clearly fake (header {"alg":"none"}, payload {"synthetic":true}, obvious sig) but still
+    // matches the JWT shape the classifier keys on, so it exercises the pattern without a real-looking token.
+    ["JWT (synthetic)", "eyJhbGciOiJub25lIn0.eyJzeW50aGV0aWMiOnRydWV9.NOT_A_REAL_TOKEN_synthetic_fixture_0000"],
     ["postgres conn-string", "postgres://user:pass@db.example.com:5432/app"],
     ["Authorization Bearer header", "Authorization: Bearer abc123.def456.ghi789"],
     ["PEM private-key header", "-----BEGIN RSA PRIVATE KEY-----"],

@@ -20,7 +20,7 @@ git status --short
 git log --oneline -8 | cat
 ```
 
-- **Branch** — the initial commit went to `main` by exception (already spent). Going forward, work rides **feature branches → PR** per [[jarod-compound-engineering-pipeline]]. If there's uncommitted work sitting on `main`, surface it — don't silently commit there.
+- **Branch** — **CODE** rides **feature branches → PR** per [[jarod-compound-engineering-pipeline]]; if there's uncommitted *code* on `main`, surface it (don't silently commit code there). **The handoff's OWN record updates are the exception → they commit directly to `main` (see Step 3).**
 - **Uncommitted / unpushed** — surface explicitly. If it's a complete, committable unit and Jarod wants it saved, commit it (feature branch; clear "why" message). Otherwise note it in-flight; don't invent a commit.
 - **Tests / build** — if the project has a test or build command, run it and report `Ran / OK / FAILED`. (agent-os is **docs-only during the planning phases — none yet**; add this once there's code.) Never write "green" over an unrun or failing suite.
 - **CE phase** — note which compound-engineering phase the session was in (`ce-strategy` ✅ done → `ce-ideate`/`ce-brainstorm` → `ce-doc-review` → `ce-plan` → `ce-work` → `ce-code-review` → `codex:adversarial-review` → `ce-compound` → PR). It shapes Step 2. See [[jarod-compound-engineering-pipeline]].
@@ -41,6 +41,7 @@ Capture for shape B: units done vs left; which review passes (advisor / `ce-code
 
 **The canonical record is `docs/START-HERE.md` + `docs/DECISIONS.md`** (CLAUDE.md: *"START-HERE + DECISIONS are the state"*). The handoff **feeds them** — it never opens a parallel "next session" block, because that reintroduces the multi-source drift this project exists to prevent. `STRATEGY.md` is the North Star; **reference it, don't restate-and-diverge.**
 
+- **Commit these record updates DIRECTLY to `main`** — no feature branch, no PR. They're the canonical ledger (bookkeeping), not reviewable code: a handoff PR burns a CodeRabbit/Copilot cycle on a doc-flip that never has comments and adds friction at the exact moment you're clearing context. (Docs *coupled to a feature* — a spike report, a decision written alongside its code — ride that feature's PR instead; this direct-commit is only for the handoff's own record-keeping.)
 - **`START-HERE.md`** — update `## Where we are RIGHT NOW` (flip the finished phase to ✅, set the ⏳ **Next**) and `## Open threads`. Keep it **curated + compact** — compress finished detail into a line; don't let it grow unbounded.
 - **`DECISIONS.md`** — log every decision made this session (row: date · decision · **why** · **intent served**). If a decision **closed a deferred fork**, move that fork out of the "Open — deferred" table and cite the decision number.
 - **Mid-work cursor (shape B only)** — the ephemeral "resume on branch X, U4/U5 left, KTDs…" detail goes in **gitignored `docs/HANDOFF.local.md`** (survives a context clear; keeps the curated START-HERE from churning). START-HERE gets ONE line: *"⏸ Paused mid-`<phase>` — see `docs/HANDOFF.local.md`."* Clear that file at the next clean boundary.

@@ -130,22 +130,42 @@ export function installClaudeCode(opts: InstallOptions = {}): InstallResult {
     { dataDir },
   );
 
-  // ── MCP server → ~/.claude.json — object key; deepMerge preserves other servers, no read-modify-write ──
-  const mcp = mergeConfig(
-    claudeJsonPath(home),
-    {
-      mcpServers: {
-        [SERVER_NAME]: {
-          type: "http",
-          url: `http://127.0.0.1:${port}/mcp`,
-          // headersHelper runs fresh per connection and reads the per-boot token file at call time (KTD6) —
-          // the token is never embedded in this static config. See hooks/mcp-headers.ts.
-          headersHelper: bunCommand(repoRoot, "mcp-headers.ts"),
-        },
+  // ── MCP server → ~/.claude.json ──────────────────────────────────────────────────────────────────────
+  // deepMerge preserves OTHER servers (object-key merge), so no read-modify-write of `mcpServers` is needed.
+  // KNOWN LIMITATION (tracked follow-up): merge also RE-MERGES the agent-os subtree rather than replacing it,
+  // so a PRE-EXISTING agent-os entry carrying a static `headers` (embedded token) would keep it. Unreachable
+  // on the supported path — U6 only ever writes `headersHelper`, never a static `headers` key, so nothing
+  // Agent OS produces embeds a token; only a hand-edited or foreign-tool entry could. The wholesale-replace
+  // fix shares the U14 key-removal/replace primitive the deferred targeted-uninstall needs.
+  //
+  // Cross-file transactionality: the settings write above is now LIVE. If this MCP write fails (symlink
+  // target, unwritable, a journal error — anything the pre-flight parse couldn't foresee), roll the settings
+  // write back so a failed install never leaves the hooks live without the MCP server (all-or-nothing across
+  // both Claude surfaces). Best-effort rollback; the ORIGINAL error is what propagates.
+  const mcpPatch = {
+    mcpServers: {
+      [SERVER_NAME]: {
+        type: "http",
+        url: `http://127.0.0.1:${port}/mcp`,
+        // headersHelper runs fresh per connection and reads the per-boot token file at call time (KTD6) —
+        // the token is never embedded in this static config. See hooks/mcp-headers.ts.
+        headersHelper: bunCommand(repoRoot, "mcp-headers.ts"),
       },
     },
-    { dataDir },
-  );
+  };
+  let mcp: MergeResult;
+  try {
+    mcp = mergeConfig(claudeJsonPath(home), mcpPatch, { dataDir });
+  } catch (err) {
+    if (settings.undoId) {
+      try {
+        undo(settings.undoId, dataDir);
+      } catch {
+        // Rollback is best-effort — never mask the original MCP-write failure that we're propagating.
+      }
+    }
+    throw err;
+  }
 
   return { settings, mcp };
 }

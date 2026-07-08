@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { installClaudeCode, uninstallClaudeCode } from "../src/install/claude-code";
@@ -60,6 +60,18 @@ describe("installClaudeCode", () => {
     expect(() => install()).toThrow(/not valid JSON/);
     // The pre-flight parse of settings.json fails FIRST — claude.json is never even reached.
     expect(existsSync(claudeJsonPath())).toBe(false);
+  });
+
+  test("rolls back the settings write when the MCP-config write fails (cross-file transactional)", () => {
+    // ~/.claude.json is a symlink → the U14 engine refuses to write it (fail-closed), but only AT WRITE time
+    // — after settings.json has already committed. The installer must undo the settings write so a failed
+    // install never leaves the hooks live without the MCP server.
+    symlinkSync(join(root, "nonexistent-target.json"), claudeJsonPath());
+    expect(existsSync(settingsPath())).toBe(false);
+
+    expect(() => install()).toThrow();
+    // Rolled back: the settings.json the installer created is gone — no partial (hooks-only) install remains.
+    expect(existsSync(settingsPath())).toBe(false);
   });
 
   test("merge preserves the user's existing hooks and unrelated keys (array read-modify-write)", () => {

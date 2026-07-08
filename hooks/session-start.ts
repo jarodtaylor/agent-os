@@ -36,23 +36,28 @@ export function formatAdditionalContext(resp: WorkStateResponse | null, now: num
   const lines: string[] = [
     `[Agent OS] Resuming this project — ${resp.freshness} state (${resp.lane} lane), last active ${relativeAge(resp.last_activity, now)}.`,
   ];
-  if (resp.handoff) {
-    // next / last-decided are the clean curated resume signals (length-capped). The handoff's in-flight
-    // buffer is schema-marked `secret` and already redacted server-side, so it is never surfaced here.
-    if (resp.handoff.cursor.next) lines.push(`Next: ${clip(resp.handoff.cursor.next)}`);
-    if (resp.handoff.cursor.lastDecided) lines.push(`Last decided: ${clip(resp.handoff.cursor.lastDecided)}`);
+  // Defensive reads: the response is an UNTRUSTED wire payload (the fetch cast is not a runtime check), so a
+  // malformed handoff/cursor/crumb must neither throw here (fail-open) nor inject an `undefined`/non-string
+  // field. next / last-decided are the clean curated signals (length-capped); the in-flight buffer is
+  // schema-marked `secret` + already redacted server-side, so it is never surfaced.
+  const cursor = resp.handoff?.cursor;
+  if (cursor) {
+    if (typeof cursor.next === "string" && cursor.next) lines.push(`Next: ${clip(cursor.next)}`);
+    if (typeof cursor.lastDecided === "string" && cursor.lastDecided) lines.push(`Last decided: ${clip(cursor.lastDecided)}`);
   }
   // Exclude STRUCTURAL markers (session-end/session-start) from the preview + counts: they're bookkeeping for
   // crash-vs-clean-end detection, not resume activity, and the session-end marker is the most-recent crumb on
   // every clean end — left in, it would crowd the scarce RAW_PREVIEW slots. Still stored + visible via read_work_state.
-  const tail = resp.raw_trail_tail.filter((c) => c.kind !== "session-end" && c.kind !== "session-start");
+  // (Also tolerates a non-array trail / non-object crumbs — a malformed trail can't throw or inject garbage.)
+  const rawTail = Array.isArray(resp.raw_trail_tail) ? resp.raw_trail_tail : [];
+  const tail = rawTail.filter((c) => !!c && typeof c === "object" && c.kind !== "session-end" && c.kind !== "session-start");
   if (tail.length > 0) {
     if (resp.lane === "raw") {
       // Uncurated: the trail is the ONLY resume signal (AE1). Inline the most-recent few summaries (already
       // redacted server-side), hand the agent the exact project key, then point at read_work_state for the rest.
       const recent = tail.slice(-RAW_PREVIEW);
       lines.push(`No curated handoff — most recent activity (call read_work_state({ project: ${JSON.stringify(resp.project)} }) for the full trail):`);
-      for (const c of recent) lines.push(`  • ${c.summary}`);
+      for (const c of recent) if (typeof c.summary === "string") lines.push(`  • ${c.summary}`);
       const earlier = tail.length - recent.length;
       if (earlier > 0) lines.push(`  … and ${earlier} earlier.`);
     } else {

@@ -116,6 +116,25 @@ describe("formatAdditionalContext", () => {
     expect(out).toContain("• did A");
     expect(out).toContain("• did B");
   });
+
+  test("defensive: a malformed handoff/cursor or non-string crumb summary never throws or injects garbage", () => {
+    // The wire payload is untrusted (the fetch cast is not a runtime check). A handoff that's present but
+    // has no cursor, and a crumb whose summary isn't a string, must not throw and must not inject junk.
+    const malformed = {
+      project: PROJECT,
+      lane: "raw",
+      freshness: "uncurated",
+      last_activity: NOW,
+      handoff: {}, // present but NO cursor — the exact wrong-shape flagged in review
+      raw_trail_tail: [crumb("real summary", 1), { kind: "note", summary: 42 }, { kind: "session-end", summary: "marker" }],
+    } as unknown as WorkStateResponse;
+    const out = formatAdditionalContext(malformed, NOW)!; // must not throw
+    expect(out).not.toContain("Next:"); // malformed handoff (no cursor) → no cursor line, no throw
+    expect(out).toContain("• real summary"); // the valid crumb is still previewed
+    expect(out).not.toContain("42"); // a non-string summary is skipped, not stringified into the context
+    expect(out).not.toContain("undefined"); // no undefined field injected
+    expect(out).not.toContain("marker"); // session-end marker still filtered
+  });
 });
 
 // ── Hook scripts as subprocesses — the real "bun run <hook>" path CC will invoke ─────────────────────────

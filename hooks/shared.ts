@@ -64,7 +64,14 @@ export async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs
  *  OPEN — an unparseable payload degrades to "do nothing", never a throw that could disrupt the session. */
 async function readStdinPayload(): Promise<Record<string, unknown>> {
   try {
-    const text = await Bun.stdin.text();
+    // Bound the stdin read the same way fetchWithTimeout bounds the network read: if stdin is ever left
+    // open (an unexpected invocation, a wrapper that doesn't EOF), `Bun.stdin.text()` would await forever
+    // and the hook would never reach its fail-open paths — a hang main().catch() can't rescue. On timeout we
+    // resolve to "" → {} → fail-open, same as an empty payload. (CC normally writes the payload and EOFs.)
+    const text = await Promise.race([
+      Bun.stdin.text(),
+      new Promise<string>((resolve) => setTimeout(() => resolve(""), FETCH_TIMEOUT_MS)),
+    ]);
     if (!text.trim()) return {};
     const parsed: unknown = JSON.parse(text);
     return parsed !== null && typeof parsed === "object" ? (parsed as Record<string, unknown>) : {};

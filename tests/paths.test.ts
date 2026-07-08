@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { machineIdPath, resolveMachineId } from "../src/paths";
+import { DEFAULT_PORT, machineIdPath, resolveMachineId, resolvePort } from "../src/paths";
 
 let root: string;
 beforeEach(() => {
@@ -36,5 +36,31 @@ describe("resolveMachineId", () => {
   test("re-mints when the persisted file is empty", () => {
     writeFileSync(machineIdPath(root), "", { mode: 0o600 });
     expect(resolveMachineId(root)).toMatch(/^[0-9a-f-]{36}$/);
+  });
+});
+
+describe("resolvePort", () => {
+  let prevPort: string | undefined;
+  beforeEach(() => {
+    prevPort = process.env.AGENT_OS_PORT;
+    delete process.env.AGENT_OS_PORT;
+  });
+  afterEach(() => {
+    if (prevPort === undefined) delete process.env.AGENT_OS_PORT;
+    else process.env.AGENT_OS_PORT = prevPort;
+  });
+
+  test("unset -> DEFAULT_PORT", () => {
+    expect(resolvePort()).toBe(DEFAULT_PORT);
+  });
+
+  test("a valid numeric string is used", () => {
+    process.env.AGENT_OS_PORT = "3000";
+    expect(resolvePort()).toBe(3000);
+  });
+
+  test.each(["abc", "0", "-1", "70000", "1.5", ""])("invalid shape %p falls back to DEFAULT_PORT", (value) => {
+    process.env.AGENT_OS_PORT = value;
+    expect(resolvePort()).toBe(DEFAULT_PORT);
   });
 });

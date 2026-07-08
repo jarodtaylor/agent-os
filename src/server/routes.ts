@@ -7,6 +7,8 @@
  */
 import { Hono } from "hono";
 import type { MiddlewareHandler } from "hono";
+import * as z from "zod";
+import { Breadcrumb } from "../contract/index";
 import { createMcpHandler } from "../mcp/server";
 import type { Repo } from "../store/repo";
 import { readWorkStateResponse } from "../workstate/response";
@@ -21,6 +23,18 @@ export interface RouteDeps {
   /** Injectable clock forwarded to the MCP tools + read path (tests). Defaults to `Date.now`. */
   now?: () => number;
 }
+
+/** Upper bound for the `GET /work-state` `?limit=` param — the accept regex allows arbitrarily long digit
+ *  strings, so clamp the parsed value here to keep the raw-trail read bounded regardless of the caller. */
+const MAX_WORK_STATE_LIMIT = 1000;
+
+/** Body of `POST /session-end` — ONLY the identity the server can't infer. Every content field
+ *  (machineId, ts, kind, source, summary, sensitivity, id) is server-stamped, so no untrusted free text
+ *  reaches the store and no capture-time secret classification is needed on this path. */
+const SessionEndRequest = z.object({
+  project: z.string().min(1),
+  sessionId: z.string().min(1),
+});
 
 /**
  * Chained (not sequential `app.get()` calls) so the returned value's inferred type carries the
@@ -57,6 +71,16 @@ export function createRoutes({ repo, gate, machineId, now }: RouteDeps) {
     .get("/work-state", async (c) => {
       const project = c.req.query("project");
       if (!project) return c.json({ error: "project query param required" }, 400);
+      // Optional ?limit= caps the raw trail — WorkStateReadOptions.limit is already plumbed through
+      // readWorkStateResponse (U2-R6); this just exposes it. A missing/invalid value keeps the server
+      // default, so existing callers are unaffected; the U6 SessionStart hook passes a small bound so it
+      // fetches ~what it displays rather than the full default cap.
+      const limitParam = c.req.query("limit");
+      const parsedLimit = limitParam !== undefined && /^[1-9]\d*$/.test(limitParam) ? Number(limitParam) : undefined;
+      // Clamp the upper bound: the regex accepts arbitrarily long digit strings (→ a huge int, or Infinity via
+      // Number()), which would bypass the raw-trail memory cap or trip the DB LIMIT. This is a gated route, so
+      // the clamp guards against a self-inflicted spike, not an attacker.
+      const limit = parsedLimit !== undefined ? Math.min(parsedLimit, MAX_WORK_STATE_LIMIT) : undefined;
       try {
         const resp = await readWorkStateResponse(
           repo,
@@ -64,15 +88,54 @@ export function createRoutes({ repo, gate, machineId, now }: RouteDeps) {
           {
             harness: c.req.header("x-agent-os-harness") ?? "http",
             tool: "GET /work-state",
-            sessionId: c.req.header("x-agent-os-session") ?? undefined,
+            sessionId: c.req.header("x-agent-os-session") || undefined,
           },
-          { now: now?.() },
+          { limit, now: now?.() },
         );
         return c.json(resp);
       } catch (err) {
         // Fail closed with a JSON body (not Hono's bare-text default 500) so the U6 hook's res.json() still
         // parses on the failure path, and leave a labeled server-side breadcrumb — mirrors /status.
         console.error("[agent-os] /work-state failed:", err);
+        return c.json({ error: "internal error" }, 500);
+      }
+    })
+    // The Claude Code SessionEnd graceful-end MARKER (U6). NOT load-bearing — U5's tailer owns real
+    // capture; this records only "this session ended cleanly", the one signal a crash can't leave behind.
+    // KTD9: the server is the single SQLite writer, so the hook must NOT open the DB — it POSTs here. The
+    // request carries ONLY identity (project + sessionId); every content field is server-stamped, so the
+    // marker can carry no injected or secret text and needs no capture-time classification.
+    .post("/session-end", async (c) => {
+      let body: unknown;
+      try {
+        body = await c.req.json();
+      } catch {
+        return c.json({ error: "invalid JSON body" }, 400);
+      }
+      const parsed = SessionEndRequest.safeParse(body);
+      if (!parsed.success) return c.json({ error: "project and sessionId are required" }, 400);
+      const { project, sessionId } = parsed.data;
+      // Assemble the full record server-side, then validate at the write boundary via the contract (U2-R1)
+      // — the store never sees an unvalidated external write. `id` is stable, so a re-POST is an idempotent
+      // no-op (writeBreadcrumb is ON CONFLICT DO NOTHING on id). `sensitivity: "path"` is the least-
+      // restrictive level for a content-free structural marker; `summary`'s schema floor (`personal`) still
+      // governs redaction, so this value is honest, not load-bearing.
+      const marker = {
+        id: `${sessionId}:session-end`,
+        project,
+        sessionId,
+        machineId,
+        source: "claude-code",
+        kind: "session-end",
+        summary: "Session ended (graceful).",
+        ts: now?.() ?? Date.now(),
+        sensitivity: "path",
+      };
+      try {
+        await repo.writeBreadcrumb(Breadcrumb.parse(marker));
+        return c.json({ ok: true });
+      } catch (err) {
+        console.error("[agent-os] /session-end write failed:", err);
         return c.json({ error: "internal error" }, 500);
       }
     })

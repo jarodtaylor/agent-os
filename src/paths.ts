@@ -29,6 +29,19 @@ export function resolveDataDir(dataDir?: string): string {
   return join(process.env.XDG_DATA_HOME ?? join(homedir(), ".local", "share"), "agent-os");
 }
 
+/**
+ * The loopback port the server binds and every local caller (the SessionStart/SessionEnd hooks, the MCP
+ * headers helper, skills) dials. `AGENT_OS_PORT` overrides; any invalid value — unset, non-numeric, or out
+ * of range — falls back to the default so a discoverable daemon always has a KNOWN port (the token +
+ * Host-allowlist contract keys off it). This is the ONE definition: `server/index.ts` binds it and the
+ * hooks target it, so they can never drift onto different ports.
+ */
+export const DEFAULT_PORT = 4319;
+export function resolvePort(): number {
+  const n = Number(process.env.AGENT_OS_PORT);
+  return Number.isInteger(n) && n > 0 && n <= 65535 ? n : DEFAULT_PORT;
+}
+
 /** Path to the sqlite store db file (see `store/db.ts#openDb`). */
 export function dbPath(dataDir: string): string {
   return join(dataDir, "store.db");
@@ -38,6 +51,15 @@ export function dbPath(dataDir: string): string {
 export function tokenPath(dataDir: string): string {
   return join(dataDir, "agent-os.token");
 }
+
+/**
+ * The HTTP header the per-boot token travels in — the gate reads it (`server/security.ts`) and every local
+ * caller sends it (the U6 hooks + the MCP headers helper). Defined here in the dependency-free shared module
+ * so a hook can import it WITHOUT pulling the whole server (hono etc.). ONE definition so the sender and the
+ * gate can't drift — a lowercase-vs-Train-Case split already happened once. Header names are case-insensitive
+ * on the wire, but a single constant keeps greps and renames honest.
+ */
+export const TOKEN_HEADER = "x-agent-os-token";
 
 /** Path to the persisted machine-id file, written mode `0600`. */
 export function machineIdPath(dataDir: string): string {

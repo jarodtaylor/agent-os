@@ -28,9 +28,7 @@ import { renameSync, rmSync, writeFileSync } from "node:fs";
 import type { Context, MiddlewareHandler } from "hono";
 import { getConnInfo } from "hono/bun";
 import type { ConnInfo } from "hono/conninfo";
-import { ensureDataDir, tokenPath } from "../paths";
-
-const TOKEN_HEADER = "x-agent-os-token";
+import { TOKEN_HEADER, ensureDataDir, tokenPath } from "../paths";
 
 /** Socket-peer addresses this process accepts as "local". `::ffff:127.0.0.1` is the IPv4-mapped
  *  IPv6 form a dual-stack loopback connection can present as. */

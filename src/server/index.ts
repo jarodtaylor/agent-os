@@ -13,20 +13,17 @@
  * one no listening server accepts. `openDb` (which creates the 0700 dataDir) runs first so the token
  * has a home to land in.
  */
-import { dbPath, ensureDataDir, resolveDataDir, resolveMachineId } from "../paths";
+import { dbPath, ensureDataDir, resolveDataDir, resolveMachineId, resolvePort } from "../paths";
 import { openDb } from "../store/db";
 import { createRepo } from "../store/repo";
 import { createRoutes } from "./routes";
 import { generateToken, securityGate, writeTokenFile } from "./security";
 import { acquireSingleInstanceLock } from "./single-instance";
 
-const PORT = ((): number => {
-  const n = Number(process.env.AGENT_OS_PORT);
-  // A discoverable daemon needs a KNOWN port (the token + Host-allowlist contract keys off it), so any
-  // invalid value — unset, non-numeric, <= 0, or > 65535 — falls back to the default rather than
-  // slipping through to an opaque Bun.serve startup failure.
-  return Number.isInteger(n) && n > 0 && n <= 65535 ? n : 4319;
-})();
+// A discoverable daemon needs a KNOWN port (the token + Host-allowlist contract keys off it); resolvePort
+// (../paths) is the ONE definition, shared with the U6 hooks so a caller can never dial a port the server
+// didn't bind. Any invalid AGENT_OS_PORT falls back to the default rather than an opaque Bun.serve failure.
+const PORT = resolvePort();
 
 const dataDir = resolveDataDir();
 

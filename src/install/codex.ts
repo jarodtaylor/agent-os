@@ -29,7 +29,9 @@
  * realistic failure — one of them is corrupt — is all-or-nothing (mirrors installClaudeCode). If a LATER
  * write then fails for some other reason (symlink, permissions, a journal error), the earlier U14 writes
  * are rolled back via their `undoId` — best-effort, propagating the ORIGINAL error — so a failed install
- * never leaves a partial Codex configuration.
+ * never leaves a partial Codex configuration. The same rollback also revokes `codex.token` when THIS
+ * install minted it fresh (never when it pre-existed) — otherwise a failed install would strand a live,
+ * unreferenced credential the gate still accepts (see `installCodex`'s `tokenPreexisted` guard).
  */
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -105,6 +107,19 @@ function rollback(results: MergeResult[], dataDir: string): void {
       // Best-effort — the original error is what propagates; log so a swallowed rollback failure isn't invisible.
       console.error(`[agent-os] install: rollback of '${r.targetPath}' failed (leaving it as-is):`, err);
     }
+  }
+}
+
+/** Best-effort delete of `codex.token`, called from installCodex's rollback catches — but ONLY when THIS
+ *  install minted the token fresh (callers guard with `!tokenPreexisted`). A failed install must not strand
+ *  a live, unreferenced credential the gate still accepts (`config.toml`'s `mcp_servers.agent-os` entry gets
+ *  rolled back, but resolveCodexToken already persisted the token file itself independently of that entry).
+ *  A failed REINSTALL over a pre-existing token must PRESERVE it — never masks the original install error. */
+function revokeMintedToken(dataDir: string): void {
+  try {
+    rmSync(codexTokenPath(dataDir), { force: true });
+  } catch {
+    // Best-effort — the original install error is what propagates.
   }
 }
 
@@ -191,6 +206,10 @@ export function installCodex(opts: InstallOptions = {}): InstallResult {
   const repoRoot = opts.repoRoot ?? defaultRepoRoot();
   const dataDir = resolveDataDir(opts.dataDir);
   const port = opts.port ?? resolvePort();
+  // Captured BEFORE any write below can mint one (resolveCodexToken runs INSIDE the config.toml patch built
+  // a few lines down): tells the rollback catches whether THIS install created codex.token, so a failed
+  // install revokes only the credential it minted itself and never revokes a prior install's still-valid one.
+  const tokenPreexisted = existsSync(codexTokenPath(dataDir));
 
   // Ensure ~/.codex exists so the atomic writes below have a home on a fresh machine. mode:0700 applies ONLY
   // when this CREATES it (owner-only, a safe default); an EXISTING ~/.codex is deliberately left alone — it's
@@ -248,6 +267,7 @@ export function installCodex(opts: InstallOptions = {}): InstallResult {
     // config.toml is now LIVE. Roll it back so a failed install never leaves the MCP server registered
     // without the hook (all-or-nothing across both structured targets).
     rollback([config], dataDir);
+    if (!tokenPreexisted) revokeMintedToken(dataDir);
     throw err;
   }
 
@@ -257,6 +277,7 @@ export function installCodex(opts: InstallOptions = {}): InstallResult {
     agentsMd = upsertAgentsMdBlock(agentsMdPath(home), repoRoot);
   } catch (err) {
     rollback([config, hooks], dataDir);
+    if (!tokenPreexisted) revokeMintedToken(dataDir);
     throw err;
   }
 
@@ -266,9 +287,11 @@ export function installCodex(opts: InstallOptions = {}): InstallResult {
 /**
  * Reverse the install: restore config.toml + hooks.json from the U14 undo journal (cross-process by design,
  * mirrors `uninstallClaudeCode`), strip the AGENTS.md marked block, and REVOKE the stable Codex credential
- * (delete `codex.token`). Per-target try/catch so one diverged target never aborts the others. Returns the
- * paths actually restored/cleaned (the credential revocation is not a "restore" and is deliberately not
- * included in that list — see below).
+ * (delete `codex.token`). Per-target try/catch so one diverged config/hooks/AGENTS.md target never aborts
+ * the others — but credential revocation itself is NOT best-effort: it runs LAST, after those cleanups have
+ * already happened, and THROWS if `codex.token` still exists afterward, so a caller never mistakes a
+ * non-revoking uninstall for success. Returns the paths actually restored/cleaned (the credential revocation
+ * is not a "restore" and is deliberately not included in that list — see below).
  *
  * KNOWN LIMITATION (shared with uninstallClaudeCode): undo is a byte-exact WHOLE-FILE restore, identity-
  * checked so it THROWS rather than clobber a file changed since install. `~/.codex/config.toml` is Codex's
@@ -313,11 +336,24 @@ export function uninstallCodex(opts: { home?: string; dataDir?: string } = {}): 
   // leaving any surviving `[mcp_servers.agent-os]` entry in a diverged config.toml carrying a token the gate no
   // longer accepts — access is revoked even when the byte-exact config.toml undo was skipped. (Targeted TOML
   // removal of the leftover entry itself still needs the U14 key-removal primitive — deferred, roadmap #21.)
+  //
+  // Revocation is the one security-critical step here — it must not fail silently. rmSync({force}) ignores
+  // ENOENT (already gone = success) but can throw on EPERM/EACCES/EISDIR; verify the file is truly gone and
+  // FAIL LOUD if not, so a caller never treats a non-revoking uninstall as complete. This runs LAST, on
+  // purpose — the config/hooks restore and the AGENTS.md strip above are independent best-effort cleanups and
+  // must still happen even when revocation is about to throw.
   try {
     rmSync(codexTokenPath(dataDir), { force: true });
   } catch (err) {
-    console.error(`[agent-os] uninstall: could not revoke '${codexTokenPath(dataDir)}':`, err);
+    console.error(`[agent-os] uninstall: error deleting '${codexTokenPath(dataDir)}':`, err);
   }
+  if (existsSync(codexTokenPath(dataDir))) {
+    throw new Error(
+      `[agent-os] uninstall: FAILED to revoke the Codex credential — '${codexTokenPath(dataDir)}' could not be removed, so the stable token remains LIVE against the gate. Remove it manually, then re-run uninstall.`,
+    );
+  }
+  // Reachable only when revocation just succeeded (the throw above would already have exited otherwise) — an
+  // entry is only truly INERT once the token backing it is actually gone.
   if (skipped.includes(configTomlPath(home))) {
     console.error(
       `[agent-os] uninstall: config.toml diverged since install — the mcp_servers.agent-os entry may remain, but it is now INERT (codex.token revoked). Remove it manually or re-install to reset.`,

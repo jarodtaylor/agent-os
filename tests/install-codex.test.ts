@@ -112,6 +112,39 @@ describe("installCodex", () => {
     expect(existsSync(hooksPath())).toBe(false);
   });
 
+  test("a failed install on a fresh machine cleans up the newly-minted codex.token (FIX 2)", () => {
+    mkdirSync(codexDir(), { recursive: true });
+    // Same trigger as "rolls back the config.toml write when the hooks.json write fails" above: hooks.json is
+    // a symlink, so the U14 engine refuses to write it AFTER config.toml — and, inside that patch, a FRESH
+    // codex.token (no pre-existing token here) — has already committed.
+    symlinkSync(join(root, "nonexistent-target.json"), hooksPath());
+    expect(existsSync(codexTokenPath(dataDir))).toBe(false); // nothing minted yet — no pre-existing token
+
+    expect(() => install()).toThrow();
+
+    // The token minted during the failed config.toml write was cleaned up, not stranded as a live,
+    // unreferenced credential the gate would still accept.
+    expect(existsSync(codexTokenPath(dataDir))).toBe(false);
+  });
+
+  test("a failed install PRESERVES a pre-existing codex.token — a failed reinstall never revokes a prior install's credential (FIX 2)", () => {
+    // Pre-create codex.token directly (not via a prior install()) with a known value.
+    mkdirSync(dataDir, { recursive: true });
+    const tokenPath = codexTokenPath(dataDir);
+    writeFileSync(tokenPath, "pre-existing-known-token");
+
+    // Force the THIRD write (AGENTS.md) to fail — the other rollback catch block than the test above — by
+    // making the AGENTS.md path a directory, same technique as "rolls back BOTH config.toml and hooks.json
+    // when the AGENTS.md write fails" above.
+    mkdirSync(agentsMdPath(), { recursive: true });
+
+    expect(() => install()).toThrow();
+
+    // The pre-existing credential must survive untouched — this install didn't mint it, so it must not revoke it.
+    expect(existsSync(tokenPath)).toBe(true);
+    expect(readFileSync(tokenPath, "utf8")).toBe("pre-existing-known-token");
+  });
+
   test("merge preserves a pre-existing unrelated mcp_servers table in config.toml", () => {
     mkdirSync(codexDir(), { recursive: true });
     writeFileSync(configPath(), `model = "gpt-5.5"\n\n[mcp_servers.foo]\nurl = "https://example.com/mcp"\n`);
@@ -267,6 +300,30 @@ describe("installCodex", () => {
     expect(existsSync(codexTokenPath(dataDir))).toBe(false);
     // config.toml's undo was skipped (diverged) — it must not be reported as restored.
     expect(restored).not.toContain(configPath());
+  });
+
+  test("uninstall THROWS when codex.token cannot be revoked, but still restores config/hooks/AGENTS.md first (FIX 1)", () => {
+    install();
+    const tokenPath = codexTokenPath(dataDir);
+    expect(existsSync(tokenPath)).toBe(true); // minted during install
+
+    // Replace the minted token FILE with a NON-EMPTY DIRECTORY: rmSync({force:true}) (non-recursive) throws
+    // on a directory, simulating a revocation that fails (e.g. a real-world EPERM/EACCES deleting the file).
+    rmSync(tokenPath, { force: true });
+    mkdirSync(tokenPath, { recursive: true });
+    writeFileSync(join(tokenPath, "blocker.txt"), "x");
+
+    expect(() => uninstallCodex({ home, dataDir })).toThrow(/revoke|remove/i);
+
+    // Revocation failed LOUD — the "credential" (directory standing in for it) is still present, not silently
+    // left in an unknown state while uninstall reports success.
+    expect(existsSync(tokenPath)).toBe(true);
+    // But the best-effort cleanups that run BEFORE revocation still completed, exactly as they would if
+    // revocation had succeeded — config.toml/hooks.json were restored (both created fresh by install() here,
+    // so undo deletes them) and the AGENTS.md block was stripped, even though the overall call now throws.
+    expect(existsSync(configPath())).toBe(false);
+    expect(existsSync(hooksPath())).toBe(false);
+    expect(existsSync(agentsMdPath())).toBe(false);
   });
 
   test("co-located hook granularity: re-install preserves a user command living in the SAME hooks.json entry as ours (FIX B)", () => {

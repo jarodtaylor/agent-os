@@ -35,8 +35,12 @@ import { TOKEN_HEADER, ensureDataDir, tokenPath } from "../paths";
 const LOOPBACK_ADDRESSES = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
 
 export interface SecurityGateOptions {
-  /** The current boot's token — the only value the gate ever compares against. */
+  /** The current boot's token — always accepted (the primary credential). */
   token: string;
+  /** Additional STABLE tokens the gate ALSO accepts (Codex's persisted credential — U8 decision A): a harness
+   *  whose MCP client can only send a STATIC header can't ride the per-boot token, so it authenticates with a
+   *  stable token (`paths.ts#resolveCodexToken`). Omitted/empty ⇒ per-boot token only. */
+  extraTokens?: string[];
   /** The port this server is bound to, for the Host allowlist's `host:port` form. */
   port: number;
   /** Peer-address getter, injectable for tests. Defaults to Hono's real Bun socket-peer reader;
@@ -52,13 +56,18 @@ export function securityGate(opts: SecurityGateOptions): MiddlewareHandler {
   // LOOPBACK_ADDRESSES). Precomputing the expected buffer does not weaken timing-safety — that is a
   // property of the compare, not of how the buffer was built.
   const allowedHosts = buildAllowedHosts(opts.port);
-  const expectedTokenBuf = Buffer.from(opts.token, "utf8");
+  // Every accepted credential, pre-encoded once: the always-on per-boot token plus any stable tokens (Codex).
+  // Empty strings are filtered so a stray `""` can't become a zero-length buffer that a missing/empty header
+  // would match. Precomputing doesn't weaken timing-safety — that's a property of the compare, not the build.
+  const expectedTokenBufs = [opts.token, ...(opts.extraTokens ?? [])]
+    .filter((t) => t.length > 0)
+    .map((t) => Buffer.from(t, "utf8"));
 
   return async (c, next) => {
     const address = getConn(c).remote.address;
     if (!isLoopbackAddress(address)) return forbidden(c, "non-loopback source");
     if (!allowedHosts.has((c.req.header("host") ?? "").toLowerCase())) return forbidden(c, "disallowed host");
-    if (!tokenMatches(c.req.header(TOKEN_HEADER), expectedTokenBuf)) return forbidden(c, "invalid or missing token");
+    if (!tokenMatchesAny(c.req.header(TOKEN_HEADER), expectedTokenBufs)) return forbidden(c, "invalid or missing token");
     await next();
   };
 }
@@ -84,17 +93,22 @@ function buildAllowedHosts(port: number): Set<string> {
 }
 
 /**
- * Timing-safe compare with an explicit length guard. `crypto.timingSafeEqual` THROWS on mismatched
- * buffer lengths rather than returning false, so an unguarded call would turn a wrong-LENGTH token
- * into a 500 instead of a clean 403 — and falling back to `===` on a length mismatch would
- * reintroduce the timing side-channel this exists to close. A missing header is rejected before the
- * provided buffer is even built. `expectedBuf` is precomputed once at gate construction.
+ * Timing-safe compare against EVERY accepted token, with an explicit length guard. `crypto.timingSafeEqual`
+ * THROWS on mismatched buffer lengths rather than returning false, so each candidate is length-checked first
+ * (a length mismatch is not the secret — every token is a fixed-length UUID); an unguarded call would turn a
+ * wrong-LENGTH token into a 500 instead of a clean 403, and a `===` fallback would reintroduce the timing
+ * side-channel this exists to close. We test ALL buffers WITHOUT early-out on a match, so the work never
+ * depends on WHICH token matched or its position. A missing header is rejected before any buffer is built;
+ * `expectedBufs` is precomputed once at gate construction.
  */
-function tokenMatches(provided: string | undefined, expectedBuf: Buffer): boolean {
+function tokenMatchesAny(provided: string | undefined, expectedBufs: Buffer[]): boolean {
   if (provided === undefined) return false;
   const providedBuf = Buffer.from(provided, "utf8");
-  if (providedBuf.length !== expectedBuf.length) return false;
-  return timingSafeEqual(providedBuf, expectedBuf);
+  let matched = false;
+  for (const buf of expectedBufs) {
+    if (providedBuf.length === buf.length && timingSafeEqual(providedBuf, buf)) matched = true;
+  }
+  return matched;
 }
 
 /** Mint a fresh CSPRNG per-boot token. `randomUUID` is backed by the platform CSPRNG and gives a

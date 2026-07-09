@@ -13,7 +13,7 @@
  * one no listening server accepts. `openDb` (which creates the 0700 dataDir) runs first so the token
  * has a home to land in.
  */
-import { dbPath, ensureDataDir, resolveDataDir, resolveMachineId, resolvePort } from "../paths";
+import { dbPath, ensureDataDir, resolveCodexToken, resolveDataDir, resolveMachineId, resolvePort } from "../paths";
 import { openDb } from "../store/db";
 import { createRepo } from "../store/repo";
 import { createRoutes } from "./routes";
@@ -41,7 +41,10 @@ const { db } = openDb(dbPath(dataDir));
 const repo = createRepo(db);
 
 const token = generateToken();
-const gate = securityGate({ token, port: PORT });
+// The stable Codex credential (U8 decision A): minted once + persisted, honored ALONGSIDE the per-boot token
+// so Codex — whose HTTP-MCP client can only send a static header (no per-connection headers-helper) —
+// authenticates without one. resolveCodexToken mints it here on first boot if the installer hasn't already.
+const gate = securityGate({ token, extraTokens: [resolveCodexToken(dataDir)], port: PORT });
 // machineId is this machine's federation discriminator (decision #13), stamped onto every record the MCP
 // write path persists. A persisted opaque UUID (not os.hostname(), which can carry the user's name) so it
 // doesn't bake a personal identifier into records that accumulate now and federate in v1.1 — see ../paths.

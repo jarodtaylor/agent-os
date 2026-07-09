@@ -44,6 +44,7 @@ function buildApp(overrides: Partial<SecurityGateOptions> = {}) {
   const token = overrides.token ?? generateToken();
   const gate = securityGate({
     token,
+    extraTokens: overrides.extraTokens,
     port: overrides.port ?? PORT,
     getConn: overrides.getConn ?? fakeConn("127.0.0.1"),
   });
@@ -227,6 +228,36 @@ describe("timing-safe token compare", () => {
     expect(token.length).not.toBe(3); // sanity: genuinely a different length than "abc"
     const res = await app.request("/status", { headers: { host: GOOD_HOST, "x-agent-os-token": "abc" } });
     expect(res.status).toBe(403); // an unguarded timingSafeEqual would RangeError -> Hono 500
+  });
+});
+
+// ── Dual-token accept: the stable Codex credential alongside the per-boot token (U8 decision A) ──
+
+describe("dual-token accept — Codex stable credential (U8)", () => {
+  test("BOTH the per-boot token and a registered stable token are accepted", async () => {
+    const token = generateToken();
+    const codexToken = generateToken();
+    const { app } = buildApp({ token, extraTokens: [codexToken] });
+
+    const withBoot = await app.request("/status", { headers: { host: GOOD_HOST, "x-agent-os-token": token } });
+    expect(withBoot.status).toBe(200);
+
+    const withCodex = await app.request("/status", { headers: { host: GOOD_HOST, "x-agent-os-token": codexToken } });
+    expect(withCodex.status).toBe(200);
+  });
+
+  test("a token matching NEITHER the per-boot nor the stable token is still rejected", async () => {
+    const { app } = buildApp({ token: generateToken(), extraTokens: [generateToken()] });
+    const res = await app.request("/status", { headers: { host: GOOD_HOST, "x-agent-os-token": generateToken() } });
+    expect(res.status).toBe(403);
+  });
+
+  test("an empty-string stable token does not create a zero-length buffer a missing header can match", async () => {
+    // extraTokens:[""] is filtered out at construction, so a request with NO token header stays 403 — the
+    // missing-header path must never coincidentally match a degenerate empty accepted credential.
+    const { app } = buildApp({ token: generateToken(), extraTokens: [""] });
+    const res = await app.request("/status", { headers: { host: GOOD_HOST } });
+    expect(res.status).toBe(403);
   });
 });
 

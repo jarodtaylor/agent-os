@@ -162,8 +162,11 @@ export function resolveCodexToken(dataDir: string): string {
 
 /** Read the stable Codex token — a non-empty trimmed string, else `null`. Deliberately does NOT validate a
  *  UUID shape the way `readMachineId` does: the token is opaque, and re-minting a present-but-odd value would
- *  invalidate the copy already written into `~/.codex/config.toml`. Only absence/emptiness triggers a mint. */
-function readCodexToken(path: string): string | null {
+ *  invalidate the copy already written into `~/.codex/config.toml`. Only absence/emptiness triggers a mint.
+ *  Exported: `installCodex`'s `tokenPreexisted` guard uses this (not `existsSync`) so provenance is SEMANTIC
+ *  — a valid non-empty token pre-existed — not path-existence, which an empty/whitespace leftover would
+ *  satisfy despite `resolveCodexToken` minting fresh over it. */
+export function readCodexToken(path: string): string | null {
   try {
     const raw = readFileSync(path, "utf8").trim();
     return raw.length > 0 ? raw : null;

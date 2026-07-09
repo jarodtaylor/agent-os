@@ -38,7 +38,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { parse as parseToml } from "smol-toml";
 import { listUndo, mergeConfig, undo, type MergeResult } from "../configwrite/index";
-import { codexTokenPath, resolveCodexToken, resolveDataDir, resolvePort, TOKEN_HEADER } from "../paths";
+import { codexTokenPath, readCodexToken, resolveCodexToken, resolveDataDir, resolvePort, TOKEN_HEADER } from "../paths";
 import { bunCommand, defaultRepoRoot, existingEntriesWithoutOurs, readJson } from "./shared";
 
 /** The brain's MCP server name in `~/.codex/config.toml` (mirrors the Claude Code `mcpServers.agent-os` key). */
@@ -209,7 +209,12 @@ export function installCodex(opts: InstallOptions = {}): InstallResult {
   // Captured BEFORE any write below can mint one (resolveCodexToken runs INSIDE the config.toml patch built
   // a few lines down): tells the rollback catches whether THIS install created codex.token, so a failed
   // install revokes only the credential it minted itself and never revokes a prior install's still-valid one.
-  const tokenPreexisted = existsSync(codexTokenPath(dataDir));
+  // SEMANTIC check (readCodexToken — a valid non-empty token pre-existed), not path-existence: an empty or
+  // whitespace-only leftover file passes `existsSync` but `resolveCodexToken` treats it as absent and mints
+  // fresh OVER it, so `existsSync` alone would misreport "preexisted" and rollback would skip cleanup,
+  // stranding the freshly-minted token as a live credential the gate (which reads codex.token fresh per
+  // request) keeps accepting after a failed install.
+  const tokenPreexisted = readCodexToken(codexTokenPath(dataDir)) !== null;
 
   // Ensure ~/.codex exists so the atomic writes below have a home on a fresh machine. mode:0700 applies ONLY
   // when this CREATES it (owner-only, a safe default); an EXISTING ~/.codex is deliberately left alone — it's

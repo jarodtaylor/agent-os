@@ -127,6 +127,27 @@ describe("installCodex", () => {
     expect(existsSync(codexTokenPath(dataDir))).toBe(false);
   });
 
+  test("a failed install cleans up a token minted over an empty pre-existing token file (empty pre-existing token doesn't count)", () => {
+    // An EMPTY codex.token file is not a valid token — resolveCodexToken (paths.ts) treats it as absent and
+    // mints a fresh one OVER it. Provenance for rollback must be SEMANTIC (readCodexToken: a valid non-empty
+    // token pre-existed), not path-existence (existsSync) — existsSync would see the empty file and wrongly
+    // report "preexisted", so rollback would skip cleanup and strand the token this install minted.
+    mkdirSync(codexDir(), { recursive: true });
+    mkdirSync(dataDir, { recursive: true });
+    writeFileSync(codexTokenPath(dataDir), "");
+
+    // Same trigger as "a failed install on a fresh machine cleans up the newly-minted codex.token" above:
+    // hooks.json is a symlink, so the U14 engine refuses to write it AFTER config.toml has already committed
+    // — and, inside that patch, resolveCodexToken has already minted a fresh token over the empty file.
+    symlinkSync(join(root, "nonexistent-target.json"), hooksPath());
+
+    expect(() => install()).toThrow();
+
+    // The token minted over the empty file was cleaned up — not stranded as a live credential the gate
+    // (which reads codex.token fresh per request) would keep accepting after a failed install.
+    expect(existsSync(codexTokenPath(dataDir))).toBe(false);
+  });
+
   test("a failed install PRESERVES a pre-existing codex.token — a failed reinstall never revokes a prior install's credential (FIX 2)", () => {
     // Pre-create codex.token directly (not via a prior install()) with a known value.
     mkdirSync(dataDir, { recursive: true });

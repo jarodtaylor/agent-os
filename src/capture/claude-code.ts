@@ -23,18 +23,7 @@
 import type { BreadcrumbKind, Sensitivity } from "../contract/index";
 import { classify } from "./secret-classify";
 import type { ExtractContext, ExtractedBreadcrumb } from "./tailer";
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Text helpers
-// ─────────────────────────────────────────────────────────────────────────────
-
-const basename = (p: unknown): string => {
-  const s = str(p);
-  return s.split("/").filter(Boolean).pop() ?? s;
-};
-const oneLine = (s: unknown): string => str(s).replace(/\s+/g, " ").trim();
-const clip = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n)}…` : s);
-const firstLine = (s: unknown): string => oneLine(str(s).split("\n").find((l) => l.trim()) ?? "");
+import { basename, clip, firstLine, oneLine, safeJson, str } from "./text-utils";
 
 /**
  * User string-content events that are command scaffolding or teammate idle-pings, not real prompts (spike
@@ -280,22 +269,4 @@ function demangleDir(sourcePath: string): string {
   if (!dir) return sourcePath;
   const path = dir.replace(/-/g, "/");
   return path.startsWith("/") ? path : `/${path}`;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Small guards
-// ─────────────────────────────────────────────────────────────────────────────
-
-/** Coerce an unknown JSONL field to a string; anything non-string becomes "". */
-function str(v: unknown): string {
-  return typeof v === "string" ? v : "";
-}
-
-/** JSON.stringify that never throws (a circular input coerces to "") — used only to scan input for secrets. */
-function safeJson(v: unknown): string {
-  try {
-    return JSON.stringify(v) ?? "";
-  } catch {
-    return "";
-  }
 }

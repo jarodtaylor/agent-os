@@ -6,6 +6,7 @@
  */
 import { readFileSync } from "node:fs";
 import { TOKEN_HEADER, resolveDataDir, resolvePort, tokenPath } from "../src/paths";
+import type { WorkStateResponse } from "../src/workstate/response";
 
 /** Re-exported so a hook imports the whole daemon-dialing contract from this one module. */
 export { TOKEN_HEADER };
@@ -57,6 +58,32 @@ export async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs
     return null;
   } finally {
     clearTimeout(timer);
+  }
+}
+
+/** Fetch the work-state, or `null` on ANY failure (no token, server down, non-200, timeout, bad JSON, or a
+ *  valid-JSON WRONG-shape body). Never throws — every failure mode is the same "nothing to inject" outcome.
+ *  Shared by both SessionStart hooks (CC + Codex) so the fetch contract can never drift between harnesses;
+ *  each caller supplies its own harness label + fetch limit (the deliberate per-harness tunability). */
+export async function fetchWorkState(
+  project: string,
+  sessionId: string,
+  opts: { harness: string; limit: number },
+): Promise<WorkStateResponse | null> {
+  const token = readToken();
+  if (!token) return null; // no live token → the server isn't up (or isn't this boot); nothing to inject
+  const res = await fetchWithTimeout(`${baseUrl()}/work-state?project=${encodeURIComponent(project)}&limit=${opts.limit}`, {
+    headers: { [TOKEN_HEADER]: token, "x-agent-os-harness": opts.harness, "x-agent-os-session": sessionId },
+  });
+  if (!res || !res.ok) return null; // unreachable, timed out, or non-200 → nothing to inject
+  try {
+    const body = (await res.json()) as WorkStateResponse | null;
+    // Coarse shape guard: a valid-JSON but WRONG-shape 200 (a foreign process squatting the port, or
+    // hook/server version skew) is treated as "nothing to inject", exactly like a down server — never trusted
+    // into formatAdditionalContext, whose tail access would otherwise throw and break the fail-open contract.
+    return body && Array.isArray((body as { raw_trail_tail?: unknown }).raw_trail_tail) ? body : null;
+  } catch {
+    return null; // a malformed body is "nothing to inject", same as a down server
   }
 }
 

@@ -230,7 +230,7 @@ export function discoverTranscripts(root: string): string[] {
  * return short. If the file shrank between `stat` and the read (a truncate/rotate), we return the bytes
  * actually read rather than trusting the stale length.
  */
-function readRange(path: string, offset: number, length: number): Buffer {
+export function readRange(path: string, offset: number, length: number): Buffer {
   const buf = Buffer.allocUnsafe(length);
   const fd = openSync(path, "r");
   try {

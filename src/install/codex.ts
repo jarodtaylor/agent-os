@@ -37,6 +37,7 @@ import { join } from "node:path";
 import { parse as parseToml } from "smol-toml";
 import { listUndo, mergeConfig, undo, type MergeResult } from "../configwrite/index";
 import { resolveCodexToken, resolveDataDir, resolvePort, TOKEN_HEADER } from "../paths";
+import { bunCommand, defaultRepoRoot, existingEntriesWithoutOurs, readJson } from "./shared";
 
 /** The brain's MCP server name in `~/.codex/config.toml` (mirrors the Claude Code `mcpServers.agent-os` key). */
 const SERVER_NAME = "agent-os";
@@ -77,41 +78,10 @@ export interface InstallResult {
   agentsMd: AgentsMdResult;
 }
 
-/** This repo's root: `src/install/codex.ts` → `../..`. */
-function defaultRepoRoot(): string {
-  return join(import.meta.dir, "..", "..");
-}
-
 const codexDir = (home: string): string => join(home, ".codex");
 const configTomlPath = (home: string): string => join(codexDir(home), "config.toml");
 const hooksJsonPath = (home: string): string => join(codexDir(home), "hooks.json");
 const agentsMdPath = (home: string): string => join(codexDir(home), "AGENTS.md");
-
-/** The shell command Codex runs for the SessionStart hook: `bun run "<abs script>"` (quoted so a repo path
- *  containing spaces still executes as one argument) — mirrors the CC installer's `bunCommand`. */
-function bunCommand(repoRoot: string, script: string): string {
-  return `bun run "${join(repoRoot, "hooks", script)}"`;
-}
-
-/** True iff a hooks.json SessionStart ENTRY already references our exact command — used to strip a prior
- *  install of ours before re-adding it, so re-install replaces (never duplicates). Exact-match avoids false
- *  positives against Jarod's own hooks (the herdr script, the codebase-memory echo). */
-function referencesCommand(entry: unknown, command: string): boolean {
-  if (entry === null || typeof entry !== "object") return false;
-  const hooks = (entry as { hooks?: unknown }).hooks;
-  return Array.isArray(hooks) && hooks.some((h) => (h as { command?: unknown })?.command === command);
-}
-
-/** Parse a JSON config file; `undefined` when absent. Throws on corrupt JSON — never merge into a config we
- *  can't parse (mirrors the engine's own fail-closed parse). */
-function readJson(path: string): Record<string, unknown> | undefined {
-  if (!existsSync(path)) return undefined;
-  try {
-    return JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
-  } catch {
-    throw new Error(`install: existing '${path}' is not valid JSON — fix or remove it before installing`);
-  }
-}
 
 /** Parse a TOML config file; `undefined` when absent. Throws on corrupt TOML, for the same fail-closed
  *  reason as `readJson` — this is a PRE-FLIGHT check only (mergeConfig re-parses authoritatively). */
@@ -122,19 +92,6 @@ function readToml(path: string): Record<string, unknown> | undefined {
   } catch {
     throw new Error(`install: existing '${path}' is not valid TOML — fix or remove it before installing`);
   }
-}
-
-/** The existing `hooks.<event>` entries with OUR entry (by `command`) stripped, so the caller can append a
- *  fresh one and re-install stays idempotent. Non-array / missing → []. Identical shape to the CC
- *  installer's helper — both configs are `{hooks: {<event>: [...]}}` underneath. */
-function existingEntriesWithoutOurs(
-  config: Record<string, unknown> | undefined,
-  event: string,
-  ourCommand: string,
-): unknown[] {
-  const hooks = (config?.hooks as Record<string, unknown> | undefined) ?? {};
-  const arr = Array.isArray(hooks[event]) ? (hooks[event] as unknown[]) : [];
-  return arr.filter((entry) => !referencesCommand(entry, ourCommand));
 }
 
 /** Roll back a set of prior successful merges, best-effort — never mask the original failure the caller is

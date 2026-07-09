@@ -22,12 +22,13 @@
  * Sensitivity is classified at capture (KTD2) via the SHARED `secret-classify` module (identical to the CC
  * lane — both capture prompts + tool I/O verbatim). Redaction happens later at the read boundary (U4).
  */
-import { closeSync, type Dirent, openSync, readdirSync, readSync } from "node:fs";
+import { type Dirent, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { BreadcrumbKind, Sensitivity } from "../contract/index";
 import type { Repo } from "../store/repo";
 import { classify } from "./secret-classify";
-import { tailFile, type ExtractContext, type ExtractedBreadcrumb, type Extractor } from "./tailer";
+import { readRange, tailFile, type ExtractContext, type ExtractedBreadcrumb, type Extractor } from "./tailer";
+import { basename, clip, firstLine, oneLine, safeJson, str } from "./text-utils";
 
 /** The per-file identity read once from the rollout's `session_meta` line and bound into the extractor. */
 export interface CodexSession {
@@ -201,6 +202,17 @@ export interface CodexCaptureDeps {
 export async function captureCodex(deps: CodexCaptureDeps, sessionsRoot: string): Promise<number> {
   let total = 0;
   for (const path of discoverCodexRollouts(sessionsRoot)) {
+    // Cheap guard mirroring the tailer's own EOF short-circuit: when the file is already fully tailed,
+    // tailFile would read 0 new crumbs anyway (its `if (start === size) return 0`) — skip the 1 MiB
+    // session_meta read entirely rather than paying it just to call a tailFile that does nothing.
+    let size: number;
+    try {
+      size = statSync(path).size;
+    } catch {
+      continue; // file vanished or is unreadable this pass — nothing to do
+    }
+    if (((await deps.repo.readCaptureCursor(path)) ?? 0) === size) continue; // fully tailed already — skip the read
+
     const session = readSessionMeta(path);
     if (!session) continue; // no attributable session_meta → skip this file
     try {
@@ -249,14 +261,7 @@ function walk(dir: string, out: string[], depth: number): void {
 export function readSessionMeta(sourcePath: string): CodexSession | null {
   let prefix: string;
   try {
-    const fd = openSync(sourcePath, "r");
-    try {
-      const buf = Buffer.allocUnsafe(SESSION_META_SCAN_BYTES);
-      const n = readSync(fd, buf, 0, SESSION_META_SCAN_BYTES, 0);
-      prefix = buf.toString("utf8", 0, n);
-    } finally {
-      closeSync(fd);
-    }
+    prefix = readRange(sourcePath, 0, SESSION_META_SCAN_BYTES).toString("utf8");
   } catch {
     return null;
   }
@@ -280,22 +285,9 @@ export function readSessionMeta(sourcePath: string): CodexSession | null {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Small guards / text helpers (kept local; the CC extractor has its own copies — a shared text-utils module is
-// a ce-simplify candidate, deliberately not pulled into this unit's diff)
+// Codex-specific text helpers (str/oneLine/clip/firstLine/basename/safeJson live in ./text-utils, shared
+// with the CC extractor; only the Codex-shaped helpers below stay local)
 // ─────────────────────────────────────────────────────────────────────────────
-
-function str(v: unknown): string {
-  return typeof v === "string" ? v : "";
-}
-
-const oneLine = (s: unknown): string => str(s).replace(/\s+/g, " ").trim();
-const clip = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n)}…` : s);
-const firstLine = (s: unknown): string => oneLine(str(s).split("\n").find((l) => l.trim()) ?? "");
-
-const basename = (p: unknown): string => {
-  const s = str(p);
-  return s.split("/").filter(Boolean).pop() ?? s;
-};
 
 /** Extract the text of a `message.content` — a string, or the joined `.text` of a content-part array. */
 function contentText(content: unknown): string {
@@ -333,13 +325,4 @@ function outputText(output: unknown): string {
     return safeJson(output);
   }
   return "";
-}
-
-/** JSON.stringify that never throws (a circular input coerces to "") — used only to scan input for secrets. */
-function safeJson(v: unknown): string {
-  try {
-    return JSON.stringify(v) ?? "";
-  } catch {
-    return "";
-  }
 }

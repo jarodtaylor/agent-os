@@ -11,11 +11,12 @@
  * (identical bytes ⇒ the engine no-ops). The MCP registration is an object key (`mcpServers.agent-os`), which
  * `deepMerge` merges safely without clobbering other servers, so it needs no read-modify-write.
  */
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { listUndo, mergeConfig, undo, type MergeResult } from "../configwrite/index";
 import { resolveDataDir, resolvePort } from "../paths";
+import { bunCommand, defaultRepoRoot, existingEntriesWithoutOurs, readJson } from "./shared";
 
 /** The brain's MCP server name in `~/.claude.json` (mirrors the Codex `[mcp_servers.agent-os]` plan). */
 const SERVER_NAME = "agent-os";
@@ -42,52 +43,9 @@ export interface InstallResult {
   mcp: MergeResult;
 }
 
-/** This repo's root: `src/install/claude-code.ts` → `../..`. */
-function defaultRepoRoot(): string {
-  return join(import.meta.dir, "..", "..");
-}
-
 const claudeDir = (home: string): string => join(home, ".claude");
 const settingsPath = (home: string): string => join(claudeDir(home), "settings.json");
 const claudeJsonPath = (home: string): string => join(home, ".claude.json");
-
-/** The shell command CC runs for a hook / headers-helper: `bun run "<abs script>"` (quoted so a repo path
- *  containing spaces still executes as one argument). */
-function bunCommand(repoRoot: string, script: string): string {
-  return `bun run "${join(repoRoot, "hooks", script)}"`;
-}
-
-/** True iff a settings hook ENTRY already references our exact command — used to strip a prior install of
- *  ours before re-adding it, so re-install replaces (never duplicates). Exact-match avoids false positives
- *  against an unrelated user hook; a moved repo simply leaves its now-dead entry (fails open, harmless). */
-function referencesCommand(entry: unknown, command: string): boolean {
-  if (entry === null || typeof entry !== "object") return false;
-  const hooks = (entry as { hooks?: unknown }).hooks;
-  return Array.isArray(hooks) && hooks.some((h) => (h as { command?: unknown })?.command === command);
-}
-
-/** Parse a JSON config file; `undefined` when absent. Throws on corrupt JSON — never merge into a config we
- *  can't parse (mirrors the engine's own fail-closed parse). */
-function readJson(path: string): Record<string, unknown> | undefined {
-  if (!existsSync(path)) return undefined;
-  try {
-    return JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
-  } catch {
-    throw new Error(`install: existing '${path}' is not valid JSON — fix or remove it before installing`);
-  }
-}
-
-/** The existing `hooks.<event>` entries with OUR entry (by `command`) stripped, so the caller can append a
- *  fresh one and re-install stays idempotent. Non-array / missing → []. */
-function existingEntriesWithoutOurs(
-  config: Record<string, unknown> | undefined,
-  event: string,
-  ourCommand: string,
-): unknown[] {
-  const hooks = (config?.hooks as Record<string, unknown> | undefined) ?? {};
-  const arr = Array.isArray(hooks[event]) ? (hooks[event] as unknown[]) : [];
-  return arr.filter((entry) => !referencesCommand(entry, ourCommand));
-}
 
 /**
  * Register the hooks + MCP server. Idempotent: a second run with the same inputs re-derives identical bytes,

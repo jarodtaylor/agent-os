@@ -11,8 +11,9 @@
  *       `type` field: Codex's own url-based servers (see the existing `uidotsh` entry) don't carry one.
  *       The STABLE Codex credential (`resolveCodexToken`) IS embedded here (unlike Claude Code's
  *       per-call headersHelper): Codex's HTTP-MCP client can only send a static header, so this is the
- *       one intentional narrowing of "installed config never embeds the token" (U8 decision A;
- *       config.toml is 0600). `[hooks.state]` is untouched — our patch never mentions `hooks`, and
+ *       one intentional narrowing of "installed config never embeds the token" (U8 decision A; the
+ *       installer force-chmods config.toml to 0600 after the write — the U14 engine preserves a
+ *       pre-existing file's mode, so we tighten the token-bearing file ourselves). `[hooks.state]` is untouched — our patch never mentions `hooks`, and
  *       Codex owns its own hook-trust hashing there.
  *   (b) `~/.codex/hooks.json` — `hooks.SessionStart`, read-modify-write the WHOLE array (deepMerge
  *       REPLACES arrays — patch wins), exactly like the CC installer's settings.json hooks: strip our
@@ -247,8 +248,8 @@ export function installCodex(opts: InstallOptions = {}): InstallResult {
         [SERVER_NAME]: {
           url: `http://127.0.0.1:${port}/mcp`,
           // The STABLE Codex credential (U8 decision A): Codex's HTTP-MCP client sends only a static
-          // header, so — unlike CC's per-call headersHelper — the token IS embedded here, in this 0600
-          // config, mirroring how the existing `uidotsh` entry embeds its own bearer token.
+          // header, so — unlike CC's per-call headersHelper — the token IS embedded here, in this config
+          // (force-chmod'd 0600 right below), mirroring how the existing `uidotsh` entry embeds its own bearer.
           http_headers: { [TOKEN_HEADER]: resolveCodexToken(dataDir) },
         },
       },
@@ -267,6 +268,17 @@ export function installCodex(opts: InstallOptions = {}): InstallResult {
   ];
   let hooks: MergeResult;
   try {
+    // Secure the token-bearing config BEFORE proceeding. The (a) write embedded a LIVE bearer token, but the
+    // U14 engine PRESERVES an existing file's mode (it re-applies originalMode across its temp+rename), so a
+    // config.toml that pre-existed 0644 (Codex's own default / a dotfile manager / manual setup) would carry
+    // our secret group- and world-readable — any other local user/process could read it and authenticate to
+    // the gate until revocation. Enforce owner-only 0600 UNCONDITIONALLY: a no-op reinstall doesn't re-touch
+    // the file, so gating on `config.noop` would leave a prior loose mode un-tightened. Same 0600 discipline as
+    // codex.token + the data dir; Codex reads its own config as the owner, so 0600 never impairs it, and the
+    // byte-exact backup still holds the original bytes+mode for undo (chmod changes mode, not content, so it
+    // never trips undo's content-hash identity check). Inside the (b) try on purpose — a chmod fault then fails
+    // CLOSED via the same rollback + minted-token revoke below, never leaving a token-bearing config un-reverted.
+    chmodSync(configTomlPath(home), 0o600);
     hooks = mergeConfig(hooksJsonPath(home), { hooks: { SessionStart: sessionStart } }, { dataDir });
   } catch (err) {
     // config.toml is now LIVE. Roll it back so a failed install never leaves the MCP server registered

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse as parseToml } from "smol-toml";
@@ -67,6 +67,34 @@ describe("installCodex", () => {
     expect(agents).toContain("<!-- agent-os:start -->");
     expect(agents).toContain("<!-- agent-os:end -->");
     expect(agents).toContain("read_work_state");
+  });
+
+  test("enforces 0600 on a pre-existing loose-mode config.toml (the embedded token must not be group/world-readable)", () => {
+    // A config.toml Codex / a dotfile tool created 0644, pre-existing our install. chmod (not writeFileSync's
+    // mode arg) forces the loose mode regardless of the runner's umask, so the starting state is deterministic.
+    mkdirSync(codexDir(), { recursive: true });
+    writeFileSync(configPath(), `model = "gpt-5.5"\n`);
+    chmodSync(configPath(), 0o644);
+    expect(statSync(configPath()).mode & 0o777).toBe(0o644);
+
+    install();
+
+    // The token is embedded AND the file was tightened to owner-only — the secret is not world-readable.
+    const c = readToml(configPath());
+    expect(c.mcp_servers["agent-os"].http_headers[TOKEN_HEADER]).toBe(token());
+    expect(statSync(configPath()).mode & 0o777).toBe(0o600);
+  });
+
+  test("re-tightens config.toml to 0600 even on a no-op reinstall (mode enforcement is unconditional)", () => {
+    // First install embeds the token at 0600. Simulate the mode later drifting loose (an older installer build,
+    // a dotfile tool) WITHOUT changing content, so the next install's config write no-ops on bytes.
+    install();
+    chmodSync(configPath(), 0o644);
+    expect(statSync(configPath()).mode & 0o777).toBe(0o644);
+
+    const res = install();
+    expect(res.config.noop).toBe(true); // identical bytes → the engine writes nothing…
+    expect(statSync(configPath()).mode & 0o777).toBe(0o600); // …but the unconditional chmod still re-secures it.
   });
 
   test("refuses to install over a corrupt config.toml", () => {

@@ -117,15 +117,17 @@ function readMachineId(path: string): string | null {
 }
 
 /**
- * The STABLE Codex credential — minted ONCE and persisted (unlike the per-boot token), so the value the
- * `agent-os` installer writes into `~/.codex/config.toml` keeps matching what the gate accepts across server
- * reboots.
+ * The STABLE Codex credential — minted ONCE and persisted (unlike the per-boot token). The `agent-os`
+ * installer is the SOLE resolver: it mints `codex.token` and embeds the same value in `~/.codex/config.toml`.
+ * The server no longer mints at boot — its security gate reads `codex.token` FRESH per request
+ * (`server/security.ts#makeStableTokenReader`), so it always reflects the CURRENT file: a fresh install is
+ * picked up live and an uninstall's `rm codex.token` revokes access live, with no restart and no
+ * server-vs-installer mint race to reconcile (U8 decision A hardening — see docs/DECISIONS.md #28).
  *
- * EXCLUSIVE-CREATE mint (`flag: "wx"`), NOT resolveMachineId's plain temp+rename: this token has TWO
- * independent resolvers — the server boot AND the installer (a separate process, possibly run before the
- * server ever boots) — with no single-instance lock serializing them. `wx` (O_CREAT|O_EXCL) lets exactly one
- * creator win a concurrent first-mint; the loser catches EEXIST and re-reads the winner's value, so the two
- * processes can never diverge onto different tokens (which would 403 every Codex request).
+ * EXCLUSIVE-CREATE mint (`flag: "wx"`), NOT resolveMachineId's plain temp+rename: kept as cheap defense
+ * against a rare CONCURRENT double-install (two `agent-os install` runs) racing the first mint — `wx`
+ * (O_CREAT|O_EXCL) lets exactly one creator win; the loser catches EEXIST and re-reads/overwrites so both
+ * converge on the persisted value.
  */
 export function resolveCodexToken(dataDir: string): string {
   const path = codexTokenPath(dataDir);

@@ -28,6 +28,13 @@ export interface MergeOptions {
   format?: ConfigFormat;
   /** Root for backups + the undo journal. Defaults to the OS data dir; tests inject a temp dir. */
   dataDir?: string;
+  /** Force the PUBLISHED file's mode to this — chmod the temp to it BEFORE the atomic rename — instead of
+   *  preserving an existing target's mode. Use for a file this write embeds a SECRET into (the Codex
+   *  installer's config.toml), so the secret is never on disk at a looser mode, even for the transient window
+   *  between rename and a post-hoc chmod. The undo journal still records the ORIGINAL mode, so uninstall
+   *  restores the file's pre-install mode. Omitted ⇒ preserve the existing file's mode — the default, correct
+   *  for the non-secret configs every other caller writes (CC's settings.json / ~/.claude.json). */
+  targetMode?: number;
 }
 
 export interface MergeResult {
@@ -109,9 +116,12 @@ export function mergeConfig(targetPath: string, patch: unknown, opts: MergeOptio
     }
     // Atomic publish: write to a sibling temp (starts owner-only), force the intended mode, then
     // rename over the target. rename(2) is atomic on POSIX, so a reader never sees a half-written file,
-    // and the original survives untouched if any step above threw.
+    // and the original survives untouched if any step above threw. `targetMode` (when set) wins over the
+    // preserved original mode, so a secret-bearing file is PUBLISHED owner-only — never renamed into place at
+    // a looser inherited mode and tightened afterwards (which leaves a readable window). Undo still restores
+    // `originalMode` (recorded above), so uninstall returns the file to its pre-install mode.
     writeFileSync(tmpPath, nextText, { mode: 0o600 });
-    chmodSync(tmpPath, originalMode ?? 0o600);
+    chmodSync(tmpPath, opts.targetMode ?? originalMode ?? 0o600);
     renameSync(tmpPath, targetPath);
     committed = true;
     // Journal LAST, but still inside the try: the mutation is now live, so its undo record must exist.

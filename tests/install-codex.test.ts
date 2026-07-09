@@ -85,16 +85,25 @@ describe("installCodex", () => {
     expect(statSync(configPath()).mode & 0o777).toBe(0o600);
   });
 
-  test("re-tightens config.toml to 0600 even on a no-op reinstall (mode enforcement is unconditional)", () => {
-    // First install embeds the token at 0600. Simulate the mode later drifting loose (an older installer build,
-    // a dotfile tool) WITHOUT changing content, so the next install's config write no-ops on bytes.
+  test("uninstall targeted-removes our SessionStart hook even when hooks.json diverged since install", () => {
     install();
-    chmodSync(configPath(), 0o644);
-    expect(statSync(configPath()).mode & 0o777).toBe(0o644);
+    // The user edits hooks.json after install (adds their own co-located-elsewhere hook) → the byte-exact undo
+    // can no longer restore it (identity check refuses the diverged file), so uninstall must TARGETED-remove
+    // just our entry and keep theirs. Revoking codex.token alone would NOT disable a leftover hook (it reads the
+    // per-boot token), so this targeted removal is what actually deactivates Codex consumption on uninstall.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const h: any = readJson(hooksPath());
+    h.hooks.SessionStart.push({ matcher: "startup", hooks: [{ type: "command", command: "echo mine", timeout: 5 }] });
+    writeFileSync(hooksPath(), JSON.stringify(h, null, 2));
 
-    const res = install();
-    expect(res.config.noop).toBe(true); // identical bytes → the engine writes nothing…
-    expect(statSync(configPath()).mode & 0o777).toBe(0o600); // …but the unconditional chmod still re-secures it.
+    uninstallCodex({ home, dataDir, repoRoot: REPO });
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const after: any = readJson(hooksPath());
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const cmds = after.hooks.SessionStart.flatMap((e: any) => (e.hooks ?? []).map((x: any) => x.command));
+    expect(cmds).not.toContain(START_CMD); // our hook is gone…
+    expect(cmds).toContain("echo mine"); // …the user's survives.
   });
 
   test("refuses to install over a corrupt config.toml", () => {

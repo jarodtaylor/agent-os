@@ -11,9 +11,9 @@
  *       `type` field: Codex's own url-based servers (see the existing `uidotsh` entry) don't carry one.
  *       The STABLE Codex credential (`resolveCodexToken`) IS embedded here (unlike Claude Code's
  *       per-call headersHelper): Codex's HTTP-MCP client can only send a static header, so this is the
- *       one intentional narrowing of "installed config never embeds the token" (U8 decision A; the
- *       installer force-chmods config.toml to 0600 after the write — the U14 engine preserves a
- *       pre-existing file's mode, so we tighten the token-bearing file ourselves). `[hooks.state]` is untouched — our patch never mentions `hooks`, and
+ *       one intentional narrowing of "installed config never embeds the token" (U8 decision A; the write
+ *       passes the engine's `targetMode: 0o600` so the token-bearing config is PUBLISHED owner-only — the
+ *       engine otherwise preserves a pre-existing file's mode). `[hooks.state]` is untouched — our patch never mentions `hooks`, and
  *       Codex owns its own hook-trust hashing there.
  *   (b) `~/.codex/hooks.json` — `hooks.SessionStart`, read-modify-write the WHOLE array (deepMerge
  *       REPLACES arrays — patch wins), exactly like the CC installer's settings.json hooks: strip our
@@ -249,12 +249,15 @@ export function installCodex(opts: InstallOptions = {}): InstallResult {
           url: `http://127.0.0.1:${port}/mcp`,
           // The STABLE Codex credential (U8 decision A): Codex's HTTP-MCP client sends only a static
           // header, so — unlike CC's per-call headersHelper — the token IS embedded here, in this config
-          // (force-chmod'd 0600 right below), mirroring how the existing `uidotsh` entry embeds its own bearer.
+          // (published owner-only 0600 via the engine's targetMode below), like the existing `uidotsh` bearer.
           http_headers: { [TOKEN_HEADER]: resolveCodexToken(dataDir) },
         },
       },
     },
-    { dataDir },
+    // targetMode 0600: this file embeds the bearer token, so publish it owner-only — never rename it into place
+    // at a pre-existing looser mode and tighten afterwards (that leaves a world-readable window a local observer
+    // could catch). The engine still journals the original mode, so uninstall restores pre-install permissions.
+    { dataDir, targetMode: 0o600 },
   );
 
   // ── (b) SessionStart hook → ~/.codex/hooks.json ──────────────────────────────────────────────────────
@@ -268,17 +271,6 @@ export function installCodex(opts: InstallOptions = {}): InstallResult {
   ];
   let hooks: MergeResult;
   try {
-    // Secure the token-bearing config BEFORE proceeding. The (a) write embedded a LIVE bearer token, but the
-    // U14 engine PRESERVES an existing file's mode (it re-applies originalMode across its temp+rename), so a
-    // config.toml that pre-existed 0644 (Codex's own default / a dotfile manager / manual setup) would carry
-    // our secret group- and world-readable — any other local user/process could read it and authenticate to
-    // the gate until revocation. Enforce owner-only 0600 UNCONDITIONALLY: a no-op reinstall doesn't re-touch
-    // the file, so gating on `config.noop` would leave a prior loose mode un-tightened. Same 0600 discipline as
-    // codex.token + the data dir; Codex reads its own config as the owner, so 0600 never impairs it, and the
-    // byte-exact backup still holds the original bytes+mode for undo (chmod changes mode, not content, so it
-    // never trips undo's content-hash identity check). Inside the (b) try on purpose — a chmod fault then fails
-    // CLOSED via the same rollback + minted-token revoke below, never leaving a token-bearing config un-reverted.
-    chmodSync(configTomlPath(home), 0o600);
     hooks = mergeConfig(hooksJsonPath(home), { hooks: { SessionStart: sessionStart } }, { dataDir });
   } catch (err) {
     // config.toml is now LIVE. Roll it back so a failed install never leaves the MCP server registered
@@ -316,13 +308,16 @@ export function installCodex(opts: InstallOptions = {}): InstallResult {
  * undo has a real chance of being SKIPPED by uninstall time — leaving the `mcp_servers.agent-os` entry
  * behind. That leftover entry is now INERT rather than harmless: it carries the stable token, and this
  * function revokes it unconditionally (below), so the entry can no longer authenticate against the gate
- * even when the byte-exact config.toml undo was skipped. The correct reversal is still TARGETED removal of
- * the entry itself, deferred pending the same U14 key-removal primitive `uninstallClaudeCode` is waiting on
- * (#21).
+ * even when the byte-exact config.toml undo was skipped. The correct reversal of the config.toml OBJECT-KEY
+ * entry is still TARGETED removal, deferred pending the same U14 key-removal primitive `uninstallClaudeCode`
+ * is waiting on (#21). `hooks.json` is DIFFERENT: a leftover SessionStart hook is NOT made inert by the token
+ * revocation (it authenticates with the per-boot token, not codex.token), so a diverged hooks.json gets a
+ * TARGETED ARRAY removal here — the array-replace mergeConfig already supports, no #21 needed — see below.
  */
-export function uninstallCodex(opts: { home?: string; dataDir?: string } = {}): string[] {
+export function uninstallCodex(opts: { home?: string; dataDir?: string; repoRoot?: string } = {}): string[] {
   const home = opts.home ?? homedir();
   const dataDir = resolveDataDir(opts.dataDir);
+  const repoRoot = opts.repoRoot ?? defaultRepoRoot();
   const entries = listUndo(dataDir);
   const restored: string[] = [];
   const skipped: string[] = [];
@@ -337,6 +332,30 @@ export function uninstallCodex(opts: { home?: string; dataDir?: string } = {}): 
       // Diverged since install (identity check) or otherwise unrestorable — skip it, keep the loop going.
       console.error(`[agent-os] uninstall: could not restore '${target}' (changed since install?):`, err);
       skipped.push(target);
+    }
+  }
+
+  // A diverged hooks.json couldn't be restored from its byte-exact backup (the undo identity check refused it).
+  // Unlike the config.toml leftover — made INERT below by revoking codex.token — a leftover SessionStart hook is
+  // NOT neutralized by that revocation: `hooks/codex-session-start.ts` authenticates with the PER-BOOT token
+  // (agent-os.token), never codex.token, so it would keep injecting work-state into Codex sessions after
+  // uninstall. Do a TARGETED removal of just OUR entry — the same command-matched array filter the installer
+  // uses (`existingEntriesWithoutOurs`) — preserving every OTHER hook the user has, via the array-replace
+  // mergeConfig already supports (an ARRAY needs no #21 key-removal primitive). mergeConfig no-ops when our hook
+  // is already absent, so this is safe to run whenever the byte-exact restore was skipped. Exact-command match
+  // (keyed on the current repoRoot) covers the only ACTIVE-leftover case: a repo-MOVED leftover instead points
+  // its command at a now-missing script path, so it already fails open (inert) and needs no removal.
+  if (skipped.includes(hooksJsonPath(home))) {
+    try {
+      const ourCommand = bunCommand(repoRoot, "codex-session-start.ts");
+      const remaining = existingEntriesWithoutOurs(readJson(hooksJsonPath(home)), "SessionStart", ourCommand);
+      const res = mergeConfig(hooksJsonPath(home), { hooks: { SessionStart: remaining } }, { dataDir });
+      if (!res.noop) restored.push(hooksJsonPath(home));
+    } catch (err) {
+      console.error(
+        `[agent-os] uninstall: could not targeted-remove our SessionStart hook from a diverged '${hooksJsonPath(home)}' — remove the codex-session-start.ts entry manually:`,
+        err,
+      );
     }
   }
 

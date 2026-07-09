@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse as parseToml } from "smol-toml";
 import { installCodex, uninstallCodex } from "../src/install/codex";
-import { resolveCodexToken, TOKEN_HEADER } from "../src/paths";
+import { existingEntriesWithoutOurs } from "../src/install/shared";
+import { codexTokenPath, resolveCodexToken, TOKEN_HEADER } from "../src/paths";
 
 // Fixture-home ONLY — every path is under a temp dir, so these tests never touch the real ~/.codex.
 //
@@ -237,5 +238,118 @@ describe("installCodex", () => {
     expect(existsSync(hooksPath())).toBe(false);
     // config.toml diverged → its undo is skipped (identity check), left as the simulated rewrite.
     expect(readFileSync(configPath(), "utf8")).toContain("gpt-6.0");
+  });
+
+  test("uninstall revokes the stable Codex credential (codex.token deleted, so a leftover config entry can't authenticate)", () => {
+    install();
+    expect(existsSync(codexTokenPath(dataDir))).toBe(true); // minted during install
+
+    uninstallCodex({ home, dataDir });
+
+    expect(existsSync(codexTokenPath(dataDir))).toBe(false);
+  });
+
+  test("uninstall still revokes codex.token when config.toml diverged since install (the restore-skip path)", () => {
+    mkdirSync(codexDir(), { recursive: true });
+    writeFileSync(configPath(), `model = "gpt-5.5"\n`);
+
+    install();
+    expect(existsSync(codexTokenPath(dataDir))).toBe(true);
+
+    // Simulate Codex's own continuous rewrites of its live-state file between install and uninstall, exactly
+    // as the test above — this is the scenario where config.toml's byte-exact undo is SKIPPED.
+    const c = readToml(configPath());
+    writeFileSync(configPath(), `model = "gpt-6.0"\n\n[mcp_servers.agent-os]\nurl = "${c.mcp_servers["agent-os"].url}"\n`);
+
+    const restored = uninstallCodex({ home, dataDir });
+
+    // Revoked regardless of the skip — the leftover mcp_servers.agent-os entry is now inert.
+    expect(existsSync(codexTokenPath(dataDir))).toBe(false);
+    // config.toml's undo was skipped (diverged) — it must not be reported as restored.
+    expect(restored).not.toContain(configPath());
+  });
+
+  test("co-located hook granularity: re-install preserves a user command living in the SAME hooks.json entry as ours (FIX B)", () => {
+    install(); // seed a normal install first, so START_CMD is the real installed command
+
+    // Hand-write hooks.json so the SessionStart entry co-locates a user's own command alongside ours in ONE
+    // entry (same matcher, two nested hooks) — e.g. a user who appended a hook into our entry by hand.
+    writeFileSync(
+      hooksPath(),
+      JSON.stringify(
+        {
+          hooks: {
+            SessionStart: [
+              {
+                matcher: "startup|resume|clear|compact",
+                hooks: [
+                  { type: "command", command: "echo user-colocated-hook" },
+                  { type: "command", command: START_CMD, timeout: 10 },
+                ],
+              },
+            ],
+          },
+        },
+        null,
+        2,
+      ) + "\n",
+    );
+
+    install(); // re-install
+
+    // Locally typed view of the JSON fixture (readJson returns `any`) so the array-method callbacks below
+    // type-check without implicit `any` params.
+    type HookEntry = { matcher?: string; hooks: Array<{ command: string }> };
+    const h = readJson(hooksPath()) as { hooks: { SessionStart: HookEntry[] } };
+    const allCommands = h.hooks.SessionStart.flatMap((e) => e.hooks.map((x) => x.command));
+    // The user's co-located command survives re-install (previously: the WHOLE entry would have been dropped).
+    expect(allCommands).toContain("echo user-colocated-hook");
+    // Ours is present exactly once — not duplicated, and not left stale inside the old co-located entry.
+    expect(allCommands.filter((c) => c === START_CMD)).toHaveLength(1);
+    // The entry that used to co-locate both now holds only the user's hook (ours was stripped out of it;
+    // installCodex appends a fresh entry of its own for START_CMD).
+    const userEntry = h.hooks.SessionStart.find((e) => e.hooks.some((x) => x.command === "echo user-colocated-hook"));
+    expect(userEntry).toBeDefined();
+    expect(userEntry?.matcher).toBe("startup|resume|clear|compact");
+    expect(userEntry?.hooks).toHaveLength(1);
+  });
+});
+
+describe("existingEntriesWithoutOurs (FIX B: nested-hook-level filtering, not whole-entry drop)", () => {
+  const OUR_CMD = "bun run our-hook.ts";
+
+  test("an entry containing ONLY our hook is dropped entirely", () => {
+    const config = { hooks: { SessionStart: [{ matcher: "m", hooks: [{ type: "command", command: OUR_CMD }] }] } };
+    expect(existingEntriesWithoutOurs(config, "SessionStart", OUR_CMD)).toEqual([]);
+  });
+
+  test("an entry containing only a user hook is untouched", () => {
+    const userEntry = { matcher: "m", hooks: [{ type: "command", command: "echo user" }] };
+    const config = { hooks: { SessionStart: [userEntry] } };
+    expect(existingEntriesWithoutOurs(config, "SessionStart", OUR_CMD)).toEqual([userEntry]);
+  });
+
+  test("an entry co-locating both keeps the entry with only the user's hook remaining", () => {
+    const config = {
+      hooks: {
+        SessionStart: [
+          {
+            matcher: "m",
+            hooks: [
+              { type: "command", command: "echo user" },
+              { type: "command", command: OUR_CMD },
+            ],
+          },
+        ],
+      },
+    };
+    expect(existingEntriesWithoutOurs(config, "SessionStart", OUR_CMD)).toEqual([
+      { matcher: "m", hooks: [{ type: "command", command: "echo user" }] },
+    ]);
+  });
+
+  test("missing/non-array hooks.<event> → []", () => {
+    expect(existingEntriesWithoutOurs(undefined, "SessionStart", OUR_CMD)).toEqual([]);
+    expect(existingEntriesWithoutOurs({ hooks: {} }, "SessionStart", OUR_CMD)).toEqual([]);
   });
 });

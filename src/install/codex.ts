@@ -36,7 +36,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { parse as parseToml } from "smol-toml";
 import { listUndo, mergeConfig, undo, type MergeResult } from "../configwrite/index";
-import { resolveCodexToken, resolveDataDir, resolvePort, TOKEN_HEADER } from "../paths";
+import { codexTokenPath, resolveCodexToken, resolveDataDir, resolvePort, TOKEN_HEADER } from "../paths";
 import { bunCommand, defaultRepoRoot, existingEntriesWithoutOurs, readJson } from "./shared";
 
 /** The brain's MCP server name in `~/.codex/config.toml` (mirrors the Claude Code `mcpServers.agent-os` key). */
@@ -200,6 +200,16 @@ export function installCodex(opts: InstallOptions = {}): InstallResult {
   // Pre-flight-parse BOTH structured targets before writing EITHER: the two mergeConfig writes below are not
   // a cross-file transaction, so a corrupt hooks.json would otherwise throw AFTER config.toml is already
   // mutated (a partial install). AGENTS.md is plain text — no "corrupt" state to pre-empt.
+  //
+  // Honest narrowing of the "never leaves a partial install" claim: the rollback try/catch below covers
+  // writes (b) hooks.json and (c) AGENTS.md — each undoes everything written BEFORE it if it fails. The
+  // FIRST write (a) config.toml is NOT itself wrapped in a rollback try, so it has a narrow post-atomic-
+  // rename window where mergeConfig's own undo-journal write throws (see engine.ts's `committed` split):
+  // the credential would then be live on disk with no rollback attempted. This is a pre-existing property
+  // of the shared U14 engine, not specific to Codex — the Claude Code installer's settings.json write has
+  // the identical gap — tracked with the decision-#16 config-write robustness cluster. The full fix
+  // (journal-before-publish, or committed-failure metadata the caller can act on) belongs in the engine
+  // itself and is deferred.
   readToml(configTomlPath(home)); // parsed only to fail fast; mergeConfig re-reads it authoritatively below
   const currentHooks = readJson(hooksJsonPath(home));
 
@@ -255,21 +265,27 @@ export function installCodex(opts: InstallOptions = {}): InstallResult {
 
 /**
  * Reverse the install: restore config.toml + hooks.json from the U14 undo journal (cross-process by design,
- * mirrors `uninstallClaudeCode`), and strip the AGENTS.md marked block. Per-target try/catch so one diverged
- * target never aborts the others. Returns the paths actually restored/cleaned.
+ * mirrors `uninstallClaudeCode`), strip the AGENTS.md marked block, and REVOKE the stable Codex credential
+ * (delete `codex.token`). Per-target try/catch so one diverged target never aborts the others. Returns the
+ * paths actually restored/cleaned (the credential revocation is not a "restore" and is deliberately not
+ * included in that list — see below).
  *
  * KNOWN LIMITATION (shared with uninstallClaudeCode): undo is a byte-exact WHOLE-FILE restore, identity-
  * checked so it THROWS rather than clobber a file changed since install. `~/.codex/config.toml` is Codex's
  * own continuously-rewritten live-state file (model/approval settings, trust hashes, plugin state), so its
- * undo has a real chance of being SKIPPED by uninstall time — leaving the (harmless) `mcp_servers.agent-os`
- * entry behind. The correct reversal is TARGETED removal, deferred pending the same U14 key-removal primitive
- * `uninstallClaudeCode` is waiting on.
+ * undo has a real chance of being SKIPPED by uninstall time — leaving the `mcp_servers.agent-os` entry
+ * behind. That leftover entry is now INERT rather than harmless: it carries the stable token, and this
+ * function revokes it unconditionally (below), so the entry can no longer authenticate against the gate
+ * even when the byte-exact config.toml undo was skipped. The correct reversal is still TARGETED removal of
+ * the entry itself, deferred pending the same U14 key-removal primitive `uninstallClaudeCode` is waiting on
+ * (#21).
  */
 export function uninstallCodex(opts: { home?: string; dataDir?: string } = {}): string[] {
   const home = opts.home ?? homedir();
   const dataDir = resolveDataDir(opts.dataDir);
   const entries = listUndo(dataDir);
   const restored: string[] = [];
+  const skipped: string[] = [];
 
   for (const target of [configTomlPath(home), hooksJsonPath(home)]) {
     const entry = entries.findLast((e) => e.targetPath === target);
@@ -280,6 +296,7 @@ export function uninstallCodex(opts: { home?: string; dataDir?: string } = {}): 
     } catch (err) {
       // Diverged since install (identity check) or otherwise unrestorable — skip it, keep the loop going.
       console.error(`[agent-os] uninstall: could not restore '${target}' (changed since install?):`, err);
+      skipped.push(target);
     }
   }
 
@@ -290,6 +307,21 @@ export function uninstallCodex(opts: { home?: string; dataDir?: string } = {}): 
     if (stripAgentsMdBlock(agentsMd)) restored.push(agentsMd);
   } catch (err) {
     console.error(`[agent-os] uninstall: could not strip pointer block from '${agentsMd}':`, err);
+  }
+
+  // Revoke the stable Codex credential: delete codex.token so the next server boot re-mints a FRESH token,
+  // leaving any surviving `[mcp_servers.agent-os]` entry in a diverged config.toml carrying a token the gate no
+  // longer accepts — access is revoked even when the byte-exact config.toml undo was skipped. (Targeted TOML
+  // removal of the leftover entry itself still needs the U14 key-removal primitive — deferred, roadmap #21.)
+  try {
+    rmSync(codexTokenPath(dataDir), { force: true });
+  } catch (err) {
+    console.error(`[agent-os] uninstall: could not revoke '${codexTokenPath(dataDir)}':`, err);
+  }
+  if (skipped.includes(configTomlPath(home))) {
+    console.error(
+      `[agent-os] uninstall: config.toml diverged since install — the mcp_servers.agent-os entry may remain, but it is now INERT (codex.token revoked). Remove it manually or re-install to reset.`,
+    );
   }
 
   return restored;

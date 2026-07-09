@@ -18,15 +18,6 @@ export function bunCommand(repoRoot: string, script: string): string {
   return `bun run "${join(repoRoot, "hooks", script)}"`;
 }
 
-/** True iff a settings hook ENTRY already references our exact command — used to strip a prior install of
- *  ours before re-adding it, so re-install replaces (never duplicates). Exact-match avoids false positives
- *  against an unrelated user hook; a moved repo simply leaves its now-dead entry (fails open, harmless). */
-export function referencesCommand(entry: unknown, command: string): boolean {
-  if (entry === null || typeof entry !== "object") return false;
-  const hooks = (entry as { hooks?: unknown }).hooks;
-  return Array.isArray(hooks) && hooks.some((h) => (h as { command?: unknown })?.command === command);
-}
-
 /** Parse a JSON config file; `undefined` when absent. Throws on corrupt JSON — never merge into a config we
  *  can't parse (mirrors the engine's own fail-closed parse). */
 export function readJson(path: string): Record<string, unknown> | undefined {
@@ -38,8 +29,12 @@ export function readJson(path: string): Record<string, unknown> | undefined {
   }
 }
 
-/** The existing `hooks.<event>` entries with OUR entry (by `command`) stripped, so the caller can append a
- *  fresh one and re-install stays idempotent. Non-array / missing → []. */
+/** The existing `hooks.<event>` entries with our own nested hook removed from each entry, so the caller can
+ *  append a fresh entry and re-install stays idempotent. Filters at the NESTED HOOK level, not the whole
+ *  entry: a user hook co-located in the same entry as ours (same matcher, two nested hooks in one entry) is
+ *  no longer collateral damage — only our own nested hook is stripped out, and the entry itself is dropped
+ *  only when nothing of the user's remains. Non-array / missing → [].
+ */
 export function existingEntriesWithoutOurs(
   config: Record<string, unknown> | undefined,
   event: string,
@@ -47,5 +42,17 @@ export function existingEntriesWithoutOurs(
 ): unknown[] {
   const hooks = (config?.hooks as Record<string, unknown> | undefined) ?? {};
   const arr = Array.isArray(hooks[event]) ? (hooks[event] as unknown[]) : [];
-  return arr.filter((entry) => !referencesCommand(entry, ourCommand));
+  const out: unknown[] = [];
+  for (const entry of arr) {
+    const nested = entry && typeof entry === "object" ? (entry as { hooks?: unknown }).hooks : undefined;
+    if (!Array.isArray(nested)) {
+      out.push(entry); // no nested hooks array → keep verbatim (never our shape)
+      continue;
+    }
+    const kept = nested.filter((h) => (h as { command?: unknown })?.command !== ourCommand);
+    if (kept.length === nested.length) out.push(entry); // none of ours → keep the entry unchanged
+    else if (kept.length > 0) out.push({ ...(entry as object), hooks: kept }); // co-located → preserve user's hooks + matcher
+    // else: the entry held ONLY our hook(s) → drop it entirely (so re-install re-adds a single fresh entry)
+  }
+  return out;
 }

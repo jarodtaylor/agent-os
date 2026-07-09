@@ -41,3 +41,4 @@ docs/HANDOFF.local.md
 /.claude/
 /docs/reference/
 /docs/FEATURE-SLATE.md
+*.local.md

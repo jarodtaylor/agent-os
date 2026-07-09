@@ -255,10 +255,12 @@ describe("stable Codex credential — read per-request for LIVE revocation (U8 d
     expect(res.status).toBe(403);
   });
 
-  test("an EMPTY codex.token file yields no stable credential — a missing header stays 403", async () => {
-    // A whitespace-only file must not become a zero-length accepted buffer that a missing header matches.
+  test("a whitespace-only codex.token yields no stable credential — the whitespace value itself is rejected", async () => {
+    // The whitespace file must not become an accepted stable buffer. Send the whitespace value AS the token: a
+    // 403 proves it was NOT accepted (a MISSING header would 403 regardless, so it couldn't prove the property).
     const { app } = buildApp({ token: generateToken(), stableTokenPath: writeStable("   ") });
-    expect((await app.request("/status", { headers: { host: GOOD_HOST } })).status).toBe(403);
+    const res = await app.request("/status", { headers: { host: GOOD_HOST, "x-agent-os-token": "   " } });
+    expect(res.status).toBe(403);
   });
 
   test("LIVE revocation: deleting codex.token rejects the stable token on the NEXT request, no restart (the gate finding)", async () => {

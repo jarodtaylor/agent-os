@@ -138,11 +138,13 @@ function buildAllowedHosts(port: number): Set<string> {
 /**
  * Timing-safe compare against EVERY accepted token, with an explicit length guard. `crypto.timingSafeEqual`
  * THROWS on mismatched buffer lengths rather than returning false, so each candidate is length-checked first
- * (a length mismatch is not the secret — every token is a fixed-length UUID); an unguarded call would turn a
- * wrong-LENGTH token into a 500 instead of a clean 403, and a `===` fallback would reintroduce the timing
- * side-channel this exists to close. We test ALL buffers WITHOUT early-out on a match, so the work never
- * depends on WHICH token matched or its position. A missing header is rejected before any buffer is built;
- * `expectedBufs` is precomputed once at gate construction.
+ * (the per-boot token is a fixed-length UUID; the opaque stable Codex token may be any length, and a length
+ * mismatch just means "not this credential" — revealing only that a presented token is the wrong length is not
+ * a meaningful leak); an unguarded call would turn a wrong-LENGTH token into a 500 instead of a clean 403, and
+ * a `===` fallback would reintroduce the timing side-channel this exists to close. We test ALL buffers WITHOUT
+ * early-out on a match, so the work never depends on WHICH token matched or its position. A missing header is
+ * rejected before any buffer is built. `expectedBufs` is assembled by the caller PER REQUEST (the constant
+ * per-boot buffer + the CURRENT stable token, read fresh) — only the per-boot buffer is precomputed once.
  */
 function tokenMatchesAny(provided: string | undefined, expectedBufs: Buffer[]): boolean {
   if (provided === undefined) return false;

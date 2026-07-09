@@ -142,7 +142,10 @@ export function resolveCodexToken(dataDir: string): string {
     // writeFileSync lands the whole token, so a concurrent reader sees either no file or the complete value.
     writeFileSync(path, token, { mode: 0o600, flag: "wx" });
     return token;
-  } catch {
+  } catch (err) {
+    // ONLY EEXIST is the concurrent-create race handled below; any OTHER write failure (EACCES, ENOSPC, EROFS,
+    // …) is a real error to surface — never mask it as "someone else created it" and silently read/overwrite.
+    if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
     // The file EXISTS (EEXIST) — two sub-cases. If a concurrent creator won with a VALID token, adopt theirs
     // (keeps the two resolvers convergent). Otherwise it's a present-but-EMPTY/corrupt leftover the read above
     // already rejected: overwrite it atomically (temp+rename adopts 0600 and never leaves a partial token),

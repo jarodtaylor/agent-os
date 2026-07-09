@@ -24,7 +24,7 @@
  * can read the CURRENT token; a prior boot's token is never honored (scenario 4).
  */
 import { randomUUID, timingSafeEqual } from "node:crypto";
-import { renameSync, rmSync, writeFileSync } from "node:fs";
+import { readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import type { Context, MiddlewareHandler } from "hono";
 import { getConnInfo } from "hono/bun";
 import type { ConnInfo } from "hono/conninfo";
@@ -35,8 +35,14 @@ import { TOKEN_HEADER, ensureDataDir, tokenPath } from "../paths";
 const LOOPBACK_ADDRESSES = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
 
 export interface SecurityGateOptions {
-  /** The current boot's token — the only value the gate ever compares against. */
+  /** The current boot's token — always accepted (the primary credential). */
   token: string;
+  /** Path to a STABLE credential file (Codex's `codex.token` — U8 decision A) the gate ALSO accepts, read
+   *  FRESH per request (mtime-cached), NOT snapshotted. A harness whose MCP client can only send a static
+   *  header (Codex) can't ride the per-boot token, so it authenticates with this stable token. Reading it live
+   *  is what makes revocation LIVE: a deleted/rotated `codex.token` takes effect on the NEXT request, no
+   *  restart — and a fresh install is likewise picked up live. Omitted ⇒ per-boot token only. */
+  stableTokenPath?: string;
   /** The port this server is bound to, for the Host allowlist's `host:port` form. */
   port: number;
   /** Peer-address getter, injectable for tests. Defaults to Hono's real Bun socket-peer reader;
@@ -52,14 +58,60 @@ export function securityGate(opts: SecurityGateOptions): MiddlewareHandler {
   // LOOPBACK_ADDRESSES). Precomputing the expected buffer does not weaken timing-safety — that is a
   // property of the compare, not of how the buffer was built.
   const allowedHosts = buildAllowedHosts(opts.port);
-  const expectedTokenBuf = Buffer.from(opts.token, "utf8");
+  // The per-boot token is constant for the process, so encode it ONCE (empty-string-guarded so a stray "" can't
+  // become a zero-length buffer a missing header would match). The stable Codex token, by contrast, is read
+  // from its file per request (mtime-cached) so its lifecycle is observed LIVE — see makeStableTokenReader.
+  const perBootBuf = opts.token.length > 0 ? Buffer.from(opts.token, "utf8") : null;
+  const readStableToken = makeStableTokenReader(opts.stableTokenPath);
 
   return async (c, next) => {
     const address = getConn(c).remote.address;
     if (!isLoopbackAddress(address)) return forbidden(c, "non-loopback source");
     if (!allowedHosts.has((c.req.header("host") ?? "").toLowerCase())) return forbidden(c, "disallowed host");
-    if (!tokenMatches(c.req.header(TOKEN_HEADER), expectedTokenBuf)) return forbidden(c, "invalid or missing token");
+    // Assemble the accepted set per request: the constant per-boot token + the CURRENT stable token (null when
+    // codex.token is absent/empty — i.e. revoked). Timing-safety is a property of the compare, not the build.
+    const accepted: Buffer[] = [];
+    if (perBootBuf) accepted.push(perBootBuf);
+    const stableBuf = readStableToken();
+    if (stableBuf) accepted.push(stableBuf);
+    if (!tokenMatchesAny(c.req.header(TOKEN_HEADER), accepted)) return forbidden(c, "invalid or missing token");
     await next();
+  };
+}
+
+/**
+ * A reader for the stable credential file that re-reads ONLY when the file's mtime changes — so the common
+ * case (an unchanged token) costs a single `stat`, not a full read+decode, on every request, while a rotate or
+ * delete is observed on the NEXT request (LIVE revocation). Absent / unreadable / empty ⇒ `null` (no stable
+ * token accepted): that is exactly how uninstall's `rm codex.token` revokes Codex access with no restart, and
+ * how a fresh install is picked up live (the file appears → its mtime differs from the NaN seed → it's read).
+ * The atomic temp+rename the writers use changes `mtimeMs`, so a rewrite is never missed. An undefined `path`
+ * (a per-boot-only gate) short-circuits to a constant `null` with no per-request syscall.
+ */
+function makeStableTokenReader(path: string | undefined): () => Buffer | null {
+  if (path === undefined) return () => null;
+  let cachedMtimeMs = Number.NaN; // NaN !== anything → the first call always reads
+  let cachedBuf: Buffer | null = null;
+  return () => {
+    let mtimeMs: number;
+    try {
+      mtimeMs = statSync(path).mtimeMs;
+    } catch {
+      // Absent/unreadable → revoked. Reset the cache so a later re-create is re-read (its mtime !== NaN).
+      cachedMtimeMs = Number.NaN;
+      cachedBuf = null;
+      return null;
+    }
+    if (mtimeMs !== cachedMtimeMs) {
+      cachedMtimeMs = mtimeMs;
+      try {
+        const raw = readFileSync(path, "utf8").trim();
+        cachedBuf = raw.length > 0 ? Buffer.from(raw, "utf8") : null;
+      } catch {
+        cachedBuf = null;
+      }
+    }
+    return cachedBuf;
   };
 }
 
@@ -84,17 +136,24 @@ function buildAllowedHosts(port: number): Set<string> {
 }
 
 /**
- * Timing-safe compare with an explicit length guard. `crypto.timingSafeEqual` THROWS on mismatched
- * buffer lengths rather than returning false, so an unguarded call would turn a wrong-LENGTH token
- * into a 500 instead of a clean 403 — and falling back to `===` on a length mismatch would
- * reintroduce the timing side-channel this exists to close. A missing header is rejected before the
- * provided buffer is even built. `expectedBuf` is precomputed once at gate construction.
+ * Timing-safe compare against EVERY accepted token, with an explicit length guard. `crypto.timingSafeEqual`
+ * THROWS on mismatched buffer lengths rather than returning false, so each candidate is length-checked first
+ * (the per-boot token is a fixed-length UUID; the opaque stable Codex token may be any length, and a length
+ * mismatch just means "not this credential" — revealing only that a presented token is the wrong length is not
+ * a meaningful leak); an unguarded call would turn a wrong-LENGTH token into a 500 instead of a clean 403, and
+ * a `===` fallback would reintroduce the timing side-channel this exists to close. We test ALL buffers WITHOUT
+ * early-out on a match, so the work never depends on WHICH token matched or its position. A missing header is
+ * rejected before any buffer is built. `expectedBufs` is assembled by the caller PER REQUEST (the constant
+ * per-boot buffer + the CURRENT stable token, read fresh) — only the per-boot buffer is precomputed once.
  */
-function tokenMatches(provided: string | undefined, expectedBuf: Buffer): boolean {
+function tokenMatchesAny(provided: string | undefined, expectedBufs: Buffer[]): boolean {
   if (provided === undefined) return false;
   const providedBuf = Buffer.from(provided, "utf8");
-  if (providedBuf.length !== expectedBuf.length) return false;
-  return timingSafeEqual(providedBuf, expectedBuf);
+  let matched = false;
+  for (const buf of expectedBufs) {
+    if (providedBuf.length === buf.length && timingSafeEqual(providedBuf, buf)) matched = true;
+  }
+  return matched;
 }
 
 /** Mint a fresh CSPRNG per-boot token. `randomUUID` is backed by the platform CSPRNG and gives a

@@ -11,7 +11,7 @@
  * unforeseen throw can never block or slow session start.
  */
 import type { WorkStateResponse } from "../src/workstate/response";
-import { HARNESS, TOKEN_HEADER, baseUrl, fetchWithTimeout, readHookIdentity, readToken } from "./shared";
+import { HARNESS, fetchWorkState, readHookIdentity } from "./shared";
 
 /** How many recent breadcrumb summaries to inline when the raw trail is the ONLY resume signal (AE1). */
 const RAW_PREVIEW = 6;
@@ -83,30 +83,10 @@ function relativeAge(ts: number, now: number): string {
   return `${Math.floor(hr / 24)}d ago`;
 }
 
-/** Fetch the work-state, or `null` on ANY failure (no token, server down, non-200, timeout, bad JSON, or a
- *  valid-JSON WRONG-shape body). Never throws — every failure mode is the same "nothing to inject" outcome. */
-async function fetchWorkState(project: string, sessionId: string): Promise<WorkStateResponse | null> {
-  const token = readToken();
-  if (!token) return null; // no live token → the server isn't up (or isn't this boot); nothing to inject
-  const res = await fetchWithTimeout(`${baseUrl()}/work-state?project=${encodeURIComponent(project)}&limit=${FETCH_LIMIT}`, {
-    headers: { [TOKEN_HEADER]: token, "x-agent-os-harness": HARNESS, "x-agent-os-session": sessionId },
-  });
-  if (!res || !res.ok) return null; // unreachable, timed out, or non-200 → nothing to inject
-  try {
-    const body = (await res.json()) as WorkStateResponse | null;
-    // Coarse shape guard: a valid-JSON but WRONG-shape 200 (a foreign process squatting the port, or
-    // hook/server version skew) is treated as "nothing to inject", exactly like a down server — never trusted
-    // into formatAdditionalContext, whose tail access would otherwise throw and break the fail-open contract.
-    return body && Array.isArray((body as { raw_trail_tail?: unknown }).raw_trail_tail) ? body : null;
-  } catch {
-    return null; // a malformed body is "nothing to inject", same as a down server
-  }
-}
-
 async function main(): Promise<void> {
   const { project, sessionId } = await readHookIdentity();
   if (!project) return; // no cwd → can't key a lookup; emit nothing (fail-open)
-  const context = formatAdditionalContext(await fetchWorkState(project, sessionId));
+  const context = formatAdditionalContext(await fetchWorkState(project, sessionId, { harness: HARNESS, limit: FETCH_LIMIT }));
   if (!context) return; // nothing to inject
   process.stdout.write(
     JSON.stringify({ hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: context } }),

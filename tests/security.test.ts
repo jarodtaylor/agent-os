@@ -44,6 +44,7 @@ function buildApp(overrides: Partial<SecurityGateOptions> = {}) {
   const token = overrides.token ?? generateToken();
   const gate = securityGate({
     token,
+    stableTokenPath: overrides.stableTokenPath,
     port: overrides.port ?? PORT,
     getConn: overrides.getConn ?? fakeConn("127.0.0.1"),
   });
@@ -227,6 +228,64 @@ describe("timing-safe token compare", () => {
     expect(token.length).not.toBe(3); // sanity: genuinely a different length than "abc"
     const res = await app.request("/status", { headers: { host: GOOD_HOST, "x-agent-os-token": "abc" } });
     expect(res.status).toBe(403); // an unguarded timingSafeEqual would RangeError -> Hono 500
+  });
+});
+
+// ── Stable Codex credential: read per-request from codex.token for LIVE revocation (U8 decision A) ──
+
+describe("stable Codex credential — read per-request for LIVE revocation (U8 decision A)", () => {
+  const stablePath = (): string => join(root, "codex.token");
+  const writeStable = (value: string): string => {
+    writeFileSync(stablePath(), value, { mode: 0o600 });
+    return stablePath();
+  };
+
+  test("BOTH the per-boot token and the stable token in codex.token are accepted", async () => {
+    const token = generateToken();
+    const codexToken = generateToken();
+    const { app } = buildApp({ token, stableTokenPath: writeStable(codexToken) });
+
+    expect((await app.request("/status", { headers: { host: GOOD_HOST, "x-agent-os-token": token } })).status).toBe(200);
+    expect((await app.request("/status", { headers: { host: GOOD_HOST, "x-agent-os-token": codexToken } })).status).toBe(200);
+  });
+
+  test("a token matching NEITHER the per-boot nor the stable token is rejected", async () => {
+    const { app } = buildApp({ token: generateToken(), stableTokenPath: writeStable(generateToken()) });
+    const res = await app.request("/status", { headers: { host: GOOD_HOST, "x-agent-os-token": generateToken() } });
+    expect(res.status).toBe(403);
+  });
+
+  test("a whitespace-only codex.token yields no stable credential — the whitespace value itself is rejected", async () => {
+    // The whitespace file must not become an accepted stable buffer. Send the whitespace value AS the token: a
+    // 403 proves it was NOT accepted (a MISSING header would 403 regardless, so it couldn't prove the property).
+    const { app } = buildApp({ token: generateToken(), stableTokenPath: writeStable("   ") });
+    const res = await app.request("/status", { headers: { host: GOOD_HOST, "x-agent-os-token": "   " } });
+    expect(res.status).toBe(403);
+  });
+
+  test("LIVE revocation: deleting codex.token rejects the stable token on the NEXT request, no restart (the gate finding)", async () => {
+    const token = generateToken();
+    const codexToken = generateToken();
+    const { app } = buildApp({ token, stableTokenPath: writeStable(codexToken) });
+
+    // Accepted while the file exists…
+    expect((await app.request("/status", { headers: { host: GOOD_HOST, "x-agent-os-token": codexToken } })).status).toBe(200);
+    // …then delete codex.token (an uninstall's revoke) and hit the SAME running gate — now rejected, with no
+    // gate reconstruction / process restart. The per-boot token still works, proving only the stable one was cut.
+    rmSync(stablePath(), { force: true });
+    expect((await app.request("/status", { headers: { host: GOOD_HOST, "x-agent-os-token": codexToken } })).status).toBe(403);
+    expect((await app.request("/status", { headers: { host: GOOD_HOST, "x-agent-os-token": token } })).status).toBe(200);
+  });
+
+  test("LIVE install pickup: writing codex.token after boot is honored on the NEXT request, no restart", async () => {
+    const token = generateToken();
+    const codexToken = generateToken();
+    // Gate built with the path but the file ABSENT (Codex not yet installed) → the stable token is rejected…
+    const { app } = buildApp({ token, stableTokenPath: stablePath() });
+    expect((await app.request("/status", { headers: { host: GOOD_HOST, "x-agent-os-token": codexToken } })).status).toBe(403);
+    // …then the installer writes codex.token; the running gate picks it up on the next request (mtime changed).
+    writeStable(codexToken);
+    expect((await app.request("/status", { headers: { host: GOOD_HOST, "x-agent-os-token": codexToken } })).status).toBe(200);
   });
 });
 

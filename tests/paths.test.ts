@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DEFAULT_PORT, machineIdPath, resolveMachineId, resolvePort } from "../src/paths";
+import { codexTokenPath, DEFAULT_PORT, machineIdPath, resolveCodexToken, resolveMachineId, resolvePort } from "../src/paths";
 
 let root: string;
 beforeEach(() => {
@@ -36,6 +36,51 @@ describe("resolveMachineId", () => {
   test("re-mints when the persisted file is empty", () => {
     writeFileSync(machineIdPath(root), "", { mode: 0o600 });
     expect(resolveMachineId(root)).toMatch(/^[0-9a-f-]{36}$/);
+  });
+});
+
+describe("resolveCodexToken", () => {
+  test("mints a token on first call, persists it 0600, and is stable across calls", () => {
+    const first = resolveCodexToken(root);
+    expect(first.length).toBeGreaterThan(0);
+    expect(readFileSync(codexTokenPath(root), "utf8").trim()).toBe(first); // persisted to disk
+    expect(resolveCodexToken(root)).toBe(first); // stable — a later resolver returns the same token
+    expect(statSync(codexTokenPath(root)).mode & 0o777).toBe(0o600);
+  });
+
+  test("does NOT re-mint a present non-empty token, even one that isn't UUID-shaped", () => {
+    // The load-bearing difference from resolveMachineId: the installer writes this value into
+    // ~/.codex/config.toml, so re-minting a present token would silently break Codex auth. Any non-empty
+    // persisted value is authoritative and preserved verbatim.
+    writeFileSync(codexTokenPath(root), "a-hand-written-opaque-token", { mode: 0o600 });
+    expect(resolveCodexToken(root)).toBe("a-hand-written-opaque-token");
+  });
+
+  test("re-mints only when the persisted file is absent or empty", () => {
+    writeFileSync(codexTokenPath(root), "   ", { mode: 0o600 }); // whitespace-only ⇒ treated as empty
+    const minted = resolveCodexToken(root);
+    expect(minted.length).toBeGreaterThan(0);
+    expect(minted).not.toBe("   ");
+  });
+
+  test("two independent resolvers (server boot + installer) converge on ONE token", () => {
+    // The exclusive-create mint means whoever runs second reads the first's value rather than minting a
+    // rival — the property that keeps the gate's accepted token and config.toml's written token identical.
+    const a = resolveCodexToken(root);
+    const b = resolveCodexToken(root);
+    expect(a).toBe(b);
+  });
+
+  test("EEXIST-overwrite: a pre-existing EMPTY token file is overwritten atomically and the token persists", () => {
+    // Pre-create an EMPTY file: readCodexToken() returns null (empty ⇒ not authoritative), so the `wx`
+    // exclusive-create write fails EEXIST (the file already exists) — exercising the catch's overwrite branch,
+    // not the fast (truly-absent) path.
+    writeFileSync(codexTokenPath(root), "", { mode: 0o600 });
+    const minted = resolveCodexToken(root);
+    expect(minted.length).toBeGreaterThan(0);
+    // FIX 3: the per-process tmp write + rename + RE-READ means the returned value is exactly what's on disk,
+    // not just an un-persisted local mint.
+    expect(readFileSync(codexTokenPath(root), "utf8").trim()).toBe(minted);
   });
 });
 

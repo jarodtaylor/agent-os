@@ -115,6 +115,30 @@ test("undo restores the target's exact bytes and original mode", () => {
   expect(statSync(target).mode & 0o777).toBe(0o644); // original mode restored
 });
 
+// ── targetMode: publish a secret-bearing file owner-only (U8 gate fold) ─────────────
+
+test("targetMode publishes a pre-existing looser file as 0600 (no readable window), and undo restores its original mode", () => {
+  // A config a user / dotfile tool created 0644, into which a caller (the Codex installer) embeds a secret.
+  const target = seed("config.toml", 'model = "x"\n');
+  chmodSync(target, 0o644);
+
+  const result = mergeConfig(target, { added: 1 }, { dataDir, targetMode: 0o600 });
+  // PUBLISHED owner-only: the engine chmods the temp to targetMode BEFORE the rename and never tightens after,
+  // so the token-bearing file is never on disk at 0644 (final mode == published mode, no transient window).
+  expect(statSync(target).mode & 0o777).toBe(0o600);
+
+  // The journal still recorded the ORIGINAL mode, so undo returns the file to its pre-install permissions.
+  undo(result.undoId!, dataDir);
+  expect(statSync(target).mode & 0o777).toBe(0o644);
+});
+
+test("without targetMode a pre-existing file's mode is preserved (non-secret configs are never force-tightened)", () => {
+  const target = seed("settings.json", JSON.stringify({ a: 1 }, null, 2) + "\n");
+  chmodSync(target, 0o644);
+  mergeConfig(target, { b: 2 }, { dataDir });
+  expect(statSync(target).mode & 0o777).toBe(0o644); // unchanged — the default preserves the caller's mode
+});
+
 // ── failure mid-write leaves the original intact (R11, U14 scenario 4) ─────────────
 
 test("a write that fails mid-flight leaves the original file untouched and cleans up", () => {

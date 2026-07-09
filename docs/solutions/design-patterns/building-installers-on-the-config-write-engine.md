@@ -1,6 +1,7 @@
 ---
 title: Building config installers/deprovisioners on the U14 config-write engine
 date: 2026-07-08
+last_updated: 2026-07-08
 category: docs/solutions/design-patterns
 module: install/config-write engine
 problem_type: design_pattern
@@ -79,6 +80,17 @@ for (const target of [claudeJsonPath(home), settingsPath(home)]) {
 // KNOWN LIMITATION: the diverged ~/.claude.json is skipped, so mcpServers.agent-os lingers (harmless — CC
 // marks the absent server unavailable). Targeted removal is the deferred U14 primitive.
 ```
+
+**Lived confirmation (2026-07-08).** U7's live-VS1 dogfood ran this exact install→uninstall against the REAL `~/.claude` on a heavily-configured daily-driver (5 existing SessionStart hooks + 3 MCP servers). Confirmed on a live machine, not just in tests: `settings.json` undo restored cleanly; **`~/.claude.json` undo was correctly REFUSED** by the identity check — Claude Code had live-rewritten it since install (~40 min earlier), so it had diverged, and `undo` threw rather than clobber CC's newer state. The `mcpServers.agent-os` entry lingered exactly as predicted. Until the deferred primitive lands, the manual removal is a surgical key-delete with an atomic write (never a whole-file rewrite):
+
+```python
+d = json.loads(open(path).read())          # read the LIVE file (CC may have just rewritten it)
+d["mcpServers"].pop("agent-os", None)       # delete only our key — preserve CC's live state
+out = json.dumps(d, indent=2, ensure_ascii=False)  # indent=2 matches Node's JSON.stringify(obj,null,2)
+# write to a temp file in the same dir, then os.replace(tmp, path)  — atomic, minimal-diff
+```
+
+This upgraded the whole-file-restore trap from *predicted* (decision #26) to *observed on a live daily-driver* — the single strongest reason the deferred targeted-removal primitive is real and not a corner case.
 
 ## Related
 - `src/install/claude-code.ts` — the installer this documents; `src/configwrite/engine.ts` — `deepMerge`/`mergeConfig`/`undo`.

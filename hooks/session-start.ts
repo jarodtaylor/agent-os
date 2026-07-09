@@ -11,6 +11,9 @@
  * unforeseen throw can never block or slow session start.
  */
 import type { WorkStateResponse } from "../src/workstate/response";
+// Re-exported so hooks/codex-session-start.ts (U8) can import the response type from the same module it
+// imports `formatAdditionalContext` from, rather than reaching past this hook into src/workstate itself.
+export type { WorkStateResponse };
 import { HARNESS, TOKEN_HEADER, baseUrl, fetchWithTimeout, readHookIdentity, readToken } from "./shared";
 
 /** How many recent breadcrumb summaries to inline when the raw trail is the ONLY resume signal (AE1). */

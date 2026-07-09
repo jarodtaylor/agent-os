@@ -95,6 +95,22 @@ describe("installCodex", () => {
     expect(existsSync(configPath())).toBe(false);
   });
 
+  test("rolls back BOTH config.toml and hooks.json when the AGENTS.md write fails (cross-file transactional, third write)", () => {
+    // Force the THIRD write to fail AFTER config.toml + hooks.json have already committed: make the AGENTS.md
+    // path a DIRECTORY, so upsertAgentsMdBlock's readFileSync(path) throws (EISDIR) before ever reaching the
+    // atomic temp+rename write. installCodex must undo BOTH earlier structured writes, not just the immediately
+    // preceding one.
+    mkdirSync(agentsMdPath(), { recursive: true });
+    expect(existsSync(configPath())).toBe(false);
+    expect(existsSync(hooksPath())).toBe(false);
+
+    expect(() => install()).toThrow();
+
+    // Both earlier structured writes were rolled back — no partial (config+hooks-only) install remains.
+    expect(existsSync(configPath())).toBe(false);
+    expect(existsSync(hooksPath())).toBe(false);
+  });
+
   test("merge preserves a pre-existing unrelated mcp_servers table in config.toml", () => {
     mkdirSync(codexDir(), { recursive: true });
     writeFileSync(configPath(), `model = "gpt-5.5"\n\n[mcp_servers.foo]\nurl = "https://example.com/mcp"\n`);

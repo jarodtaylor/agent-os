@@ -52,8 +52,16 @@ const sessionMeta = (o: Record<string, unknown> = {}) =>
   envelope("session_meta", { id: SESSION, session_id: SESSION, cwd: PROJECT, base_instructions: "…system prompt…", ...o });
 const message = (role: string, text: string) =>
   envelope("response_item", { type: "message", role, content: [{ type: role === "assistant" ? "output_text" : "input_text", text }] });
+// `id` defaults to a stable per-call value; pass "" explicitly to OMIT the field — real Codex `function_call`
+// payloads often carry no `id` at all, which is exactly the shape FIX 1's regression test needs.
 const funcCall = (name: string, args: Record<string, unknown> | string, id = `fc-${seq}`, callId = `call-${seq}`) =>
-  envelope("response_item", { type: "function_call", name, arguments: typeof args === "string" ? args : JSON.stringify(args), id, call_id: callId });
+  envelope("response_item", {
+    type: "function_call",
+    name,
+    arguments: typeof args === "string" ? args : JSON.stringify(args),
+    ...(id ? { id } : {}),
+    call_id: callId,
+  });
 const funcOutput = (output: unknown, callId = `call-${seq}`) =>
   envelope("response_item", { type: "function_call_output", call_id: callId, output });
 const reasoning = (text: string) =>
@@ -157,14 +165,33 @@ describe("tool outputs — a digest only on error/test signal, never a plain-suc
 
 // ── Ids: stable item id vs the session@offset fallback ────────────────────────
 
-describe("crumb ids — stable payload.id / call_id, else session@byteOffset", () => {
-  test("a function_call uses its own id; a message with no id falls back to session@offset", () => {
+describe("crumb ids — stable payload.id / call_id, else session@byteOffset, suffixed by #ptype", () => {
+  test("a function_call uses its own id; a message with no id falls back to session@offset; both suffixed by payload type", () => {
     const [call] = extractCodex(SESS)(funcCall("exec_command", { cmd: "ls" }, "fc-STABLE"), { sourcePath: "/x", byteOffset: 100 });
-    expect(call!.id).toBe("fc-STABLE");
+    expect(call!.id).toBe("fc-STABLE#function_call");
     const [msg] = extractCodex(SESS)(message("user", "hello"), { sourcePath: "/x", byteOffset: 250 });
-    expect(msg!.id).toBe(`${SESSION}@250`); // no id on a message → session@offset
+    expect(msg!.id).toBe(`${SESSION}@250#message`); // no id on a message → session@offset, suffixed by type
     const [out] = extractCodex(SESS)(funcOutput("Error: boom", "call-XYZ"), { sourcePath: "/x", byteOffset: 300 });
-    expect(out!.id).toBe("call-XYZ"); // an output has only call_id
+    expect(out!.id).toBe("call-XYZ#function_call_output"); // an output has only call_id, suffixed by type
+  });
+});
+
+// ── FIX 1 regression: an id-less function_call shares call_id with its output — must NOT collide ─────────────
+
+describe("crumb id collision (FIX 1) — an id-less function_call and its output share call_id", () => {
+  test("both the call and its error output land as distinct rows; the output digest is not dropped", async () => {
+    const path = writeRollout("idless.jsonl", [
+      sessionMeta(),
+      funcCall("exec_command", { cmd: "bun test" }, "", "call-shared"), // id-less — real Codex payloads omit it
+      funcOutput("Error: exit code 1\nsomething failed", "call-shared"), // same call_id, no id field of its own
+    ]);
+    const written = await tailFile(deps(), path);
+    expect(written).toBe(2);
+
+    const crumbs = await repo.queryBreadcrumbs(PROJECT, 0, "");
+    expect(crumbs).toHaveLength(2); // both landed — no first-write-wins collision
+    expect(new Set(crumbs.map((c) => c.id)).size).toBe(2); // distinct ids (the #ptype suffix disambiguates them)
+    expect(crumbs.some((c) => c.summary.includes("Error: exit code 1"))).toBe(true); // the output digest was NOT dropped
   });
 });
 
@@ -208,6 +235,21 @@ describe("secret classification — a pasted key is secret and redacts through t
     expect(c!.summary).toBe("Exec: deploy"); // the secret sits in args.env, never in the summary
     expect(c!.summary).not.toContain(key);
     expect(c!.sensitivity).toBe("secret"); // classified on the RAW args
+  });
+});
+
+// ── E — non-secret sensitivity floors (mirrors tests/capture-claude.test.ts's "E") ────────────────────────────
+
+describe("non-secret sensitivity floors — file-edit floors at 'path', everything else at 'personal'", () => {
+  test("apply_patch / write crumbs floor at 'path' when no secret is present", () => {
+    expect(boundExtract(funcCall("apply_patch", { path: "/p/foo.ts", patch: "@@ -1 +1 @@" }))[0]!.sensitivity).toBe("path");
+    expect(boundExtract(funcCall("write", { path: "/p/bar.ts", content: "plain content, no secret" }))[0]!.sensitivity).toBe("path");
+  });
+
+  test("exec_command / read_file / user-message crumbs floor at 'personal' when no secret is present", () => {
+    expect(boundExtract(funcCall("exec_command", { cmd: "ls -la" }))[0]!.sensitivity).toBe("personal");
+    expect(boundExtract(funcCall("read_file", { path: "/p/x.ts" }))[0]!.sensitivity).toBe("personal");
+    expect(boundExtract(message("user", "a normal directive"))[0]!.sensitivity).toBe("personal");
   });
 });
 
@@ -267,6 +309,47 @@ describe("captureCodex — discovers, binds per file, and tails", () => {
     writeRolloutAt(join(day, "rollout-bad.jsonl"), [message("user", "orphaned — no session_meta line")]);
     const total = await captureCodex({ repo, machineId: MACHINE }, join(root, "sessions"));
     expect(total).toBe(0);
+  });
+
+  test("steady state: a second sweep over an unchanged sessionsRoot returns 0 and adds no duplicate rows", async () => {
+    const day = join(root, "sessions", "2026", "07", "08");
+    mkdirSync(day, { recursive: true });
+    writeRolloutAt(join(day, "rollout-steady.jsonl"), [sessionMeta(), message("user", "steady state check")]);
+
+    const first = await captureCodex({ repo, machineId: MACHINE }, join(root, "sessions"));
+    expect(first).toBeGreaterThan(0);
+    const rowsAfterFirst = (await repo.queryBreadcrumbs(PROJECT, 0, "")).length;
+
+    // Second sweep: every file is already fully tailed, so the cursor===size guard skips the session_meta
+    // read entirely for each — this exercises that guard's TRUE path at the captureCodex level.
+    const second = await captureCodex({ repo, machineId: MACHINE }, join(root, "sessions"));
+    expect(second).toBe(0);
+    const rowsAfterSecond = (await repo.queryBreadcrumbs(PROJECT, 0, "")).length;
+    expect(rowsAfterSecond).toBe(rowsAfterFirst); // no duplicates
+  });
+
+  test("sweep isolation (FIX 2): a readCaptureCursor fault for one file does not abort the whole sweep", async () => {
+    const day = join(root, "sessions", "2026", "07", "08");
+    mkdirSync(day, { recursive: true });
+    const poisonPath = join(day, "rollout-poison.jsonl");
+    const goodPath = join(day, "rollout-good.jsonl");
+    writeRolloutAt(poisonPath, [envelope("session_meta", { id: "sess-poison", cwd: "/poison" }), message("user", "poisoned file")]);
+    writeRolloutAt(goodPath, [envelope("session_meta", { id: "sess-good", cwd: "/good" }), message("user", "good file")]);
+
+    // readCaptureCursor throws for exactly the poison path — a deterministic per-file fault; every other repo
+    // method (including the real writes tailFile makes) is untouched.
+    const faultyRepo: Repo = {
+      ...repo,
+      readCaptureCursor: async (p: string) => {
+        if (p === poisonPath) throw new Error("cursor read boom");
+        return repo.readCaptureCursor(p);
+      },
+    };
+
+    const total = await captureCodex({ repo: faultyRepo, machineId: MACHINE }, join(root, "sessions"));
+    expect(total).toBeGreaterThan(0); // the sweep was NOT aborted by the poisoned file's fault
+    const goodCrumbs = await repo.queryBreadcrumbs("/good", 0, "");
+    expect(goodCrumbs).toHaveLength(1); // the good file still tailed
   });
 });
 

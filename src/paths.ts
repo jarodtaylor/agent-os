@@ -147,11 +147,14 @@ export function resolveCodexToken(dataDir: string): string {
     // exactly as resolveMachineId re-mints over a malformed machine-id.
     const won = readCodexToken(path);
     if (won) return won;
-    const tmp = `${path}.tmp`;
+    // Present-but-empty/corrupt leftover -> atomic overwrite. UNIQUE tmp per process (server boot + installer can
+    // both reach this branch over the same empty file, no lock), then RE-READ so both converge on whichever rename
+    // won rather than each returning its own un-persisted mint.
+    const tmp = `${path}.${process.pid}.tmp`;
     rmSync(tmp, { force: true });
     writeFileSync(tmp, token, { mode: 0o600 });
     renameSync(tmp, path);
-    return token;
+    return readCodexToken(path) ?? token;
   }
 }
 

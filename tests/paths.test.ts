@@ -70,6 +70,18 @@ describe("resolveCodexToken", () => {
     const b = resolveCodexToken(root);
     expect(a).toBe(b);
   });
+
+  test("EEXIST-overwrite: a pre-existing EMPTY token file is overwritten atomically and the token persists", () => {
+    // Pre-create an EMPTY file: readCodexToken() returns null (empty ⇒ not authoritative), so the `wx`
+    // exclusive-create write fails EEXIST (the file already exists) — exercising the catch's overwrite branch,
+    // not the fast (truly-absent) path.
+    writeFileSync(codexTokenPath(root), "", { mode: 0o600 });
+    const minted = resolveCodexToken(root);
+    expect(minted.length).toBeGreaterThan(0);
+    // FIX 3: the per-process tmp write + rename + RE-READ means the returned value is exactly what's on disk,
+    // not just an un-persisted local mint.
+    expect(readFileSync(codexTokenPath(root), "utf8").trim()).toBe(minted);
+  });
 });
 
 describe("resolvePort", () => {

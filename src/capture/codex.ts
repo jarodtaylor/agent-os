@@ -72,15 +72,21 @@ export function extractCodex(session: CodexSession): Extractor {
     if (Number.isNaN(ts)) return []; // no usable timestamp → can't place it on the trail
 
     const payload = (ev.payload ?? {}) as Record<string, unknown>;
-    const core = crumbCore(str(payload.type), payload);
+    const ptype = str(payload.type);
+    const core = crumbCore(ptype, payload);
     if (!core) return [];
 
     // A stable per-crumb id: the item's OWN id (function_call / reasoning / custom_tool_call carry `id`), else
     // the correlating `call_id` (a `…_output` has only that), else `session@byteOffset` for a plain message —
-    // which has no id of its own. The offset fallback is stable within a file; a resume that COPIED the file to
-    // a new path would re-key those message crumbs (the U5-R2 residual — narrowed honestly: tool-call crumbs,
-    // which carry real ids, are unaffected; only plain-message crumbs are offset-keyed).
-    const id = str(payload.id) || str(payload.call_id) || `${session.sessionId}@${ctx.byteOffset}`;
+    // which has no id of its own — SUFFIXED by `#${ptype}` to disambiguate. Real Codex `function_call` payloads
+    // often OMIT `id` entirely, so an id-less call and its `function_call_output` both fall back to the SAME
+    // `call_id`; without the type suffix, the later output digest (the error/test observation the raw lane
+    // exists for) would collide with the call crumb under the breadcrumb PK's first-write-wins and be silently
+    // dropped. The suffix stays deterministic across a re-tail (payload.type never varies for a given event, so
+    // idempotency holds). The offset fallback is stable within a file; a resume that COPIED the file to a new
+    // path would re-key those message crumbs (the U5-R2 residual — narrowed honestly: tool-call crumbs, which
+    // carry real ids, are unaffected; only plain-message crumbs are offset-keyed).
+    const id = `${str(payload.id) || str(payload.call_id) || `${session.sessionId}@${ctx.byteOffset}`}#${ptype}`;
     return [
       {
         id,
@@ -145,7 +151,9 @@ function callCrumb(name: string, argsRaw: unknown): CrumbCore {
   const args = parseArgs(argsRaw);
   const { kind, summary } = toolSummary(name || "tool", (args ?? {}) as Record<string, unknown>);
   const floor: Sensitivity = kind === "file-edit" ? "path" : "personal";
-  return { kind, summary, sensitivity: classify(safeJson(args), floor) };
+  // Fold `name` into the classify input too: when args are empty/lean, the summary alone can be the bare tool
+  // name — classifying args in isolation would leave a secret-bearing NAME (or a name+empty-args combo) unseen.
+  return { kind, summary, sensitivity: classify(`${name} ${safeJson(args)}`, floor) };
 }
 
 function toolSummary(name: string, a: Record<string, unknown>): { kind: BreadcrumbKind; summary: string } {
@@ -211,7 +219,12 @@ export async function captureCodex(deps: CodexCaptureDeps, sessionsRoot: string)
     } catch {
       continue; // file vanished or is unreadable this pass — nothing to do
     }
-    if (((await deps.repo.readCaptureCursor(path)) ?? 0) === size) continue; // fully tailed already — skip the read
+    try {
+      if (((await deps.repo.readCaptureCursor(path)) ?? 0) === size) continue; // fully tailed — skip the read
+    } catch {
+      // a cursor-read fault must NOT abort the sweep — fall through to tailFile (its own reads are inside the
+      // per-file try/catch below), so this file is retried next pass and later files still tail.
+    }
 
     const session = readSessionMeta(path);
     if (!session) continue; // no attributable session_meta → skip this file

@@ -31,7 +31,7 @@
  * are rolled back via their `undoId` — best-effort, propagating the ORIGINAL error — so a failed install
  * never leaves a partial Codex configuration.
  */
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { parse as parseToml } from "smol-toml";
@@ -101,8 +101,9 @@ function rollback(results: MergeResult[], dataDir: string): void {
     if (!r.undoId) continue;
     try {
       undo(r.undoId, dataDir);
-    } catch {
-      // Best-effort — the original error is what propagates.
+    } catch (err) {
+      // Best-effort — the original error is what propagates; log so a swallowed rollback failure isn't invisible.
+      console.error(`[agent-os] install: rollback of '${r.targetPath}' failed (leaving it as-is):`, err);
     }
   }
 }
@@ -141,7 +142,17 @@ function upsertAgentsMdBlock(path: string, repoRoot: string): AgentsMdResult {
   if (existed && after === before) {
     return { path, created: false, changed: false };
   }
-  writeFileSync(path, after);
+  // Atomic write (mirrors resolveCodexToken/the engine's temp+rename): a mid-write fault must never corrupt
+  // Jarod's LIVE ~/.codex/AGENTS.md — a partial write lands only in the sibling temp, which a crash leaves
+  // orphaned but never substitutes for the real file. A rename REPLACES the target's inode wholesale, so an
+  // existing file's mode would otherwise be silently reset to the tmp's default — re-apply it first, exactly
+  // as the engine's own mergeConfig does across its own temp+rename.
+  const originalMode = existed ? statSync(path).mode & 0o777 : null;
+  const tmp = `${path}.tmp`;
+  rmSync(tmp, { force: true });
+  writeFileSync(tmp, after);
+  if (originalMode !== null) chmodSync(tmp, originalMode);
+  renameSync(tmp, path);
   return { path, created: !existed, changed: true };
 }
 
@@ -158,7 +169,14 @@ function stripAgentsMdBlock(path: string): boolean {
   if (stripped.trim() === "") {
     rmSync(path, { force: true });
   } else {
-    writeFileSync(path, stripped.replace(/\s+$/, "\n"));
+    // Same atomic temp+rename as the upsert above — a mid-write fault must never corrupt the live file, and the
+    // original mode survives the inode swap (see upsertAgentsMdBlock's comment; `path` is known to exist here).
+    const originalMode = statSync(path).mode & 0o777;
+    const tmp = `${path}.tmp`;
+    rmSync(tmp, { force: true });
+    writeFileSync(tmp, stripped.replace(/\s+$/, "\n"));
+    chmodSync(tmp, originalMode);
+    renameSync(tmp, path);
   }
   return true;
 }

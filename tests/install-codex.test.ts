@@ -90,6 +90,72 @@ describe("installCodex", () => {
     expect(statSync(configPath()).mode & 0o777).toBe(0o600);
   });
 
+  test("uninstall restores config.toml's pre-install mode (0644) that install tightened to 0600 — the targeted-removal regression", () => {
+    // THE regression: install tightens a pre-existing 0644 config.toml to 0600 (the test above proves that half);
+    // the retired whole-file undo restored the recorded 0644, but the targeted removeConfigKeys preserves the
+    // CURRENT (0600) mode. Uninstall must put 0644 back — from install provenance in the undo journal — else the
+    // user's config is left permanently owner-only.
+    mkdirSync(codexDir(), { recursive: true });
+    writeFileSync(configPath(), `model = "gpt-5.5"\n`);
+    chmodSync(configPath(), 0o644);
+
+    install();
+    expect(statSync(configPath()).mode & 0o777).toBe(0o600); // install tightened it (see the test above)
+
+    const { removed, warnings } = uninstallCodex({ home, dataDir, repoRoot: REPO });
+
+    expect(statSync(configPath()).mode & 0o777).toBe(0o644); // pre-install mode restored
+    const c = readToml(configPath());
+    expect(c.mcp_servers?.["agent-os"]).toBeUndefined(); // our entry still removed…
+    expect(c.model).toBe("gpt-5.5"); // …and the user's key otherwise intact
+    expect(removed).toContain(configPath());
+    expect(warnings).toEqual([]); // a clean restore emits no mode-restore warning
+  });
+
+  test("uninstall does NOT override a post-install user chmod — a 0640 config.toml stays 0640 (user intent wins)", () => {
+    // If the user chmod'd config.toml to something OTHER than our imposed 0600 after install, that is their
+    // intent — mode-restore must skip it. The targeted removal still succeeds; only the chmod is withheld.
+    mkdirSync(codexDir(), { recursive: true });
+    writeFileSync(configPath(), `model = "gpt-5.5"\n`);
+    chmodSync(configPath(), 0o644);
+
+    install();
+    chmodSync(configPath(), 0o640); // user re-tightens post-install — their call, not ours to undo
+
+    uninstallCodex({ home, dataDir, repoRoot: REPO });
+
+    expect(statSync(configPath()).mode & 0o777).toBe(0o640); // untouched — not reset to 0644, not left at 0600
+    expect(readToml(configPath()).mcp_servers?.["agent-os"]).toBeUndefined(); // removal still succeeded
+  });
+
+  test("uninstall leaves a config.toml install CREATED fresh at 0600 unchanged — nothing pre-dated us (no crash, no warning)", () => {
+    // No pre-existing config.toml: install CREATES it at 0600, so there is no pre-Agent-OS mode to restore (the
+    // oldest journal entry is a create, mode:null). Mode-restore must be a clean no-op — 0600 stays, no throw.
+    install(); // fresh machine — install creates config.toml
+    expect(statSync(configPath()).mode & 0o777).toBe(0o600);
+
+    const { warnings } = uninstallCodex({ home, dataDir, repoRoot: REPO });
+
+    expect(existsSync(configPath())).toBe(true); // still there — only mcp_servers.agent-os was removed
+    expect(statSync(configPath()).mode & 0o777).toBe(0o600); // unchanged — the file is ours, 0600 is correct
+    expect(warnings).toEqual([]);
+  });
+
+  test("uninstall over a config.toml that was already 0600 pre-install leaves it 0600 (trivially stable, no chmod churn)", () => {
+    // A pre-existing config.toml ALREADY at 0600: install keeps 0600, and mode-restore finds the pre-install mode
+    // equals the imposed mode, so it short-circuits without a redundant chmod. End state is 0600 either way.
+    mkdirSync(codexDir(), { recursive: true });
+    writeFileSync(configPath(), `model = "gpt-5.5"\n`);
+    chmodSync(configPath(), 0o600);
+
+    install();
+    const { warnings } = uninstallCodex({ home, dataDir, repoRoot: REPO });
+
+    expect(statSync(configPath()).mode & 0o777).toBe(0o600);
+    expect(readToml(configPath()).mcp_servers?.["agent-os"]).toBeUndefined();
+    expect(warnings).toEqual([]);
+  });
+
   test("uninstall targeted-removes our SessionStart hook even when hooks.json diverged since install", () => {
     install();
     // The user edits hooks.json after install (adds their own co-located-elsewhere hook) → the byte-exact undo

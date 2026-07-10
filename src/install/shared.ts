@@ -3,9 +3,9 @@
  * read-modify-write config upserts (backup-first, atomic, journaled undo lives in `../configwrite/index`;
  * this module only holds the small pre-merge shaping both installers do the same way).
  */
-import { existsSync, readFileSync } from "node:fs";
+import { chmodSync, existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { AppliedButUnjournaledError, mergeConfig, MERGE_NOOP } from "../configwrite/index";
+import { AppliedButUnjournaledError, listUndo, mergeConfig, MERGE_NOOP } from "../configwrite/index";
 
 /** This repo's root: `src/install/shared.ts` → `../..`. Safe for any `src/install/` caller — `import.meta.dir`
  *  is THIS file's own directory, and `claude-code.ts` / `codex.ts` live in that same directory. */
@@ -157,4 +157,37 @@ export function removeHooksIfPresent(
     console.error(`[agent-os] uninstall: ${opts.errLabel} '${targetPath}':`, err);
     return { removed: [], failed: [{ path: targetPath, error: errorText(err) }], warnings: [] };
   }
+}
+
+/** The owner-only mode the Codex installer imposes on config.toml (which embeds the stable token). Mode
+ *  restoration only fires while the file still carries EXACTLY this — any other current mode is a post-install
+ *  user chmod we must not override. */
+const IMPOSED_MODE = 0o600;
+
+/**
+ * Restore a config file's pre-Agent-OS permission mode after a TARGETED uninstall, from install provenance in
+ * the undo journal. The retired whole-file `undo` restored the recorded original mode directly; the targeted
+ * `removeConfigKeys` path preserves the file's CURRENT mode instead — so a file Agent OS TIGHTENED at install
+ * would otherwise stay tightened forever after uninstall. ONLY the Codex installer needs this: it is the one
+ * installer that passes `mergeConfig`'s `targetMode` (0600, because config.toml embeds the stable token), so it
+ * is the only one that ever changes a config's mode. The Claude Code installer never sets `targetMode` — both
+ * its `mergeConfig` calls (settings.json, ~/.claude.json) preserve the existing file's mode (see
+ * `installClaudeCode`) — so it has nothing to restore.
+ *
+ * Two guards keep it from ever overriding the user's own intent:
+ *   1. Act ONLY when the file's CURRENT mode is exactly `IMPOSED_MODE` — the mode Agent OS imposed. Any other
+ *      mode means the user chmod'd it after install (their call), so leave it untouched.
+ *   2. Restore to the OLDEST journal entry's mode for this path — the first time Agent OS ever touched it, whose
+ *      `mode` is the true pre-Agent-OS permission bits. That mode is `null` iff Agent OS CREATED the file
+ *      (nothing pre-dated us ⇒ nothing to restore, the imposed mode stays); a pre-existing file's oldest entry
+ *      carries its real mode. No non-null entry, or one already at `IMPOSED_MODE` ⇒ no chmod.
+ */
+export function restorePreInstallMode(targetPath: string, dataDir: string): void {
+  if (!existsSync(targetPath)) return;
+  if ((statSync(targetPath).mode & 0o777) !== IMPOSED_MODE) return; // post-install user chmod → their intent, never touch
+
+  // listUndo is oldest-first, so the FIRST entry with a non-null mode is Agent OS's first touch of a
+  // pre-existing file — its `mode` is the true pre-install permissions (a file we created records `mode: null`).
+  const preInstallMode = listUndo(dataDir).find((e) => e.targetPath === targetPath && e.mode !== null)?.mode;
+  if (preInstallMode != null && preInstallMode !== IMPOSED_MODE) chmodSync(targetPath, preInstallMode);
 }

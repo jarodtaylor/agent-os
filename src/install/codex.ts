@@ -38,9 +38,9 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, sta
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { parse as parseToml } from "smol-toml";
-import { listUndo, mergeConfig, undo, type MergeResult } from "../configwrite/index";
+import { mergeConfig, removeConfigKeys, undo, type MergeResult } from "../configwrite/index";
 import { codexTokenPath, readCodexToken, resolveCodexToken, resolveDataDir, resolvePort, TOKEN_HEADER } from "../paths";
-import { bunCommand, defaultRepoRoot, existingEntriesWithoutOurs, readJson } from "./shared";
+import { bunCommand, defaultRepoRoot, existingEntriesWithoutOurs, hooksWithoutOurs, readJson } from "./shared";
 
 /** The brain's MCP server name in `~/.codex/config.toml` (mirrors the Claude Code `mcpServers.agent-os` key). */
 const SERVER_NAME = "agent-os";
@@ -236,11 +236,14 @@ export function installCodex(opts: InstallOptions = {}): InstallResult {
   // (journal-before-publish, or committed-failure metadata the caller can act on) belongs in the engine
   // itself and is deferred.
   readToml(configTomlPath(home)); // parsed only to fail fast; mergeConfig re-reads it authoritatively below
-  const currentHooks = readJson(hooksJsonPath(home));
+  readJson(hooksJsonPath(home)); // pre-flight fail-fast; the hooks RMW array is built from the engine's OWN read below
 
   // ── (a) MCP server → ~/.codex/config.toml ────────────────────────────────────────────────────────────
-  // Object-key merge (mcp_servers.agent-os) — deepMerge preserves every OTHER server, so no read-modify-
-  // write is needed here (same reasoning as the CC installer's ~/.claude.json MCP write).
+  // Object-key merge (mcp_servers.agent-os) — deepMerge preserves every OTHER server, so no read-modify-write
+  // is needed here (same reasoning as the CC installer's ~/.claude.json MCP write). `replaceSubtrees` wholesale-
+  // replaces the OWNED mcp_servers.agent-os subtree instead of re-merging it, so a stale key on a pre-existing
+  // entry — an old embedded token left in a foreign `http_headers`, say — cannot survive (idempotent: the
+  // stable resolveCodexToken means a re-install reproduces identical bytes ⇒ the engine no-ops).
   const config = mergeConfig(
     configTomlPath(home),
     {
@@ -257,21 +260,30 @@ export function installCodex(opts: InstallOptions = {}): InstallResult {
     // targetMode 0600: this file embeds the bearer token, so publish it owner-only — never rename it into place
     // at a pre-existing looser mode and tighten afterwards (that leaves a world-readable window a local observer
     // could catch). The engine still journals the original mode, so uninstall restores pre-install permissions.
-    { dataDir, targetMode: 0o600 },
+    { dataDir, targetMode: 0o600, replaceSubtrees: [`mcp_servers.${SERVER_NAME}`] },
   );
 
   // ── (b) SessionStart hook → ~/.codex/hooks.json ──────────────────────────────────────────────────────
   // Read-modify-write the WHOLE array (deepMerge would REPLACE it): strip our own prior entry, append ours,
-  // keep every other existing entry (Jarod's herdr hook + codebase-memory echo hook must survive).
+  // keep every other existing entry (Jarod's herdr hook + codebase-memory echo hook must survive). The callback
+  // builds the array from the engine's OWN read, so a concurrent Codex write can't land after a pre-read and be
+  // reverted (closes the non-atomic double-read — the hooks.json pre-flight above is fail-fast only).
   const startCmd = bunCommand(repoRoot, "codex-session-start.ts");
-  const sessionStart = [
-    ...existingEntriesWithoutOurs(currentHooks, "SessionStart", startCmd),
-    // Same matcher as the pre-existing codebase-memory echo hook — the "fresh/reset context" moments.
-    { matcher: "startup|resume|clear|compact", hooks: [{ type: "command", command: startCmd, timeout: HOOK_TIMEOUT_S }] },
-  ];
   let hooks: MergeResult;
   try {
-    hooks = mergeConfig(hooksJsonPath(home), { hooks: { SessionStart: sessionStart } }, { dataDir });
+    hooks = mergeConfig(
+      hooksJsonPath(home),
+      (current: unknown) => ({
+        hooks: {
+          SessionStart: [
+            ...existingEntriesWithoutOurs(current as Record<string, unknown> | undefined, "SessionStart", startCmd),
+            // Same matcher as the pre-existing codebase-memory echo hook — the "fresh/reset context" moments.
+            { matcher: "startup|resume|clear|compact", hooks: [{ type: "command", command: startCmd, timeout: HOOK_TIMEOUT_S }] },
+          ],
+        },
+      }),
+      { dataDir },
+    );
   } catch (err) {
     // config.toml is now LIVE. Roll it back so a failed install never leaves the MCP server registered
     // without the hook (all-or-nothing across both structured targets).
@@ -294,90 +306,79 @@ export function installCodex(opts: InstallOptions = {}): InstallResult {
 }
 
 /**
- * Reverse the install: restore config.toml + hooks.json from the U14 undo journal (cross-process by design,
- * mirrors `uninstallClaudeCode`), strip the AGENTS.md marked block, and REVOKE the stable Codex credential
- * (delete `codex.token`). Per-target try/catch so one diverged config/hooks/AGENTS.md target never aborts
- * the others — but credential revocation itself is NOT best-effort: it runs LAST, after those cleanups have
- * already happened, and THROWS if `codex.token` still exists afterward, so a caller never mistakes a
- * non-revoking uninstall for success. Returns the paths actually restored/cleaned (the credential revocation
- * is not a "restore" and is deliberately not included in that list — see below).
+ * Reverse the install by TARGETED removal of only what we added — the correct reversal for the configs Codex
+ * co-owns and rewrites continuously — then REVOKE the stable Codex credential (delete `codex.token`).
+ * CROSS-PROCESS by design (nothing depends on install-time journal state; it removes our keys from whatever is
+ * on disk NOW), mirroring `uninstallClaudeCode`. Per-target try/catch so one diverged/corrupt target never
+ * aborts the others — but credential revocation itself is NOT best-effort: it runs LAST, after the cleanups,
+ * and THROWS if `codex.token` still exists afterward, so a caller never mistakes a non-revoking uninstall for
+ * success. Returns the paths actually changed (the credential revocation is not a file "change" and is
+ * deliberately not in that list).
  *
- * KNOWN LIMITATION (shared with uninstallClaudeCode): undo is a byte-exact WHOLE-FILE restore, identity-
- * checked so it THROWS rather than clobber a file changed since install. `~/.codex/config.toml` is Codex's
- * own continuously-rewritten live-state file (model/approval settings, trust hashes, plugin state), so its
- * undo has a real chance of being SKIPPED by uninstall time — leaving the `mcp_servers.agent-os` entry
- * behind. That leftover entry is now INERT rather than harmless: it carries the stable token, and this
- * function revokes it unconditionally (below), so the entry can no longer authenticate against the gate
- * even when the byte-exact config.toml undo was skipped. The correct reversal of the config.toml OBJECT-KEY
- * entry is still TARGETED removal, deferred pending the same U14 key-removal primitive `uninstallClaudeCode`
- * is waiting on (#21). `hooks.json` is DIFFERENT: a leftover SessionStart hook is NOT made inert by the token
- * revocation (it authenticates with the per-boot token, not codex.token), so a diverged hooks.json gets a
- * TARGETED ARRAY removal here — the array-replace mergeConfig already supports, no #21 needed — see below.
+ * Three targeted removals, each tolerant of a target that diverged since install (the whole point — the old
+ * whole-file `undo` restore THREW on the near-always-diverged live-state files and left our entries behind):
+ *   (a) config.toml — delete only `mcp_servers.agent-os` (removeConfigKeys). This is what the byte-exact undo
+ *       couldn't do: config.toml is Codex's live-state file (model/approval settings, trust hashes), so its
+ *       identity-checked undo was near-always SKIPPED; removeConfigKeys deletes our key from the live file
+ *       whatever else changed. The codex.token revocation below is now DEFENCE IN DEPTH — it still neutralizes
+ *       any entry left behind should this removal itself fail (a corrupt/symlinked config).
+ *   (b) hooks.json — strip only OUR SessionStart entry (a callback array-replace), preserving every other hook.
+ *       A leftover hook is NOT neutralized by revoking codex.token (it authenticates with the PER-BOOT token),
+ *       so removing it is what actually deactivates Codex consumption. Exact-command match on the current
+ *       repoRoot: a repo-MOVED leftover points its command at a now-missing script and already fails open (inert).
+ *   (c) AGENTS.md — strip our marked block (structural inverse of the upsert; it never went through the journal).
  */
 export function uninstallCodex(opts: { home?: string; dataDir?: string; repoRoot?: string } = {}): string[] {
   const home = opts.home ?? homedir();
   const dataDir = resolveDataDir(opts.dataDir);
   const repoRoot = opts.repoRoot ?? defaultRepoRoot();
-  const entries = listUndo(dataDir);
-  const restored: string[] = [];
-  const skipped: string[] = [];
+  const removed: string[] = [];
 
-  for (const target of [configTomlPath(home), hooksJsonPath(home)]) {
-    const entry = entries.findLast((e) => e.targetPath === target);
-    if (!entry) continue;
-    try {
-      undo(entry.id, dataDir);
-      restored.push(target);
-    } catch (err) {
-      // Diverged since install (identity check) or otherwise unrestorable — skip it, keep the loop going.
-      console.error(`[agent-os] uninstall: could not restore '${target}' (changed since install?):`, err);
-      skipped.push(target);
-    }
+  // ── (a) MCP server → ~/.codex/config.toml — delete only mcp_servers.agent-os, preserve Codex's live state ──
+  const configToml = configTomlPath(home);
+  try {
+    const res = removeConfigKeys(configToml, [`mcp_servers.${SERVER_NAME}`], { dataDir });
+    if (!res.noop) removed.push(configToml);
+  } catch (err) {
+    // A corrupt / symlinked / unwritable config.toml can't be targeted-removed. The entry lingers, but the
+    // codex.token revocation below makes it INERT (it authenticates with codex.token, which we delete).
+    console.error(
+      `[agent-os] uninstall: could not remove '${SERVER_NAME}' from '${configToml}' — any leftover entry is neutralized by the codex.token revocation below; remove it manually:`,
+      err,
+    );
   }
 
-  // A diverged hooks.json couldn't be restored from its byte-exact backup (the undo identity check refused it).
-  // Unlike the config.toml leftover — made INERT below by revoking codex.token — a leftover SessionStart hook is
-  // NOT neutralized by that revocation: `hooks/codex-session-start.ts` authenticates with the PER-BOOT token
-  // (agent-os.token), never codex.token, so it would keep injecting work-state into Codex sessions after
-  // uninstall. Do a TARGETED removal of just OUR entry — the same command-matched array filter the installer
-  // uses (`existingEntriesWithoutOurs`) — preserving every OTHER hook the user has, via the array-replace
-  // mergeConfig already supports (an ARRAY needs no #21 key-removal primitive). mergeConfig no-ops when our hook
-  // is already absent, so this is safe to run whenever the byte-exact restore was skipped. Exact-command match
-  // (keyed on the current repoRoot) covers the only ACTIVE-leftover case: a repo-MOVED leftover instead points
-  // its command at a now-missing script path, so it already fails open (inert) and needs no removal.
-  if (skipped.includes(hooksJsonPath(home))) {
+  // ── (b) SessionStart hook → ~/.codex/hooks.json — strip only OUR entry, keep every other hook ──
+  // Only when the file exists: mergeConfig would otherwise CREATE it, and uninstall must never write a
+  // hooks.json that never existed. `hooksWithoutOurs` yields an empty (no-op) patch when nothing is ours.
+  const hooksJson = hooksJsonPath(home);
+  if (existsSync(hooksJson)) {
     try {
-      const ourCommand = bunCommand(repoRoot, "codex-session-start.ts");
-      const remaining = existingEntriesWithoutOurs(readJson(hooksJsonPath(home)), "SessionStart", ourCommand);
-      const res = mergeConfig(hooksJsonPath(home), { hooks: { SessionStart: remaining } }, { dataDir });
-      if (!res.noop) restored.push(hooksJsonPath(home));
-    } catch (err) {
-      console.error(
-        `[agent-os] uninstall: could not targeted-remove our SessionStart hook from a diverged '${hooksJsonPath(home)}' — remove the codex-session-start.ts entry manually:`,
-        err,
+      const res = mergeConfig(
+        hooksJson,
+        (current: unknown) => hooksWithoutOurs(current, [["SessionStart", bunCommand(repoRoot, "codex-session-start.ts")]]),
+        { dataDir },
       );
+      if (!res.noop) removed.push(hooksJson);
+    } catch (err) {
+      console.error(`[agent-os] uninstall: could not remove our SessionStart hook from '${hooksJson}':`, err);
     }
   }
 
-  // AGENTS.md never went through the undo journal — its reversal is the structural inverse of the upsert,
-  // which tolerates the rest of the file having changed since install (unlike the journal's identity check).
+  // ── (c) Pointer block → ~/.codex/AGENTS.md — structural strip, tolerant of the rest of the file changing ──
   const agentsMd = agentsMdPath(home);
   try {
-    if (stripAgentsMdBlock(agentsMd)) restored.push(agentsMd);
+    if (stripAgentsMdBlock(agentsMd)) removed.push(agentsMd);
   } catch (err) {
     console.error(`[agent-os] uninstall: could not strip pointer block from '${agentsMd}':`, err);
   }
 
-  // Revoke the stable Codex credential: delete codex.token so the next server boot re-mints a FRESH token,
-  // leaving any surviving `[mcp_servers.agent-os]` entry in a diverged config.toml carrying a token the gate no
-  // longer accepts — access is revoked even when the byte-exact config.toml undo was skipped. (Targeted TOML
-  // removal of the leftover entry itself still needs the U14 key-removal primitive — deferred, roadmap #21.)
-  //
+  // ── (d) Revoke the stable Codex credential — delete codex.token so the next boot re-mints fresh ──
   // Revocation is the one security-critical step here — it must not fail silently. rmSync({force}) ignores
   // ENOENT (already gone = success) but can throw on EPERM/EACCES/EISDIR; verify the file is truly gone and
   // FAIL LOUD if not, so a caller never treats a non-revoking uninstall as complete. This runs LAST, on
-  // purpose — the config/hooks restore and the AGENTS.md strip above are independent best-effort cleanups and
-  // must still happen even when revocation is about to throw.
+  // purpose — the (a)/(b)/(c) removals above are independent best-effort cleanups and must still happen even
+  // when revocation is about to throw.
   try {
     rmSync(codexTokenPath(dataDir), { force: true });
   } catch (err) {
@@ -388,13 +389,6 @@ export function uninstallCodex(opts: { home?: string; dataDir?: string; repoRoot
       `[agent-os] uninstall: FAILED to revoke the Codex credential — '${codexTokenPath(dataDir)}' could not be removed, so the stable token remains LIVE against the gate. Remove it manually, then re-run uninstall.`,
     );
   }
-  // Reachable only when revocation just succeeded (the throw above would already have exited otherwise) — an
-  // entry is only truly INERT once the token backing it is actually gone.
-  if (skipped.includes(configTomlPath(home))) {
-    console.error(
-      `[agent-os] uninstall: config.toml diverged since install — the mcp_servers.agent-os entry may remain, but it is now INERT (codex.token revoked). Remove it manually or re-install to reset.`,
-    );
-  }
 
-  return restored;
+  return removed;
 }

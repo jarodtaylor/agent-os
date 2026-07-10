@@ -133,45 +133,77 @@ describe("installClaudeCode", () => {
     expect(readJson(settingsPath()).hooks.SessionStart).toHaveLength(1);
   });
 
-  test("uninstall restores both files from backup (byte-exact restore, created file deleted)", () => {
+  test("uninstall strips only our hooks + MCP entry, preserving the user's config (targeted removal, not whole-file restore)", () => {
     mkdirSync(join(home, ".claude"), { recursive: true });
     writeFileSync(
       settingsPath(),
       JSON.stringify({ permissions: { allow: ["X"] }, hooks: { SessionStart: [{ hooks: [{ type: "command", command: "echo user" }] }] } }, null, 2) + "\n",
     );
-    const before = readFileSync(settingsPath(), "utf8");
-    expect(existsSync(claudeJsonPath())).toBe(false);
+    // claude.json PRE-EXISTS with CC's own live state + a foreign MCP server — the realistic case (CC owns it).
+    writeFileSync(
+      claudeJsonPath(),
+      JSON.stringify({ numStartups: 7, mcpServers: { other: { type: "http", url: "http://127.0.0.1:9999/mcp" } } }, null, 2) + "\n",
+    );
 
     install();
-    expect(readFileSync(settingsPath(), "utf8")).not.toBe(before); // our entry was merged in
-    expect(existsSync(claudeJsonPath())).toBe(true); // created by install
+    expect(readJson(settingsPath()).hooks.SessionStart).toHaveLength(2); // user's + ours
+    expect(readJson(claudeJsonPath()).mcpServers["agent-os"]).toBeDefined();
 
-    const restored = uninstallClaudeCode({ home, dataDir });
-    // Pre-existing file → restored byte-for-byte; created file → deleted (back to absent).
-    expect(readFileSync(settingsPath(), "utf8")).toBe(before);
-    expect(existsSync(claudeJsonPath())).toBe(false);
-    expect(restored).toContain(settingsPath());
-    expect(restored).toContain(claudeJsonPath());
+    const removed = uninstallClaudeCode({ home, dataDir, repoRoot: REPO });
+
+    // settings.json: our hook entries are gone; the user's hook and non-hook keys survive.
+    const s = readJson(settingsPath());
+    const startCmds = s.hooks.SessionStart.flatMap((e: { hooks?: Array<{ command: string }> }) => (e.hooks ?? []).map((x) => x.command));
+    expect(startCmds).not.toContain(START_CMD);
+    expect(startCmds).toContain("echo user");
+    expect(s.permissions).toEqual({ allow: ["X"] });
+    // claude.json: only our server is removed; CC's live state and the foreign server are untouched.
+    const j = readJson(claudeJsonPath());
+    expect(j.mcpServers["agent-os"]).toBeUndefined();
+    expect(j.mcpServers.other).toEqual({ type: "http", url: "http://127.0.0.1:9999/mcp" });
+    expect(j.numStartups).toBe(7);
+    expect(removed).toContain(settingsPath());
+    expect(removed).toContain(claudeJsonPath());
   });
 
-  test("uninstall tolerates a claude.json that diverged since install — settings.json still restores", () => {
+  test("uninstall on a DIVERGED claude.json now SUCCEEDS — targeted removal deletes our entry, keeps CC's newer state", () => {
+    // This is the exact case the retired whole-file `undo` could NOT reverse: ~/.claude.json is CC's
+    // continuously-rewritten live-state file, so it has diverged by uninstall time; the identity-checked undo
+    // threw and left mcpServers.agent-os behind (the lived VS1 limitation). Targeted removal fixes it.
     mkdirSync(join(home, ".claude"), { recursive: true });
     writeFileSync(
       settingsPath(),
-      JSON.stringify({ permissions: { allow: ["X"] }, hooks: { SessionStart: [{ hooks: [{ type: "command", command: "echo user" }] }] } }, null, 2) + "\n",
+      JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ type: "command", command: "echo user" }] }] } }, null, 2) + "\n",
     );
-    const before = readFileSync(settingsPath(), "utf8");
+    writeFileSync(claudeJsonPath(), JSON.stringify({ numStartups: 3 }, null, 2) + "\n");
 
     install();
 
-    // Simulate Claude Code's own continuous rewrites of its live-state file between install and uninstall.
+    // Simulate Claude Code's own continuous rewrites AFTER install — the file the old undo would refuse to touch.
     const j = readJson(claudeJsonPath());
-    writeFileSync(claudeJsonPath(), JSON.stringify({ ...j, numStartups: 99 }, null, 2) + "\n");
+    writeFileSync(claudeJsonPath(), JSON.stringify({ ...j, numStartups: 99, projects: { "/x": { allowedTools: [] } } }, null, 2) + "\n");
 
-    expect(() => uninstallClaudeCode({ home, dataDir })).not.toThrow();
-    // settings.json never diverged → its undo still succeeds, byte-exact.
-    expect(readFileSync(settingsPath(), "utf8")).toBe(before);
-    // claude.json diverged → its undo is skipped (identity check), not deleted.
-    expect(existsSync(claudeJsonPath())).toBe(true);
+    expect(() => uninstallClaudeCode({ home, dataDir, repoRoot: REPO })).not.toThrow();
+
+    const after = readJson(claudeJsonPath());
+    expect(after.mcpServers?.["agent-os"]).toBeUndefined(); // our entry removed FROM the diverged file
+    expect(after.numStartups).toBe(99); // CC's newer state preserved, never clobbered
+    expect(after.projects).toEqual({ "/x": { allowedTools: [] } }); // its post-install additions survive
+  });
+
+  test("install wholesale-replaces our owned subtree — a stale foreign `headers` on a pre-existing agent-os entry is dropped", () => {
+    // A hand-edited/foreign ~/.claude.json carrying a static `headers` (embedded token) under mcpServers.agent-os.
+    // A plain deepMerge would keep that stale key; replaceSubtrees drops it (install-side stale-key cleanup).
+    writeFileSync(
+      claudeJsonPath(),
+      JSON.stringify({ mcpServers: { "agent-os": { type: "http", url: "http://127.0.0.1:1/mcp", headers: { "x-token": "STALE" } } } }, null, 2) + "\n",
+    );
+
+    install();
+
+    const entry = readJson(claudeJsonPath()).mcpServers["agent-os"];
+    expect(entry.headers).toBeUndefined(); // the stale embedded-token key did not survive the replace
+    expect(entry.headersHelper).toBe(MCP_CMD); // replaced with our current, token-free helper
+    expect(entry.url).toBe("http://127.0.0.1:4319/mcp");
   });
 });

@@ -56,3 +56,24 @@ export function existingEntriesWithoutOurs(
   }
   return out;
 }
+
+/**
+ * A `mergeConfig` callback-patch that rewrites each named hook event's array to itself MINUS our own entry —
+ * the targeted-removal read-modify-write both uninstallers use to strip their hook without a whole-file undo.
+ * Built to touch only what's ours: it rewrites ONLY events that currently exist (so it never fabricates an
+ * empty `SessionEnd: []` on a file that lacked one), and returns an EMPTY patch — a `mergeConfig` no-op — when
+ * no named event is present, so calling it on an already-clean or hookless config writes nothing. Reading
+ * `current` from the engine's own parse (not a pre-read) is what makes this array RMW single-read.
+ */
+export function hooksWithoutOurs(
+  current: unknown,
+  events: ReadonlyArray<readonly [event: string, ourCommand: string]>,
+): Record<string, unknown> {
+  const config = current as Record<string, unknown> | undefined;
+  const hooks = (config?.hooks as Record<string, unknown> | undefined) ?? {};
+  const patch: Record<string, unknown[]> = {};
+  for (const [event, ourCommand] of events) {
+    if (Array.isArray(hooks[event])) patch[event] = existingEntriesWithoutOurs(config, event, ourCommand);
+  }
+  return Object.keys(patch).length > 0 ? { hooks: patch } : {};
+}

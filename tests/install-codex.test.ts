@@ -215,6 +215,23 @@ describe("installCodex", () => {
     expect(c.mcp_servers["agent-os"]).toBeDefined();
   });
 
+  test("install wholesale-replaces our owned subtree — a stale key on a pre-existing agent-os entry is dropped", () => {
+    // A hand-edited/foreign config.toml carrying stale keys under [mcp_servers.agent-os] (an old `type` and a
+    // leftover header). A plain deepMerge would keep them; replaceSubtrees drops them (install-side stale-key cleanup).
+    mkdirSync(codexDir(), { recursive: true });
+    writeFileSync(
+      configPath(),
+      `[mcp_servers.agent-os]\ntype = "stdio"\nurl = "http://127.0.0.1:1/mcp"\n\n[mcp_servers.agent-os.http_headers]\nx-stale = "OLD"\n`,
+    );
+
+    install();
+
+    const entry = readToml(configPath()).mcp_servers["agent-os"];
+    expect(entry.type).toBeUndefined(); // the stale `type` did not survive the replace
+    expect(entry.http_headers).toEqual({ [TOKEN_HEADER]: token() }); // only OUR fresh header — the stale x-stale is gone
+    expect(entry.url).toBe("http://127.0.0.1:4319/mcp"); // replaced with our current url
+  });
+
   test("merge preserves the user's existing SessionStart entries (array read-modify-write, not clobber)", () => {
     mkdirSync(codexDir(), { recursive: true });
     writeFileSync(
@@ -281,86 +298,100 @@ describe("installCodex", () => {
     expect(h.mcp_servers).toBeUndefined();
   });
 
-  test("uninstall restores config.toml + hooks.json and strips the AGENTS.md block", () => {
+  test("uninstall strips only our entries — config.toml keeps the user's keys, our MCP + hook + AGENTS.md block go", () => {
     mkdirSync(codexDir(), { recursive: true });
     writeFileSync(configPath(), `model = "gpt-5.5"\n`);
     writeFileSync(agentsMdPath(), "# Existing notes\nsome content\n");
-    const beforeConfig = readFileSync(configPath(), "utf8");
     const beforeAgents = readFileSync(agentsMdPath(), "utf8");
     expect(existsSync(hooksPath())).toBe(false);
 
     install();
-    expect(readFileSync(configPath(), "utf8")).not.toBe(beforeConfig); // our entry was merged in
+    expect(readToml(configPath()).mcp_servers["agent-os"]).toBeDefined();
     expect(existsSync(hooksPath())).toBe(true); // created by install
     expect(readFileSync(agentsMdPath(), "utf8")).not.toBe(beforeAgents);
 
-    const restored = uninstallCodex({ home, dataDir });
+    const removed = uninstallCodex({ home, dataDir, repoRoot: REPO });
 
-    expect(readFileSync(configPath(), "utf8")).toBe(beforeConfig);
-    expect(existsSync(hooksPath())).toBe(false); // created file → deleted
+    // config.toml: our entry is gone; the user's key survives (targeted removal, not a byte-exact whole-file restore).
+    const c = readToml(configPath());
+    expect(c.mcp_servers?.["agent-os"]).toBeUndefined();
+    expect(c.model).toBe("gpt-5.5");
+    // hooks.json: our SessionStart hook is gone.
+    const hookCmds = (readJson(hooksPath()).hooks.SessionStart ?? []).flatMap((e: { hooks?: Array<{ command: string }> }) =>
+      (e.hooks ?? []).map((x) => x.command),
+    );
+    expect(hookCmds).not.toContain(START_CMD);
+    // AGENTS.md: our block stripped, the prior notes restored intact.
     expect(readFileSync(agentsMdPath(), "utf8")).toBe(beforeAgents);
-    expect(restored).toContain(configPath());
-    expect(restored).toContain(hooksPath());
-    expect(restored).toContain(agentsMdPath());
+    expect(removed).toContain(configPath());
+    expect(removed).toContain(hooksPath());
+    expect(removed).toContain(agentsMdPath());
   });
 
   test("uninstall deletes AGENTS.md entirely when install created it fresh (not left as an empty husk)", () => {
     install();
     expect(existsSync(agentsMdPath())).toBe(true);
 
-    const restored = uninstallCodex({ home, dataDir });
+    const removed = uninstallCodex({ home, dataDir, repoRoot: REPO });
 
     expect(existsSync(agentsMdPath())).toBe(false);
-    expect(restored).toContain(agentsMdPath());
+    expect(removed).toContain(agentsMdPath());
   });
 
-  test("uninstall tolerates a config.toml that diverged since install — hooks.json still restores", () => {
+  test("uninstall on a DIVERGED config.toml now SUCCEEDS — targeted removal deletes our entry, keeps Codex's newer state", () => {
+    // The case the retired whole-file `undo` could NOT reverse: config.toml is Codex's continuously-rewritten
+    // live-state file, so it has diverged by uninstall time; the identity-checked undo threw and left
+    // mcp_servers.agent-os behind. Targeted removal deletes our key from the live file whatever else changed.
     mkdirSync(codexDir(), { recursive: true });
     writeFileSync(configPath(), `model = "gpt-5.5"\n`);
 
     install();
 
-    // Simulate Codex's own continuous rewrites of its live-state file between install and uninstall.
+    // Simulate Codex's own continuous rewrites AFTER install.
     const c = readToml(configPath());
-    writeFileSync(configPath(), `model = "gpt-6.0"\n\n[mcp_servers.agent-os]\nurl = "${c.mcp_servers["agent-os"].url}"\n`);
+    writeFileSync(
+      configPath(),
+      `model = "gpt-6.0"\napproval = "on-request"\n\n[mcp_servers.agent-os]\nurl = "${c.mcp_servers["agent-os"].url}"\n`,
+    );
 
-    expect(() => uninstallCodex({ home, dataDir })).not.toThrow();
-    // hooks.json never diverged → its undo still succeeds, byte-exact (created ⇒ deleted).
-    expect(existsSync(hooksPath())).toBe(false);
-    // config.toml diverged → its undo is skipped (identity check), left as the simulated rewrite.
-    expect(readFileSync(configPath(), "utf8")).toContain("gpt-6.0");
+    expect(() => uninstallCodex({ home, dataDir, repoRoot: REPO })).not.toThrow();
+
+    const after = readToml(configPath());
+    expect(after.mcp_servers?.["agent-os"]).toBeUndefined(); // our entry removed FROM the diverged file
+    expect(after.model).toBe("gpt-6.0"); // Codex's newer state preserved
+    expect(after.approval).toBe("on-request"); // its post-install additions survive
   });
 
   test("uninstall revokes the stable Codex credential (codex.token deleted, so a leftover config entry can't authenticate)", () => {
     install();
     expect(existsSync(codexTokenPath(dataDir))).toBe(true); // minted during install
 
-    uninstallCodex({ home, dataDir });
+    uninstallCodex({ home, dataDir, repoRoot: REPO });
 
     expect(existsSync(codexTokenPath(dataDir))).toBe(false);
   });
 
-  test("uninstall still revokes codex.token when config.toml diverged since install (the restore-skip path)", () => {
+  test("uninstall revokes codex.token AND targeted-removes our entry even when config.toml diverged since install", () => {
     mkdirSync(codexDir(), { recursive: true });
     writeFileSync(configPath(), `model = "gpt-5.5"\n`);
 
     install();
     expect(existsSync(codexTokenPath(dataDir))).toBe(true);
 
-    // Simulate Codex's own continuous rewrites of its live-state file between install and uninstall, exactly
-    // as the test above — this is the scenario where config.toml's byte-exact undo is SKIPPED.
+    // Simulate Codex's own continuous rewrites — the scenario where the old byte-exact config.toml undo was SKIPPED.
     const c = readToml(configPath());
     writeFileSync(configPath(), `model = "gpt-6.0"\n\n[mcp_servers.agent-os]\nurl = "${c.mcp_servers["agent-os"].url}"\n`);
 
-    const restored = uninstallCodex({ home, dataDir });
+    const removed = uninstallCodex({ home, dataDir, repoRoot: REPO });
 
-    // Revoked regardless of the skip — the leftover mcp_servers.agent-os entry is now inert.
-    expect(existsSync(codexTokenPath(dataDir))).toBe(false);
-    // config.toml's undo was skipped (diverged) — it must not be reported as restored.
-    expect(restored).not.toContain(configPath());
+    expect(existsSync(codexTokenPath(dataDir))).toBe(false); // credential revoked (defence in depth)
+    // …and the entry is now ACTUALLY removed, not merely left inert — so config.toml IS reported changed
+    // (under whole-file undo this path left the entry behind and did NOT report config.toml).
+    expect(readToml(configPath()).mcp_servers?.["agent-os"]).toBeUndefined();
+    expect(removed).toContain(configPath());
   });
 
-  test("uninstall THROWS when codex.token cannot be revoked, but still restores config/hooks/AGENTS.md first (FIX 1)", () => {
+  test("uninstall THROWS when codex.token cannot be revoked, but still targeted-removes our entries first (FIX 1)", () => {
     install();
     const tokenPath = codexTokenPath(dataDir);
     expect(existsSync(tokenPath)).toBe(true); // minted during install
@@ -371,17 +402,18 @@ describe("installCodex", () => {
     mkdirSync(tokenPath, { recursive: true });
     writeFileSync(join(tokenPath, "blocker.txt"), "x");
 
-    expect(() => uninstallCodex({ home, dataDir })).toThrow(/revoke|remove/i);
+    expect(() => uninstallCodex({ home, dataDir, repoRoot: REPO })).toThrow(/revoke|remove/i);
 
     // Revocation failed LOUD — the "credential" (directory standing in for it) is still present, not silently
     // left in an unknown state while uninstall reports success.
     expect(existsSync(tokenPath)).toBe(true);
-    // But the best-effort cleanups that run BEFORE revocation still completed, exactly as they would if
-    // revocation had succeeded — config.toml/hooks.json were restored (both created fresh by install() here,
-    // so undo deletes them) and the AGENTS.md block was stripped, even though the overall call now throws.
-    expect(existsSync(configPath())).toBe(false);
-    expect(existsSync(hooksPath())).toBe(false);
-    expect(existsSync(agentsMdPath())).toBe(false);
+    // But the (a)/(b)/(c) targeted removals that run BEFORE revocation still completed: our entries are gone.
+    expect(readToml(configPath()).mcp_servers?.["agent-os"]).toBeUndefined();
+    const hookCmds = (readJson(hooksPath()).hooks.SessionStart ?? []).flatMap((e: { hooks?: Array<{ command: string }> }) =>
+      (e.hooks ?? []).map((x) => x.command),
+    );
+    expect(hookCmds).not.toContain(START_CMD);
+    expect(existsSync(agentsMdPath())).toBe(false); // created fresh by install → strip empties it → deleted
   });
 
   test("co-located hook granularity: re-install preserves a user command living in the SAME hooks.json entry as ours (FIX B)", () => {

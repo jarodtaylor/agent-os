@@ -52,7 +52,7 @@ _Last updated: 2026-07-09 · Status: **v0.1 "Continuity" in progress — 10 of 1
 - **U12 — roster spike:** find the read/write surfaces for Hermes / Cursor / Antigravity / OpenCode (decides their lanes).
 - **U15 — always-on:** server survives reboots/crashes (launchd); hooks re-install for keeps; the pending live Codex check runs then.
 
-### The next two phases — **candidates** (scope + order are open product calls; Jarod decides)
+### The next two phases — **order decided** (decision #38): Memory, then Coordination *(each phase's scope stays open until its own scoping session)*
 
 **Memory — building the actual Brain.**
 *Problem: agents now remember where we left off — but not what we know, decided, and learned.*

@@ -16,7 +16,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse as parseToml } from "smol-toml";
 import { parse as parseYaml } from "yaml";
-import { deepMerge, listUndo, mergeConfig, removeConfigKeys, undo } from "../src/configwrite/index";
+import { AppliedButUnjournaledError, deepMerge, listUndo, MERGE_NOOP, mergeConfig, removeConfigKeys, undo } from "../src/configwrite/index";
 import { backupsDir, journalPath } from "../src/configwrite/internal";
 
 // Each test gets an isolated workspace: `configs/` holds the target files a caller mutates, `data/`
@@ -929,4 +929,88 @@ describe("mergeConfig replaceSubtrees", () => {
       list: [1, 2, 3],
     });
   });
+});
+
+// ══════════════════════════════════════════════════════════════════════════════════
+// MERGE_NOOP — a transform (or static patch) may ABSTAIN, forcing ZERO filesystem effects (FIX B). This is
+// what lets the uninstall hook stripper drop its old presence pre-check: a single engine read whose callback
+// abstains when nothing of ours is present, instead of a separate pre-read that could race.
+// ══════════════════════════════════════════════════════════════════════════════════
+
+describe("mergeConfig MERGE_NOOP abstain (zero filesystem effects)", () => {
+  test("a callback returning MERGE_NOOP leaves an EXISTING foreign-formatted file byte-for-byte (no serialize/backup/journal)", () => {
+    // A file a foreign tool wrote 4-space (NOT our 2-space serializer output). A callback that abstains must
+    // leave it untouched — publish skips serialize/backup/write/journal entirely, so the foreign layout is never
+    // rewritten to our canonical form (the exact damage the uninstall stripper's abstain now prevents at source).
+    const foreign = JSON.stringify({ foreign: { a: 1 }, other: 2 }, null, 4) + "\n";
+    const target = seed("settings.json", foreign);
+
+    const res = mergeConfig(target, () => MERGE_NOOP, { dataDir });
+
+    expect(res.noop).toBe(true);
+    expect(res.undoId).toBeNull();
+    expect(res.backupPath).toBeNull();
+    expect(read(target)).toBe(foreign); // byte-for-byte unchanged — never reserialized
+    expect(bakCount()).toBe(0);
+    expect(listUndo(dataDir)).toEqual([]);
+  });
+
+  test("a callback returning MERGE_NOOP on an ABSENT target creates nothing (abstain short-circuits before the create path)", () => {
+    const target = join(configsDir, "absent.json");
+    expect(existsSync(target)).toBe(false);
+
+    const res = mergeConfig(target, () => MERGE_NOOP, { dataDir });
+
+    expect(res.noop).toBe(true);
+    expect(res.created).toBe(false);
+    expect(existsSync(target)).toBe(false); // abstain must NEVER create a file (the short-circuit precedes create)
+    expect(bakCount()).toBe(0);
+    expect(listUndo(dataDir)).toEqual([]);
+  });
+
+  test("a STATIC MERGE_NOOP patch abstains identically — no write, no create (a patch may abstain)", () => {
+    // The static-patch guard must let MERGE_NOOP through (not reject it as a non-object patch), and publish must
+    // then abstain exactly as for the callback form.
+    const foreign = JSON.stringify({ a: 1 }, null, 4) + "\n";
+    const target = seed("settings.json", foreign);
+
+    const res = mergeConfig(target, MERGE_NOOP, { dataDir });
+
+    expect(res.noop).toBe(true);
+    expect(read(target)).toBe(foreign); // unchanged
+    expect(bakCount()).toBe(0);
+    expect(listUndo(dataDir)).toEqual([]);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════════════
+// AppliedButUnjournaledError — the atomic rename LANDED but journaling failed (FIX C): a DISTINCT typed error
+// so a caller counts the mutation applied (recover from the backup), never as an unapplied failure.
+// ══════════════════════════════════════════════════════════════════════════════════
+
+test("a post-commit journal failure throws AppliedButUnjournaledError with the write already applied and the backup kept", () => {
+  const original = JSON.stringify({ a: 1 }, null, 2) + "\n";
+  const target = seed("settings.json", original);
+
+  // Sabotage journaling WITHOUT breaking the write or the backup: make the undo-journal path a DIRECTORY, so
+  // recordUndo's appendFileSync hits EISDIR AFTER the atomic rename has already committed. Backups land in a
+  // sibling dir (dataDir/backups), so the byte-exact backup still succeeds — isolating a journal-ONLY failure.
+  mkdirSync(dataDir, { recursive: true });
+  mkdirSync(journalPath(dataDir));
+
+  let thrown: unknown;
+  try {
+    mergeConfig(target, { b: 2 }, { dataDir });
+  } catch (e) {
+    thrown = e;
+  }
+
+  expect(thrown).toBeInstanceOf(AppliedButUnjournaledError);
+  const err = thrown as AppliedButUnjournaledError;
+  expect(err.targetPath).toBe(target);
+  expect(err.backupPath).not.toBeNull(); // an existing target → its backup is the recovery path
+  // The mutation is LIVE despite the journal failure — a caller must NOT retry it as unapplied.
+  expect(JSON.parse(read(target))).toEqual({ a: 1, b: 2 });
+  // The backup is KEPT (not rolled back), so the applied write stays recoverable.
+  expect(existsSync(err.backupPath!)).toBe(true);
 });

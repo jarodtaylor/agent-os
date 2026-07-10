@@ -217,7 +217,7 @@ describe("installClaudeCode", () => {
     rmSync(settingsPath());
     mkdirSync(settingsPath());
 
-    let outcome: UninstallOutcome = { removed: [], failed: [] };
+    let outcome: UninstallOutcome = { removed: [], failed: [], warnings: [] };
     expect(() => {
       outcome = uninstallClaudeCode({ home, dataDir, repoRoot: REPO });
     }).not.toThrow();
@@ -240,7 +240,7 @@ describe("installClaudeCode", () => {
     rmSync(claudeJsonPath());
     mkdirSync(claudeJsonPath());
 
-    let outcome: UninstallOutcome = { removed: ["sentinel"], failed: [] };
+    let outcome: UninstallOutcome = { removed: ["sentinel"], failed: [], warnings: [] };
     expect(() => {
       outcome = uninstallClaudeCode({ home, dataDir, repoRoot: REPO });
     }).not.toThrow();
@@ -327,7 +327,7 @@ describe("installClaudeCode", () => {
     symlinkSync(join(root, "gone-settings-target.json"), settingsPath());
     expect(existsSync(settingsPath())).toBe(false); // dangling: existsSync follows to the missing target
 
-    let outcome: UninstallOutcome = { removed: [], failed: [] };
+    let outcome: UninstallOutcome = { removed: [], failed: [], warnings: [] };
     expect(() => {
       outcome = uninstallClaudeCode({ home, dataDir, repoRoot: REPO });
     }).not.toThrow();
@@ -341,11 +341,11 @@ describe("installClaudeCode", () => {
   });
 
   test("uninstall on a never-installed home returns [], doesn't throw, and creates no files", () => {
-    let outcome: UninstallOutcome = { removed: ["sentinel"], failed: [{ path: "sentinel", error: "sentinel" }] };
+    let outcome: UninstallOutcome = { removed: ["sentinel"], failed: [{ path: "sentinel", error: "sentinel" }], warnings: [{ path: "sentinel", error: "sentinel" }] };
     expect(() => {
       outcome = uninstallClaudeCode({ home, dataDir, repoRoot: REPO });
     }).not.toThrow();
-    expect(outcome).toEqual({ removed: [], failed: [] }); // nothing removed AND nothing failed — a true no-op
+    expect(outcome).toEqual({ removed: [], failed: [], warnings: [] }); // nothing removed, failed, OR warned — a true no-op
     expect(existsSync(settingsPath())).toBe(false); // uninstall must never CREATE a config
     expect(existsSync(claudeJsonPath())).toBe(false);
   });
@@ -356,10 +356,10 @@ describe("installClaudeCode", () => {
     expect(first.removed.length).toBeGreaterThan(0); // the first uninstall removed real entries
     expect(first.failed).toEqual([]); // …and cleanly, with no per-target failures
 
-    let second: UninstallOutcome = { removed: ["sentinel"], failed: [{ path: "sentinel", error: "sentinel" }] };
+    let second: UninstallOutcome = { removed: ["sentinel"], failed: [{ path: "sentinel", error: "sentinel" }], warnings: [{ path: "sentinel", error: "sentinel" }] };
     expect(() => {
       second = uninstallClaudeCode({ home, dataDir, repoRoot: REPO });
     }).not.toThrow();
-    expect(second).toEqual({ removed: [], failed: [] }); // our keys already gone → every target no-ops
+    expect(second).toEqual({ removed: [], failed: [], warnings: [] }); // our keys already gone → every target no-ops
   });
 });

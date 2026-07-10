@@ -3,9 +3,9 @@
  * read-modify-write config upserts (backup-first, atomic, journaled undo lives in `../configwrite/index`;
  * this module only holds the small pre-merge shaping both installers do the same way).
  */
-import { existsSync, lstatSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { mergeConfig } from "../configwrite/index";
+import { AppliedButUnjournaledError, mergeConfig, MERGE_NOOP } from "../configwrite/index";
 
 /** This repo's root: `src/install/shared.ts` → `../..`. Safe for any `src/install/` caller — `import.meta.dir`
  *  is THIS file's own directory, and `claude-code.ts` / `codex.ts` live in that same directory. */
@@ -61,11 +61,10 @@ export function existingEntriesWithoutOurs(config: unknown, event: string, ourCo
  * both uninstallers use to strip their hook without a whole-file undo. Built to touch only what's ours: it
  * rewrites ONLY events our removal ACTUALLY changed. An event whose array is unchanged (none of our hooks were
  * in it) is left out, as is an absent event (so it never fabricates an empty `SessionEnd: []` on a file that
- * lacked one). When NO event changed it returns an EMPTY patch `{}` — the signal `removeHooksIfPresent` uses to
- * skip the write outright: the engine's no-op short-circuit is BYTE-level, so an empty-patch `mergeConfig` would
- * still re-serialize and thus REFORMAT a foreign file whose byte layout differs from our serializer; only
- * skipping the call keeps an already-clean uninstall from touching it. Reading `current` from the engine's own
- * parse (not a pre-read) is what makes this array RMW single-read.
+ * lacked one). When NO event changed it returns an EMPTY patch `{}`, which `removeHooksIfPresent` maps to the
+ * engine's `MERGE_NOOP` abstain sentinel — so the engine skips serialize/backup/write entirely instead of
+ * reserializing (and thus REFORMATTING) a foreign file whose byte layout differs from our serializer. Reading
+ * `current` from the engine's own parse (not a pre-read) is what makes this array RMW single-read.
  */
 export function hooksPatchWithoutOurs(
   current: unknown,
@@ -93,13 +92,17 @@ export function hooksPatchWithoutOurs(
 
 /**
  * The result of an uninstall pass: `removed` names the config paths whose bytes actually changed, `failed`
- * names each target that could NOT be cleaned (a diverged/corrupt/symlinked file), with its error message.
- * Keeping the two separate lets a caller distinguish a true no-op (both empty — nothing of ours was there)
- * from a cleanup that partially failed (`failed` non-empty) — the same `[]` used to collapse both.
+ * names each target that could NOT be cleaned (a diverged/corrupt/symlinked file), and `warnings` names each
+ * target whose change LANDED but whose undo-journal write failed (`AppliedButUnjournaledError`). Keeping the
+ * three separate lets a caller distinguish a true no-op (all empty — nothing of ours was there) from a cleanup
+ * that partially failed (`failed` non-empty) from one that succeeded-but-unrecorded (`warnings` non-empty). A
+ * `warnings` entry is ALSO in `removed` (the mutation is applied — recover from its backup only if reverting);
+ * it is deliberately NOT in `failed`, since the entry really is gone. Each defaults to `[]`.
  */
 export interface UninstallOutcome {
   removed: string[];
   failed: Array<{ path: string; error: string }>;
+  warnings: Array<{ path: string; error: string }>;
 }
 
 /** Message text of a caught unknown error, for an `UninstallOutcome.failed[].error` field. */
@@ -108,43 +111,22 @@ export function errorText(err: unknown): string {
 }
 
 /**
- * Presence gate for the uninstall hook stripper that does NOT mistake a dangling symlink for absence. Returns
- * false only for a genuine no-entry (`lstat` throws ENOENT) — the one clean "nothing of ours here" skip. Returns
- * true for an entry that resolves. THROWS for a dangling symlink (the entry exists per `lstat`, but points at a
- * missing target so it doesn't resolve) or any non-ENOENT lookup error, so the caller records it in `failed`
- * instead of swallowing it as a no-op. `existsSync` alone can't tell these apart: it FOLLOWS the broken link and
- * returns false, indistinguishable from true absence, which would leave the still-live symlinked registration
- * behind (restoring its target reactivates the hook).
- */
-function targetExistsResolving(path: string): boolean {
-  let link;
-  try {
-    link = lstatSync(path);
-  } catch (err) {
-    if ((err as { code?: string }).code === "ENOENT") return false; // genuinely absent → the one clean skip
-    throw err; // EACCES on a parent dir, a bad path component, etc. → a real failure, not "nothing of ours here"
-  }
-  if (link.isSymbolicLink() && !existsSync(path)) {
-    throw new Error(`'${path}' is a dangling symlink (its target is missing); refusing to treat it as clean absence`);
-  }
-  return true;
-}
-
-/**
- * The uninstall-side hook stripper both installers share: when `targetPath` exists AND holds one of our hooks,
- * run a `mergeConfig` callback that rewrites each named event's array to itself MINUS our own entry
- * (`hooksPatchWithoutOurs`), against the engine's OWN read. Reports an `UninstallOutcome`: `removed` names
- * `targetPath` when the strip actually changed the file (else empty — a no-op / an absent file / a file with
- * none of our hooks; never CREATE a hooks file by uninstalling, hence the `existsSync` guard); `failed` names
- * it with the error message when a diverged/corrupt/symlinked target can't be stripped. The failure is logged
- * with `errLabel` AND surfaced in `failed` (never swallowed into the same empty result as a true no-op), yet
- * ONE target's failure still never aborts an uninstall's other removals (per-target isolation).
+ * The uninstall-side hook stripper both installers share: ONE `mergeConfig` call whose CALLBACK rewrites each
+ * named event's array to itself MINUS our own entry (`hooksPatchWithoutOurs`), against the engine's OWN read —
+ * and ABSTAINS (returns `MERGE_NOOP`) when that read shows none of our hooks, so a foreign-formatted clean file
+ * is never reserialized to our layout. Reports an `UninstallOutcome`: `removed` names `targetPath` when the
+ * strip actually changed the file; `warnings` names it when the strip LANDED but journaling failed (still
+ * removed, recoverable from backup); `failed` names it with the error when a diverged/corrupt/symlinked target
+ * can't be stripped. Each failure/warning is logged with `errLabel`, and ONE target's failure never aborts an
+ * uninstall's other removals (per-target isolation).
  *
- * The presence pre-check is what keeps an already-clean uninstall from touching a foreign file's BYTES: an
- * empty-patch `mergeConfig` would still re-serialize (the engine's no-op short-circuit is byte-level) and thus
- * REFORMAT a hooks file whose layout differs from our serializer, so when nothing of ours is on disk we skip
- * the write entirely. That read only DECIDES whether to write — race-safe, since a foreign process never ADDS
- * our command — while the strip itself still builds its array from the engine's own fresh read. `events` is the
+ * ALL presence semantics come from the engine's ONE read — no separate pre-check to race against. An
+ * ENOENT-absent target → the callback sees `undefined` → empty patch → `MERGE_NOOP` → a clean no-op that
+ * CREATES nothing; a dangling hook symlink — which `existsSync` would misreport as absent, silently leaving its
+ * live registration behind — makes the engine's `statTarget` throw its symlink refusal, caught here as a
+ * `failed` entry; a corrupt/unreadable target throws in the engine's parse, likewise `failed`. Dropping the old
+ * precheck closes its race window: our hook vanishing between a pre-read and the engine's read used to leave the
+ * callback returning `{}` and the engine reserializing (reformatting) a now-clean foreign file. `events` is the
  * same `[event, ourCommand]` list `hooksPatchWithoutOurs` takes.
  */
 export function removeHooksIfPresent(
@@ -153,20 +135,26 @@ export function removeHooksIfPresent(
   opts: { dataDir: string; errLabel: string },
 ): UninstallOutcome {
   try {
-    // Presence gate on lstat semantics, NOT existsSync (see `targetExistsResolving`): a genuine no-entry is the
-    // only clean skip, while a dangling hook symlink — which existsSync would report as absent, silently leaving
-    // its live registration behind — throws here and surfaces in `failed` below, like any other lookup error.
-    if (!targetExistsResolving(targetPath)) return { removed: [], failed: [] };
-    // Skip the write ENTIRELY when none of our hooks are on disk (empty patch) — see the header on why an
-    // empty-patch mergeConfig would still reformat a foreign file. `readJson` throwing on a corrupt/unreadable
-    // target lands in the catch below, exactly as the mergeConfig parse used to.
-    if (Object.keys(hooksPatchWithoutOurs(readJson(targetPath), events)).length === 0) {
-      return { removed: [], failed: [] };
-    }
-    const res = mergeConfig(targetPath, (current: unknown) => hooksPatchWithoutOurs(current, events), { dataDir: opts.dataDir });
-    return { removed: res.noop ? [] : [targetPath], failed: [] };
+    // Single engine read: the callback strips our entries and, when NONE of ours is present, ABSTAINS via
+    // MERGE_NOOP — the engine then skips serialize/backup/write/journal AND (on an absent target) create, so a
+    // clean or missing file is left byte-for-byte untouched with no separate presence pre-read to race against.
+    const res = mergeConfig(
+      targetPath,
+      (current: unknown) => {
+        const patch = hooksPatchWithoutOurs(current, events);
+        return Object.keys(patch).length === 0 ? MERGE_NOOP : patch;
+      },
+      { dataDir: opts.dataDir },
+    );
+    return { removed: res.noop ? [] : [targetPath], failed: [], warnings: [] };
   } catch (err) {
+    if (err instanceof AppliedButUnjournaledError) {
+      // The strip LANDED (our hooks are gone) but its undo entry didn't record — count it removed, and warn so
+      // the applied-but-unrecorded write is visible (recover from the backup only if reverting), never failed.
+      console.error(`[agent-os] uninstall: ${opts.errLabel} '${targetPath}' — applied but journaling failed (recover from backup if reverting):`, err);
+      return { removed: [targetPath], failed: [], warnings: [{ path: targetPath, error: errorText(err) }] };
+    }
     console.error(`[agent-os] uninstall: ${opts.errLabel} '${targetPath}':`, err);
-    return { removed: [], failed: [{ path: targetPath, error: errorText(err) }] };
+    return { removed: [], failed: [{ path: targetPath, error: errorText(err) }], warnings: [] };
   }
 }

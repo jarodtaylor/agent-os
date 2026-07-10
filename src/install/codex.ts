@@ -38,7 +38,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, sta
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { parse as parseToml } from "smol-toml";
-import { mergeConfig, removeConfigKeys, undo, type MergeResult } from "../configwrite/index";
+import { AppliedButUnjournaledError, mergeConfig, removeConfigKeys, undo, type MergeResult } from "../configwrite/index";
 import { codexTokenPath, readCodexToken, resolveCodexToken, resolveDataDir, resolvePort, TOKEN_HEADER } from "../paths";
 import { bunCommand, defaultRepoRoot, errorText, existingEntriesWithoutOurs, readJson, removeHooksIfPresent, type UninstallOutcome } from "./shared";
 
@@ -336,6 +336,7 @@ export function uninstallCodex(opts: { home?: string; dataDir?: string; repoRoot
   const repoRoot = opts.repoRoot ?? defaultRepoRoot();
   const removed: string[] = [];
   const failed: UninstallOutcome["failed"] = [];
+  const warnings: UninstallOutcome["warnings"] = [];
 
   // ── (a) MCP server → ~/.codex/config.toml — delete only mcp_servers.agent-os, preserve Codex's live state ──
   const configToml = configTomlPath(home);
@@ -343,13 +344,24 @@ export function uninstallCodex(opts: { home?: string; dataDir?: string; repoRoot
     const res = removeConfigKeys(configToml, [`mcp_servers.${SERVER_NAME}`], { dataDir });
     if (!res.noop) removed.push(configToml);
   } catch (err) {
-    // A corrupt / symlinked / unwritable config.toml can't be targeted-removed. The entry lingers, but the
-    // codex.token revocation below makes it INERT (it authenticates with codex.token, which we delete).
-    console.error(
-      `[agent-os] uninstall: could not remove '${SERVER_NAME}' from '${configToml}' — any leftover entry is neutralized by the codex.token revocation below; remove it manually:`,
-      err,
-    );
-    failed.push({ path: configToml, error: errorText(err) });
+    if (err instanceof AppliedButUnjournaledError) {
+      // The delete LANDED (mcp_servers.agent-os is gone) but its undo entry didn't record — count it removed,
+      // and warn (recover from the backup only if reverting), never failed: the entry really is gone.
+      console.error(
+        `[agent-os] uninstall: removed '${SERVER_NAME}' from '${configToml}' but journaling failed (recover from backup if reverting):`,
+        err,
+      );
+      removed.push(configToml);
+      warnings.push({ path: configToml, error: errorText(err) });
+    } else {
+      // A corrupt / symlinked / unwritable config.toml can't be targeted-removed. The entry lingers, but the
+      // codex.token revocation below makes it INERT (it authenticates with codex.token, which we delete).
+      console.error(
+        `[agent-os] uninstall: could not remove '${SERVER_NAME}' from '${configToml}' — any leftover entry is neutralized by the codex.token revocation below; remove it manually:`,
+        err,
+      );
+      failed.push({ path: configToml, error: errorText(err) });
+    }
   }
 
   // ── (b) SessionStart hook → ~/.codex/hooks.json — strip only OUR entry, keep every other hook ──
@@ -362,8 +374,11 @@ export function uninstallCodex(opts: { home?: string; dataDir?: string; repoRoot
   );
   removed.push(...hooksOutcome.removed);
   failed.push(...hooksOutcome.failed);
+  warnings.push(...hooksOutcome.warnings);
 
   // ── (c) Pointer block → ~/.codex/AGENTS.md — structural strip, tolerant of the rest of the file changing ──
+  // NOTE: `stripAgentsMdBlock` writes directly (no U14 engine, no journal), so it can never raise
+  // AppliedButUnjournaledError — its catch stays a plain `failed` classifier, unlike the engine-backed (a)/(b).
   const agentsMd = agentsMdPath(home);
   try {
     if (stripAgentsMdBlock(agentsMd)) removed.push(agentsMd);
@@ -389,5 +404,5 @@ export function uninstallCodex(opts: { home?: string; dataDir?: string; repoRoot
     );
   }
 
-  return { removed, failed };
+  return { removed, failed, warnings };
 }

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { parse as parseToml } from "smol-toml";
 import { installCodex, uninstallCodex } from "../src/install/codex";
 import { existingEntriesWithoutOurs, type UninstallOutcome } from "../src/install/shared";
+import { journalPath } from "../src/configwrite/internal";
 import { codexTokenPath, resolveCodexToken, TOKEN_HEADER } from "../src/paths";
 
 // Fixture-home ONLY — every path is under a temp dir, so these tests never touch the real ~/.codex.
@@ -509,7 +510,7 @@ describe("installCodex", () => {
     writeFileSync(configPath(), "not = [valid toml");
     writeFileSync(hooksPath(), "{ not json");
 
-    let outcome: UninstallOutcome = { removed: [], failed: [] };
+    let outcome: UninstallOutcome = { removed: [], failed: [], warnings: [] };
     expect(() => {
       outcome = uninstallCodex({ home, dataDir, repoRoot: REPO });
     }).not.toThrow();
@@ -525,14 +526,42 @@ describe("installCodex", () => {
     // mere omission from `removed` (which a true no-op on those paths would also satisfy).
     expect(outcome.failed.map((f) => f.path).sort()).toEqual([configPath(), hooksPath()].sort());
     expect(outcome.failed.every((f) => f.error.length > 0)).toBe(true);
+    // FIX C: corrupt-parse failures land in `failed`, NEVER `warnings` — the write never committed, so this is a
+    // genuine failure, not the applied-but-unjournaled case a warning denotes.
+    expect(outcome.warnings).toEqual([]);
   });
 
-  test("uninstall on a never-installed home returns [], doesn't throw, and creates no files", () => {
-    let outcome: UninstallOutcome = { removed: ["sentinel"], failed: [{ path: "sentinel", error: "sentinel" }] };
+  test("uninstall classifies an applied-but-unjournaled removal as removed + warned, never failed (FIX C)", () => {
+    install();
+    // Sabotage journaling AFTER install: turn the undo journal into a DIRECTORY so recordUndo's appendFileSync
+    // hits EISDIR right after each targeted removal has already atomically LANDED — the applied-but-unjournaled
+    // window. The removals still succeed on disk; only their journal entries fail (backups land in a sibling dir).
+    const jp = journalPath(dataDir);
+    rmSync(jp, { force: true });
+    mkdirSync(jp);
+
+    let outcome: UninstallOutcome = { removed: [], failed: [], warnings: [] };
     expect(() => {
       outcome = uninstallCodex({ home, dataDir, repoRoot: REPO });
     }).not.toThrow();
-    expect(outcome).toEqual({ removed: [], failed: [] }); // nothing removed AND nothing failed — a true no-op
+
+    // config.toml's delete LANDED — the agent-os entry is really gone…
+    expect(readToml(configPath()).mcp_servers?.["agent-os"]).toBeUndefined();
+    // …so it is classified removed + warned, NEVER failed: the entry IS gone, and `failed` would misreport it as
+    // still stuck. This is the whole point of FIX C — an applied-but-unrecorded write is not an unapplied failure.
+    expect(outcome.removed).toContain(configPath());
+    const configWarning = outcome.warnings.find((w) => w.path === configPath());
+    expect(configWarning).toBeDefined();
+    expect(configWarning!.error.length).toBeGreaterThan(0);
+    expect(outcome.failed.map((f) => f.path)).not.toContain(configPath());
+  });
+
+  test("uninstall on a never-installed home returns [], doesn't throw, and creates no files", () => {
+    let outcome: UninstallOutcome = { removed: ["sentinel"], failed: [{ path: "sentinel", error: "sentinel" }], warnings: [{ path: "sentinel", error: "sentinel" }] };
+    expect(() => {
+      outcome = uninstallCodex({ home, dataDir, repoRoot: REPO });
+    }).not.toThrow();
+    expect(outcome).toEqual({ removed: [], failed: [], warnings: [] }); // nothing removed, failed, OR warned — a true no-op
     expect(existsSync(configPath())).toBe(false); // uninstall must never CREATE a config
     expect(existsSync(hooksPath())).toBe(false);
     expect(existsSync(agentsMdPath())).toBe(false);
@@ -544,11 +573,11 @@ describe("installCodex", () => {
     expect(first.removed.length).toBeGreaterThan(0); // the first uninstall removed real entries
     expect(first.failed).toEqual([]); // …and cleanly, with no per-target failures
 
-    let second: UninstallOutcome = { removed: ["sentinel"], failed: [{ path: "sentinel", error: "sentinel" }] };
+    let second: UninstallOutcome = { removed: ["sentinel"], failed: [{ path: "sentinel", error: "sentinel" }], warnings: [{ path: "sentinel", error: "sentinel" }] };
     expect(() => {
       second = uninstallCodex({ home, dataDir, repoRoot: REPO });
     }).not.toThrow();
-    expect(second).toEqual({ removed: [], failed: [] }); // our keys already gone, credential already revoked → every step no-ops
+    expect(second).toEqual({ removed: [], failed: [], warnings: [] }); // our keys already gone, credential already revoked → every step no-ops
   });
 
   test("uninstall leaves a foreign-formatted hooks.json BYTE-for-byte unchanged when it holds none of our hooks (no reformat)", () => {
@@ -598,7 +627,7 @@ describe("installCodex", () => {
     symlinkSync(join(root, "gone-hooks-target.json"), hooksPath());
     expect(existsSync(hooksPath())).toBe(false); // dangling: existsSync follows to the missing target
 
-    let outcome: UninstallOutcome = { removed: [], failed: [] };
+    let outcome: UninstallOutcome = { removed: [], failed: [], warnings: [] };
     expect(() => {
       outcome = uninstallCodex({ home, dataDir, repoRoot: REPO });
     }).not.toThrow();
@@ -622,7 +651,7 @@ describe("installCodex", () => {
     symlinkSync(join(root, "gone-config-target.toml"), configPath());
     expect(existsSync(configPath())).toBe(false); // dangling: existsSync follows to the missing target
 
-    let outcome: UninstallOutcome = { removed: [], failed: [] };
+    let outcome: UninstallOutcome = { removed: [], failed: [], warnings: [] };
     expect(() => {
       outcome = uninstallCodex({ home, dataDir, repoRoot: REPO });
     }).not.toThrow();

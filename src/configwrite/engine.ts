@@ -16,6 +16,14 @@
  *   2. Reversibility comes from the byte-exact backup, INDEPENDENT of merge fidelity. A semantic merge
  *      may not preserve comments/formatting in a hand-edited TOML file, but `undo` restores the raw
  *      bytes, so nothing a merge drops is ever unrecoverable.
+ *
+ * SCOPE — single-process discipline. These invariants hold WITHIN one process. The engine takes no
+ * cross-process lock and does no optimistic-concurrency check, so the read-modify-write is atomic against
+ * OUR OWN writes, never against a concurrent external rewriter: a foreign write that lands between the
+ * engine's read and its atomic rename is silently SUPERSEDED by the rename. The byte-exact backup + undo
+ * journal make such a lost foreign write RECOVERABLE, not PREVENTABLE. Tracked as GitHub issue #28
+ * (promotion trigger: the first observed lost foreign write, or U10 parity provisioning putting real
+ * concurrent pressure on these live configs).
  */
 import { copyFileSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync, chmodSync } from "node:fs";
 import { randomUUID } from "node:crypto";
@@ -57,6 +65,27 @@ export interface MergeResult {
 }
 
 /**
+ * Thrown when the atomic rename SUCCEEDED (the mutation is live on disk) but the follow-up journal write did
+ * not — the one "applied but not recorded" window in `publish`. It is a distinct type, not a plain Error, so a
+ * caller can tell this apart from a genuine failure where the mutation NEVER landed: the change IS applied
+ * (recover from `backupPath` if a revert is needed), so treating it as an unapplied error would double-count it
+ * as failed. `backupPath` is `null` when the target was CREATED (no backup — delete the file to revert).
+ */
+export class AppliedButUnjournaledError extends Error {
+  readonly targetPath: string;
+  readonly backupPath: string | null;
+  constructor(targetPath: string, backupPath: string | null, cause: unknown) {
+    super(
+      `configwrite: write to '${targetPath}' APPLIED but journaling failed — recover from backup '${backupPath ?? "(none; a created file — delete it to revert)"}': ${errMessage(cause)}`,
+      { cause },
+    );
+    this.name = "AppliedButUnjournaledError";
+    this.targetPath = targetPath;
+    this.backupPath = backupPath;
+  }
+}
+
+/**
  * Deep-merge `patch` into a config at `targetPath`, backing it up first and publishing atomically.
  * The primary entry point callers use; see the module header for the full safety contract.
  *
@@ -67,39 +96,54 @@ export interface MergeResult {
  * builds its result from the SAME read the engine merges, instead of from a separate pre-read a concurrent
  * foreign write could land after and be reverted. `current` is `undefined` when the target does not exist yet
  * (mirrors the shared installers' `readJson`).
+ *
+ * A callback (or a static patch) may ABSTAIN by returning `MERGE_NOOP`: publish then guarantees ZERO
+ * filesystem effects — no serialize, no backup, no write, no journal, and (on an absent target) no create.
+ * This lets a read-modify-write whose read shows nothing to do (an uninstall stripper finding none of our keys
+ * on a foreign-formatted file) skip the write ENTIRELY, so it never reserializes a clean file into our layout —
+ * a decision the caller can only make from the engine's OWN read, which the callback receives.
  */
 export function mergeConfig(targetPath: string, patch: unknown, opts: MergeOptions = {}): MergeResult {
   // Fail closed on a STATIC non-object patch before any file work (the CALLBACK form is resolved against the
   // parsed base inside `publish`, and its RETURN is validated there the same way). A patch is a partial config,
-  // hence always a plain object (JSON object / TOML table / YAML map). A null/undefined/array/scalar patch would
-  // hit deepMerge's non-object fallback and REPLACE the whole config wholesale — a silent clobber that violates
-  // merge-don't-clobber — so reject it here rather than let it through.
+  // hence always a plain object (JSON object / TOML table / YAML map) — or the MERGE_NOOP abstain sentinel. A
+  // null/undefined/array/scalar patch would hit deepMerge's non-object fallback and REPLACE the whole config
+  // wholesale — a silent clobber that violates merge-don't-clobber — so reject it here rather than let it through.
   const isCallback = typeof patch === "function";
-  if (!isCallback && !isPlainObject(patch)) {
+  if (!isCallback && patch !== MERGE_NOOP && !isPlainObject(patch)) {
     throw new Error("configwrite: patch must be a plain object (a partial config to merge)");
   }
   return publish(targetPath, opts, (base) => {
     const resolved = isCallback ? (patch as (current: unknown) => unknown)(base) : patch;
+    // Abstain: a callback (or static patch) returning MERGE_NOOP forces publish's zero-effect short-circuit.
+    if (resolved === MERGE_NOOP) return MERGE_NOOP;
     if (!isPlainObject(resolved)) {
       throw new Error("configwrite: patch must be a plain object (a partial config to merge)");
     }
     // replaceSubtrees: strip each owned path from the base so the merge re-adds it FRESH — a wholesale replace
     // that drops any stale key on a pre-existing entry the caller no longer writes (see MergeOptions). The
-    // strip's `deleted` flag is irrelevant here — merge's no-op is the byte-compare in `publish`, never NOOP.
+    // strip's `deleted` flag is irrelevant here — in this deepMerge branch a no-op is the byte-compare in
+    // `publish`, never MERGE_NOOP (that abstain path returned earlier, before this replaceSubtrees strip).
     const stripped = opts.replaceSubtrees?.length ? removeKeys(base, opts.replaceSubtrees).value : base;
     return deepMerge(stripped, resolved);
   });
 }
 
 /**
- * Sentinel a `publish` transform returns to force a TRUE no-op: nothing resolved to change, so publish skips
- * serialize / backup / write entirely. The removal path returns it when NO key actually matched — without it,
+ * The abstain sentinel a `publish` transform returns to force a TRUE no-op: nothing resolved to change, so
+ * publish skips serialize / backup / write / journal — and, on an absent target, does NOT create it (the
+ * short-circuit runs before both the serialize and the create paths). Guarantees ZERO filesystem effects.
+ *
+ * Both public primitives lean on it. `removeConfigKeys` returns it when NO key actually matched — without it,
  * re-serializing the (unchanged) parsed tree would rewrite a foreign-formatted file (4-space JSON, comment-
  * bearing TOML that `smol-toml` drops on reserialize) to our canonical layout for a delete that removed
- * nothing, creating backup/journal noise and a false `removed` report. A unique symbol so it can never collide
- * with a real config value. Merge never returns it — merge's no-op is the byte-compare inside `publish`.
+ * nothing, creating backup/journal noise and a false `removed` report. `mergeConfig`'s CALLBACK form returns
+ * it to abstain (an uninstall stripper whose read shows none of our keys left: reformatting a clean foreign
+ * file for a no-change merge is the exact damage this prevents) — the one case merge no-ops WITHOUT the
+ * post-serialize byte-compare. A unique symbol so it can never collide with a real config value; `MERGE_NOOP`
+ * is its public name, the merge callback being the public consumer.
  */
-const NOOP = Symbol("configwrite.transform-noop");
+export const MERGE_NOOP: unique symbol = Symbol("configwrite.merge-noop");
 
 /**
  * Remove each dotted key path from the config at `targetPath` — the reverse of `mergeConfig`, on the SAME
@@ -122,10 +166,10 @@ export function removeConfigKeys(
     opts,
     (base) => {
       const { value, deleted } = removeKeys(base, keyPaths);
-      // Nothing resolved for deletion ⇒ force a true no-op (NOOP), so an absent-key removal never re-serializes
-      // and thus never reformats a foreign-formatted live config. A real deletion falls through to the normal
-      // serialize + byte-compare path (which then writes, since a resolved delete always changes the bytes).
-      return deleted ? value : NOOP;
+      // Nothing resolved for deletion ⇒ force a true no-op (MERGE_NOOP), so an absent-key removal never
+      // re-serializes and thus never reformats a foreign-formatted live config. A real deletion falls through to
+      // the normal serialize + byte-compare path (which then writes, since a resolved delete always changes the bytes).
+      return deleted ? value : MERGE_NOOP;
     },
     { createIfAbsent: false },
   );
@@ -167,11 +211,12 @@ function publish(
   // Parse BEFORE anything is written. A corrupt existing config aborts here, leaving it untouched.
   const base = existed ? parseConfig(format, currentText!, targetPath) : undefined;
   const next = transform(base);
-  // A transform may force a TRUE no-op by returning NOOP — nothing resolved to change — so we must NOT
-  // serialize. The removal path uses this: re-serializing an unchanged tree would rewrite a foreign-formatted
-  // file to our canonical layout for a delete that removed nothing. (Merge never returns NOOP; its
-  // formatting-claim no-op is the byte-compare below.)
-  if (next === NOOP) {
+  // A transform may force a TRUE no-op by returning MERGE_NOOP — nothing resolved to change — so we must NOT
+  // serialize (and, on an absent target, must NOT create it: this short-circuit runs BEFORE the serialize and
+  // create paths, so an abstaining callback on a missing file writes nothing). The removal path uses this:
+  // re-serializing an unchanged tree would rewrite a foreign-formatted file to our canonical layout for a
+  // delete/merge that changed nothing. (A plain object patch instead no-ops via the byte-compare below.)
+  if (next === MERGE_NOOP) {
     return { targetPath, noop: true, created: false, undoId: null, backupPath: null };
   }
   const nextText = serializeConfig(format, next);
@@ -229,11 +274,10 @@ function publish(
       if (backupPath) safeRm(backupPath);
       throw err;
     }
-    // The write applied but journaling failed. KEEP the backup (the only recovery path) and surface that
-    // the mutation landed, so the caller recovers from the backup instead of retrying a completed write.
-    throw new Error(
-      `configwrite: write to '${targetPath}' APPLIED but journaling failed — recover from backup '${backupPath ?? "(none; a created file — delete it to revert)"}': ${errMessage(err)}`,
-    );
+    // The write applied but journaling failed. KEEP the backup (the only recovery path) and surface — via a
+    // DISTINCT typed error — that the mutation landed, so the caller counts it applied (recover from the backup)
+    // rather than misreading a completed write as an unapplied failure.
+    throw new AppliedButUnjournaledError(targetPath, backupPath, err);
   }
 
   return { targetPath, noop: false, created: !existed, undoId, backupPath };

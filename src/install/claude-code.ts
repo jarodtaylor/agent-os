@@ -14,7 +14,7 @@
 import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { mergeConfig, removeConfigKeys, undo, type MergeResult } from "../configwrite/index";
+import { AppliedButUnjournaledError, mergeConfig, removeConfigKeys, undo, type MergeResult } from "../configwrite/index";
 import { resolveDataDir, resolvePort } from "../paths";
 import { bunCommand, defaultRepoRoot, errorText, existingEntriesWithoutOurs, readJson, removeHooksIfPresent, type UninstallOutcome } from "./shared";
 
@@ -157,6 +157,7 @@ export function uninstallClaudeCode(opts: { home?: string; dataDir?: string; rep
   const repoRoot = opts.repoRoot ?? defaultRepoRoot();
   const removed: string[] = [];
   const failed: UninstallOutcome["failed"] = [];
+  const warnings: UninstallOutcome["warnings"] = [];
 
   // ── Hooks → ~/.claude/settings.json — strip only OUR SessionStart/SessionEnd entries, keep the user's ──
   // Shared uninstall-side stripper: exists-guarded (never CREATE a settings.json by uninstalling), no-op-gated,
@@ -171,6 +172,7 @@ export function uninstallClaudeCode(opts: { home?: string; dataDir?: string; rep
   );
   removed.push(...hooksOutcome.removed);
   failed.push(...hooksOutcome.failed);
+  warnings.push(...hooksOutcome.warnings);
 
   // ── MCP server → ~/.claude.json — delete only mcpServers.agent-os, preserving CC's live state ──
   const claudeJson = claudeJsonPath(home);
@@ -178,9 +180,17 @@ export function uninstallClaudeCode(opts: { home?: string; dataDir?: string; rep
     const res = removeConfigKeys(claudeJson, [`mcpServers.${SERVER_NAME}`], { dataDir });
     if (!res.noop) removed.push(claudeJson);
   } catch (err) {
-    console.error(`[agent-os] uninstall: could not remove '${SERVER_NAME}' from '${claudeJson}':`, err);
-    failed.push({ path: claudeJson, error: errorText(err) });
+    if (err instanceof AppliedButUnjournaledError) {
+      // The delete LANDED (mcpServers.agent-os is gone) but its undo entry didn't record — count it removed,
+      // and warn (recover from the backup only if reverting), never failed: the entry really is gone.
+      console.error(`[agent-os] uninstall: removed '${SERVER_NAME}' from '${claudeJson}' but journaling failed (recover from backup if reverting):`, err);
+      removed.push(claudeJson);
+      warnings.push({ path: claudeJson, error: errorText(err) });
+    } else {
+      console.error(`[agent-os] uninstall: could not remove '${SERVER_NAME}' from '${claudeJson}':`, err);
+      failed.push({ path: claudeJson, error: errorText(err) });
+    }
   }
 
-  return { removed, failed };
+  return { removed, failed, warnings };
 }

@@ -40,7 +40,7 @@ import { join } from "node:path";
 import { parse as parseToml } from "smol-toml";
 import { mergeConfig, removeConfigKeys, undo, type MergeResult } from "../configwrite/index";
 import { codexTokenPath, readCodexToken, resolveCodexToken, resolveDataDir, resolvePort, TOKEN_HEADER } from "../paths";
-import { bunCommand, defaultRepoRoot, existingEntriesWithoutOurs, hooksWithoutOurs, readJson } from "./shared";
+import { bunCommand, defaultRepoRoot, existingEntriesWithoutOurs, hooksPatchWithoutOurs, readJson } from "./shared";
 
 /** The brain's MCP server name in `~/.codex/config.toml` (mirrors the Claude Code `mcpServers.agent-os` key). */
 const SERVER_NAME = "agent-os";
@@ -276,7 +276,7 @@ export function installCodex(opts: InstallOptions = {}): InstallResult {
       (current: unknown) => ({
         hooks: {
           SessionStart: [
-            ...existingEntriesWithoutOurs(current as Record<string, unknown> | undefined, "SessionStart", startCmd),
+            ...existingEntriesWithoutOurs(current, "SessionStart", startCmd),
             // Same matcher as the pre-existing codebase-memory echo hook — the "fresh/reset context" moments.
             { matcher: "startup|resume|clear|compact", hooks: [{ type: "command", command: startCmd, timeout: HOOK_TIMEOUT_S }] },
           ],
@@ -350,13 +350,13 @@ export function uninstallCodex(opts: { home?: string; dataDir?: string; repoRoot
 
   // ── (b) SessionStart hook → ~/.codex/hooks.json — strip only OUR entry, keep every other hook ──
   // Only when the file exists: mergeConfig would otherwise CREATE it, and uninstall must never write a
-  // hooks.json that never existed. `hooksWithoutOurs` yields an empty (no-op) patch when nothing is ours.
+  // hooks.json that never existed. `hooksPatchWithoutOurs` yields an empty (no-op) patch when nothing is ours.
   const hooksJson = hooksJsonPath(home);
   if (existsSync(hooksJson)) {
     try {
       const res = mergeConfig(
         hooksJson,
-        (current: unknown) => hooksWithoutOurs(current, [["SessionStart", bunCommand(repoRoot, "codex-session-start.ts")]]),
+        (current: unknown) => hooksPatchWithoutOurs(current, [["SessionStart", bunCommand(repoRoot, "codex-session-start.ts")]]),
         { dataDir },
       );
       if (!res.noop) removed.push(hooksJson);

@@ -270,8 +270,8 @@ function removeKeys(base: unknown, keyPaths: string[]): unknown {
     const last = segments[segments.length - 1]!;
     if (container === undefined || FORBIDDEN_KEYS.has(last)) continue;
     if (Array.isArray(container)) {
-      const idx = Number(last);
-      if (Number.isInteger(idx) && idx >= 0 && idx < container.length) container.splice(idx, 1);
+      const idx = arrayIndex(container, last);
+      if (idx !== undefined) container.splice(idx, 1);
     } else if (isPlainObject(container)) {
       delete container[last];
     }
@@ -283,11 +283,19 @@ function removeKeys(base: unknown, keyPaths: string[]): unknown {
  *  Returns `undefined` — a dead end the caller stops descending from — for any non-container or absent segment. */
 function stepInto(container: unknown, segment: string): unknown {
   if (Array.isArray(container)) {
-    const idx = Number(segment);
-    return Number.isInteger(idx) && idx >= 0 && idx < container.length ? container[idx] : undefined;
+    const idx = arrayIndex(container, segment);
+    return idx === undefined ? undefined : container[idx];
   }
   if (isPlainObject(container)) return container[segment];
   return undefined;
+}
+
+/** A dotted-path `segment` parsed as a valid, in-range index into `container` — the shared bounds-check
+ *  behind both `stepInto`'s read and `removeKeys`'s splice. `undefined` for anything else (non-numeric,
+ *  negative, or out of range), matching `stepInto`'s own dead-end sentinel. */
+function arrayIndex(container: unknown[], segment: string): number | undefined {
+  const idx = Number(segment);
+  return Number.isInteger(idx) && idx >= 0 && idx < container.length ? idx : undefined;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

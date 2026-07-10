@@ -35,12 +35,9 @@ export function readJson(path: string): Record<string, unknown> | undefined {
  *  no longer collateral damage — only our own nested hook is stripped out, and the entry itself is dropped
  *  only when nothing of the user's remains. Non-array / missing → [].
  */
-export function existingEntriesWithoutOurs(
-  config: Record<string, unknown> | undefined,
-  event: string,
-  ourCommand: string,
-): unknown[] {
-  const hooks = (config?.hooks as Record<string, unknown> | undefined) ?? {};
+export function existingEntriesWithoutOurs(config: unknown, event: string, ourCommand: string): unknown[] {
+  const cfg = config as Record<string, unknown> | undefined;
+  const hooks = (cfg?.hooks as Record<string, unknown> | undefined) ?? {};
   const arr = Array.isArray(hooks[event]) ? (hooks[event] as unknown[]) : [];
   const out: unknown[] = [];
   for (const entry of arr) {
@@ -58,14 +55,15 @@ export function existingEntriesWithoutOurs(
 }
 
 /**
- * A `mergeConfig` callback-patch that rewrites each named hook event's array to itself MINUS our own entry —
- * the targeted-removal read-modify-write both uninstallers use to strip their hook without a whole-file undo.
- * Built to touch only what's ours: it rewrites ONLY events that currently exist (so it never fabricates an
- * empty `SessionEnd: []` on a file that lacked one), and returns an EMPTY patch — a `mergeConfig` no-op — when
- * no named event is present, so calling it on an already-clean or hookless config writes nothing. Reading
- * `current` from the engine's own parse (not a pre-read) is what makes this array RMW single-read.
+ * A `mergeConfig` callback-PATCH (not the raw hooks — the `{hooks:{...}}` envelope `mergeConfig` expects) that
+ * rewrites each named hook event's array to itself MINUS our own entry — the targeted-removal read-modify-write
+ * both uninstallers use to strip their hook without a whole-file undo. Built to touch only what's ours: it
+ * rewrites ONLY events that currently exist (so it never fabricates an empty `SessionEnd: []` on a file that
+ * lacked one), and returns an EMPTY patch — a `mergeConfig` no-op — when no named event is present, so calling
+ * it on an already-clean or hookless config writes nothing. Reading `current` from the engine's own parse (not
+ * a pre-read) is what makes this array RMW single-read.
  */
-export function hooksWithoutOurs(
+export function hooksPatchWithoutOurs(
   current: unknown,
   events: ReadonlyArray<readonly [event: string, ourCommand: string]>,
 ): Record<string, unknown> {

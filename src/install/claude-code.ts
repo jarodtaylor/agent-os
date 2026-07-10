@@ -16,7 +16,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { mergeConfig, removeConfigKeys, undo, type MergeResult } from "../configwrite/index";
 import { resolveDataDir, resolvePort } from "../paths";
-import { bunCommand, defaultRepoRoot, existingEntriesWithoutOurs, hooksWithoutOurs, readJson } from "./shared";
+import { bunCommand, defaultRepoRoot, existingEntriesWithoutOurs, hooksPatchWithoutOurs, readJson } from "./shared";
 
 /** The brain's MCP server name in `~/.claude.json` (mirrors the Codex `[mcp_servers.agent-os]` plan). */
 const SERVER_NAME = "agent-os";
@@ -77,23 +77,20 @@ export function installClaudeCode(opts: InstallOptions = {}): InstallResult {
   readJson(claudeJsonPath(home));
   const settings = mergeConfig(
     settingsPath(home),
-    (current: unknown) => {
-      const config = current as Record<string, unknown> | undefined;
-      return {
-        hooks: {
-          SessionStart: [
-            ...existingEntriesWithoutOurs(config, "SessionStart", startCmd),
-            // matcher = the "fresh/reset context" moments (KTD5); a mid-session `compact` is deliberately excluded.
-            { matcher: "startup|resume|clear", hooks: [{ type: "command", command: startCmd, timeout: HOOK_TIMEOUT_S }] },
-          ],
-          SessionEnd: [
-            ...existingEntriesWithoutOurs(config, "SessionEnd", endCmd),
-            // no matcher ⇒ every end reason marks a graceful end (the point is "not a crash", whatever the reason).
-            { hooks: [{ type: "command", command: endCmd, timeout: HOOK_TIMEOUT_S }] },
-          ],
-        },
-      };
-    },
+    (current: unknown) => ({
+      hooks: {
+        SessionStart: [
+          ...existingEntriesWithoutOurs(current, "SessionStart", startCmd),
+          // matcher = the "fresh/reset context" moments (KTD5); a mid-session `compact` is deliberately excluded.
+          { matcher: "startup|resume|clear", hooks: [{ type: "command", command: startCmd, timeout: HOOK_TIMEOUT_S }] },
+        ],
+        SessionEnd: [
+          ...existingEntriesWithoutOurs(current, "SessionEnd", endCmd),
+          // no matcher ⇒ every end reason marks a graceful end (the point is "not a crash", whatever the reason).
+          { hooks: [{ type: "command", command: endCmd, timeout: HOOK_TIMEOUT_S }] },
+        ],
+      },
+    }),
     { dataDir },
   );
 
@@ -160,14 +157,14 @@ export function uninstallClaudeCode(opts: { home?: string; dataDir?: string; rep
 
   // ── Hooks → ~/.claude/settings.json — strip only OUR SessionStart/SessionEnd entries, keep the user's ──
   // Only when the file exists: mergeConfig would otherwise CREATE it, and uninstall must never write a
-  // settings.json that never existed. `hooksWithoutOurs` yields an empty (no-op) patch when nothing is ours.
+  // settings.json that never existed. `hooksPatchWithoutOurs` yields an empty (no-op) patch when nothing is ours.
   const settings = settingsPath(home);
   if (existsSync(settings)) {
     try {
       const res = mergeConfig(
         settings,
         (current: unknown) =>
-          hooksWithoutOurs(current, [
+          hooksPatchWithoutOurs(current, [
             ["SessionStart", bunCommand(repoRoot, "session-start.ts")],
             ["SessionEnd", bunCommand(repoRoot, "session-end.ts")],
           ]),

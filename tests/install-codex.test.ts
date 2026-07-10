@@ -43,6 +43,10 @@ const readToml = (p: string): any => parseToml(readFileSync(p, "utf8"));
 const readJson = (p: string): any => JSON.parse(readFileSync(p, "utf8"));
 const install = () => installCodex({ home, dataDir, repoRoot: REPO, port: 4319 });
 const token = () => resolveCodexToken(dataDir);
+/** Flatten a `hooks.SessionStart`-shaped array down to its nested `command` strings — shared by the
+ *  uninstall assertions below that check which hook commands survived. */
+const sessionStartCommands = (entries: Array<{ hooks?: Array<{ command: string }> }> | undefined): string[] =>
+  (entries ?? []).flatMap((e) => (e.hooks ?? []).map((x) => x.command));
 
 describe("installCodex", () => {
   test("fresh install writes all three files with the expected structure", () => {
@@ -317,9 +321,7 @@ describe("installCodex", () => {
     expect(c.mcp_servers?.["agent-os"]).toBeUndefined();
     expect(c.model).toBe("gpt-5.5");
     // hooks.json: our SessionStart hook is gone.
-    const hookCmds = (readJson(hooksPath()).hooks.SessionStart ?? []).flatMap((e: { hooks?: Array<{ command: string }> }) =>
-      (e.hooks ?? []).map((x) => x.command),
-    );
+    const hookCmds = sessionStartCommands(readJson(hooksPath()).hooks.SessionStart);
     expect(hookCmds).not.toContain(START_CMD);
     // AGENTS.md: our block stripped, the prior notes restored intact.
     expect(readFileSync(agentsMdPath(), "utf8")).toBe(beforeAgents);
@@ -409,9 +411,7 @@ describe("installCodex", () => {
     expect(existsSync(tokenPath)).toBe(true);
     // But the (a)/(b)/(c) targeted removals that run BEFORE revocation still completed: our entries are gone.
     expect(readToml(configPath()).mcp_servers?.["agent-os"]).toBeUndefined();
-    const hookCmds = (readJson(hooksPath()).hooks.SessionStart ?? []).flatMap((e: { hooks?: Array<{ command: string }> }) =>
-      (e.hooks ?? []).map((x) => x.command),
-    );
+    const hookCmds = sessionStartCommands(readJson(hooksPath()).hooks.SessionStart);
     expect(hookCmds).not.toContain(START_CMD);
     expect(existsSync(agentsMdPath())).toBe(false); // created fresh by install → strip empties it → deleted
   });

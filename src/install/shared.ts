@@ -59,10 +59,13 @@ export function existingEntriesWithoutOurs(config: unknown, event: string, ourCo
  * A `mergeConfig` callback-PATCH (not the raw hooks — the `{hooks:{...}}` envelope `mergeConfig` expects) that
  * rewrites each named hook event's array to itself MINUS our own entry — the targeted-removal read-modify-write
  * both uninstallers use to strip their hook without a whole-file undo. Built to touch only what's ours: it
- * rewrites ONLY events that currently exist (so it never fabricates an empty `SessionEnd: []` on a file that
- * lacked one), and returns an EMPTY patch — a `mergeConfig` no-op — when no named event is present, so calling
- * it on an already-clean or hookless config writes nothing. Reading `current` from the engine's own parse (not
- * a pre-read) is what makes this array RMW single-read.
+ * rewrites ONLY events our removal ACTUALLY changed. An event whose array is unchanged (none of our hooks were
+ * in it) is left out, as is an absent event (so it never fabricates an empty `SessionEnd: []` on a file that
+ * lacked one). When NO event changed it returns an EMPTY patch `{}` — the signal `removeHooksIfPresent` uses to
+ * skip the write outright: the engine's no-op short-circuit is BYTE-level, so an empty-patch `mergeConfig` would
+ * still re-serialize and thus REFORMAT a foreign file whose byte layout differs from our serializer; only
+ * skipping the call keeps an already-clean uninstall from touching it. Reading `current` from the engine's own
+ * parse (not a pre-read) is what makes this array RMW single-read.
  */
 export function hooksPatchWithoutOurs(
   current: unknown,
@@ -72,31 +75,72 @@ export function hooksPatchWithoutOurs(
   const hooks = (config?.hooks as Record<string, unknown> | undefined) ?? {};
   const patch: Record<string, unknown[]> = {};
   for (const [event, ourCommand] of events) {
-    if (Array.isArray(hooks[event])) patch[event] = existingEntriesWithoutOurs(config, event, ourCommand);
+    const currentEntries = hooks[event];
+    if (!Array.isArray(currentEntries)) continue; // absent event → never touched (no fabricated empty array)
+    const filtered = existingEntriesWithoutOurs(config, event, ourCommand);
+    // Include the event ONLY when the strip actually removed one of our hooks. `existingEntriesWithoutOurs`
+    // never adds or reorders and keeps the SAME reference for every entry it leaves untouched (a new object
+    // only for a co-located entry it strips ours out of, nothing for a dropped one), so a length-or-reference
+    // mismatch is an exact "did any of ours go" test — it catches the co-located strip a bare length check
+    // (same entry count, one fewer nested hook) would miss. Arrays match ⇒ nothing of ours was present ⇒ omit
+    // the event, so an already-clean config yields the empty patch that makes the uninstall a true no-op.
+    if (filtered.length !== currentEntries.length || filtered.some((entry, i) => entry !== currentEntries[i])) {
+      patch[event] = filtered;
+    }
   }
   return Object.keys(patch).length > 0 ? { hooks: patch } : {};
 }
 
 /**
- * The uninstall-side hook stripper both installers share: when `targetPath` exists, run a `mergeConfig`
- * callback that rewrites each named event's array to itself MINUS our own entry (`hooksPatchWithoutOurs`),
- * against the engine's OWN read. Returns `[targetPath]` when that actually changed the file, or `[]` on a
- * no-op / an absent file (never CREATE a hooks file by uninstalling — hence the `existsSync` guard). A
- * diverged/corrupt/symlinked target is logged with `errLabel` and swallowed, returning `[]`, so ONE target's
- * failure never aborts an uninstall's other removals (per-target isolation). `events` is the same
- * `[event, ourCommand]` list `hooksPatchWithoutOurs` takes.
+ * The result of an uninstall pass: `removed` names the config paths whose bytes actually changed, `failed`
+ * names each target that could NOT be cleaned (a diverged/corrupt/symlinked file), with its error message.
+ * Keeping the two separate lets a caller distinguish a true no-op (both empty — nothing of ours was there)
+ * from a cleanup that partially failed (`failed` non-empty) — the same `[]` used to collapse both.
+ */
+export interface UninstallOutcome {
+  removed: string[];
+  failed: Array<{ path: string; error: string }>;
+}
+
+/** Message text of a caught unknown error, for an `UninstallOutcome.failed[].error` field. */
+export function errorText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * The uninstall-side hook stripper both installers share: when `targetPath` exists AND holds one of our hooks,
+ * run a `mergeConfig` callback that rewrites each named event's array to itself MINUS our own entry
+ * (`hooksPatchWithoutOurs`), against the engine's OWN read. Reports an `UninstallOutcome`: `removed` names
+ * `targetPath` when the strip actually changed the file (else empty — a no-op / an absent file / a file with
+ * none of our hooks; never CREATE a hooks file by uninstalling, hence the `existsSync` guard); `failed` names
+ * it with the error message when a diverged/corrupt/symlinked target can't be stripped. The failure is logged
+ * with `errLabel` AND surfaced in `failed` (never swallowed into the same empty result as a true no-op), yet
+ * ONE target's failure still never aborts an uninstall's other removals (per-target isolation).
+ *
+ * The presence pre-check is what keeps an already-clean uninstall from touching a foreign file's BYTES: an
+ * empty-patch `mergeConfig` would still re-serialize (the engine's no-op short-circuit is byte-level) and thus
+ * REFORMAT a hooks file whose layout differs from our serializer, so when nothing of ours is on disk we skip
+ * the write entirely. That read only DECIDES whether to write — race-safe, since a foreign process never ADDS
+ * our command — while the strip itself still builds its array from the engine's own fresh read. `events` is the
+ * same `[event, ourCommand]` list `hooksPatchWithoutOurs` takes.
  */
 export function removeHooksIfPresent(
   targetPath: string,
   events: ReadonlyArray<readonly [event: string, ourCommand: string]>,
   opts: { dataDir: string; errLabel: string },
-): string[] {
-  if (!existsSync(targetPath)) return [];
+): UninstallOutcome {
+  if (!existsSync(targetPath)) return { removed: [], failed: [] };
   try {
+    // Skip the write ENTIRELY when none of our hooks are on disk (empty patch) — see the header on why an
+    // empty-patch mergeConfig would still reformat a foreign file. `readJson` throwing on a corrupt/unreadable
+    // target lands in the catch below, exactly as the mergeConfig parse used to.
+    if (Object.keys(hooksPatchWithoutOurs(readJson(targetPath), events)).length === 0) {
+      return { removed: [], failed: [] };
+    }
     const res = mergeConfig(targetPath, (current: unknown) => hooksPatchWithoutOurs(current, events), { dataDir: opts.dataDir });
-    return res.noop ? [] : [targetPath];
+    return { removed: res.noop ? [] : [targetPath], failed: [] };
   } catch (err) {
     console.error(`[agent-os] uninstall: ${opts.errLabel} '${targetPath}':`, err);
-    return [];
+    return { removed: [], failed: [{ path: targetPath, error: errorText(err) }] };
   }
 }

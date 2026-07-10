@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse as parseToml } from "smol-toml";
 import { installCodex, uninstallCodex } from "../src/install/codex";
-import { existingEntriesWithoutOurs } from "../src/install/shared";
+import { existingEntriesWithoutOurs, type UninstallOutcome } from "../src/install/shared";
 import { codexTokenPath, resolveCodexToken, TOKEN_HEADER } from "../src/paths";
 
 // Fixture-home ONLY — every path is under a temp dir, so these tests never touch the real ~/.codex.
@@ -108,6 +108,42 @@ describe("installCodex", () => {
     const cmds = after.hooks.SessionStart.flatMap((e: any) => (e.hooks ?? []).map((x: any) => x.command));
     expect(cmds).not.toContain(START_CMD); // our hook is gone…
     expect(cmds).toContain("echo mine"); // …the user's survives.
+  });
+
+  test("uninstall strips our hook out of a CO-LOCATED entry, keeping the user's — the same-length case a bare length check would miss (FIX A)", () => {
+    install(); // seed a real install so START_CMD is the installed command
+
+    // Hand-write hooks.json so ONE SessionStart entry co-locates a user's command alongside ours (same matcher,
+    // two nested hooks). existingEntriesWithoutOurs returns a SAME-LENGTH array here (the entry stays, minus our
+    // nested hook), so a "did anything change?" check by array length alone would wrongly see no change, skip the
+    // write, and leave our hook behind — the reference-aware check in hooksPatchWithoutOurs catches it.
+    writeFileSync(
+      hooksPath(),
+      JSON.stringify(
+        {
+          hooks: {
+            SessionStart: [
+              {
+                matcher: "startup|resume|clear|compact",
+                hooks: [
+                  { type: "command", command: "echo user-colocated" },
+                  { type: "command", command: START_CMD, timeout: 10 },
+                ],
+              },
+            ],
+          },
+        },
+        null,
+        2,
+      ) + "\n",
+    );
+
+    const { removed } = uninstallCodex({ home, dataDir, repoRoot: REPO });
+
+    const cmds = sessionStartCommands(readJson(hooksPath()).hooks.SessionStart);
+    expect(cmds).not.toContain(START_CMD); // our hook stripped out of the co-located entry…
+    expect(cmds).toContain("echo user-colocated"); // …the user's co-located command survives
+    expect(removed).toContain(hooksPath()); // the file WAS written — not skipped as a false no-op
   });
 
   test("refuses to install over a corrupt config.toml", () => {
@@ -314,7 +350,7 @@ describe("installCodex", () => {
     expect(existsSync(hooksPath())).toBe(true); // created by install
     expect(readFileSync(agentsMdPath(), "utf8")).not.toBe(beforeAgents);
 
-    const removed = uninstallCodex({ home, dataDir, repoRoot: REPO });
+    const { removed } = uninstallCodex({ home, dataDir, repoRoot: REPO });
 
     // config.toml: our entry is gone; the user's key survives (targeted removal, not a byte-exact whole-file restore).
     const c = readToml(configPath());
@@ -334,7 +370,7 @@ describe("installCodex", () => {
     install();
     expect(existsSync(agentsMdPath())).toBe(true);
 
-    const removed = uninstallCodex({ home, dataDir, repoRoot: REPO });
+    const { removed } = uninstallCodex({ home, dataDir, repoRoot: REPO });
 
     expect(existsSync(agentsMdPath())).toBe(false);
     expect(removed).toContain(agentsMdPath());
@@ -384,7 +420,7 @@ describe("installCodex", () => {
     const c = readToml(configPath());
     writeFileSync(configPath(), `model = "gpt-6.0"\n\n[mcp_servers.agent-os]\nurl = "${c.mcp_servers["agent-os"].url}"\n`);
 
-    const removed = uninstallCodex({ home, dataDir, repoRoot: REPO });
+    const { removed } = uninstallCodex({ home, dataDir, repoRoot: REPO });
 
     expect(existsSync(codexTokenPath(dataDir))).toBe(false); // credential revoked (defence in depth)
     // …and the entry is now ACTUALLY removed, not merely left inert — so config.toml IS reported changed
@@ -473,26 +509,30 @@ describe("installCodex", () => {
     writeFileSync(configPath(), "not = [valid toml");
     writeFileSync(hooksPath(), "{ not json");
 
-    let removed: string[] = [];
+    let outcome: UninstallOutcome = { removed: [], failed: [] };
     expect(() => {
-      removed = uninstallCodex({ home, dataDir, repoRoot: REPO });
+      outcome = uninstallCodex({ home, dataDir, repoRoot: REPO });
     }).not.toThrow();
 
     // Both failures were isolated — the later steps still ran:
     expect(existsSync(agentsMdPath())).toBe(false); // (c) AGENTS.md block stripped (install created it fresh → deleted)
-    expect(removed).toContain(agentsMdPath());
+    expect(outcome.removed).toContain(agentsMdPath());
     expect(existsSync(codexTokenPath(dataDir))).toBe(false); // (d) the credential was still revoked
     // …and the two failed targets are omitted from `removed`.
-    expect(removed).not.toContain(configPath());
-    expect(removed).not.toContain(hooksPath());
+    expect(outcome.removed).not.toContain(configPath());
+    expect(outcome.removed).not.toContain(hooksPath());
+    // FIX B: both failing targets are NAMED in `failed` with non-empty errors — a strictly stronger check than
+    // mere omission from `removed` (which a true no-op on those paths would also satisfy).
+    expect(outcome.failed.map((f) => f.path).sort()).toEqual([configPath(), hooksPath()].sort());
+    expect(outcome.failed.every((f) => f.error.length > 0)).toBe(true);
   });
 
   test("uninstall on a never-installed home returns [], doesn't throw, and creates no files", () => {
-    let removed: string[] = ["sentinel"];
+    let outcome: UninstallOutcome = { removed: ["sentinel"], failed: [{ path: "sentinel", error: "sentinel" }] };
     expect(() => {
-      removed = uninstallCodex({ home, dataDir, repoRoot: REPO });
+      outcome = uninstallCodex({ home, dataDir, repoRoot: REPO });
     }).not.toThrow();
-    expect(removed).toEqual([]);
+    expect(outcome).toEqual({ removed: [], failed: [] }); // nothing removed AND nothing failed — a true no-op
     expect(existsSync(configPath())).toBe(false); // uninstall must never CREATE a config
     expect(existsSync(hooksPath())).toBe(false);
     expect(existsSync(agentsMdPath())).toBe(false);
@@ -501,13 +541,35 @@ describe("installCodex", () => {
   test("double-uninstall is idempotent — the second uninstall returns [] and doesn't throw (DECISIONS #30)", () => {
     install();
     const first = uninstallCodex({ home, dataDir, repoRoot: REPO });
-    expect(first.length).toBeGreaterThan(0); // the first uninstall removed real entries
+    expect(first.removed.length).toBeGreaterThan(0); // the first uninstall removed real entries
+    expect(first.failed).toEqual([]); // …and cleanly, with no per-target failures
 
-    let second: string[] = ["sentinel"];
+    let second: UninstallOutcome = { removed: ["sentinel"], failed: [{ path: "sentinel", error: "sentinel" }] };
     expect(() => {
       second = uninstallCodex({ home, dataDir, repoRoot: REPO });
     }).not.toThrow();
-    expect(second).toEqual([]); // our keys already gone, credential already revoked → every step no-ops
+    expect(second).toEqual({ removed: [], failed: [] }); // our keys already gone, credential already revoked → every step no-ops
+  });
+
+  test("uninstall leaves a foreign-formatted hooks.json BYTE-for-byte unchanged when it holds none of our hooks (no reformat)", () => {
+    // A hooks.json a dotfile tool wrote with 4-space indent, holding only a FOREIGN SessionStart entry (none of
+    // ours). An uninstall with nothing of ours to strip must not touch it — the engine's no-op short-circuit is
+    // BYTE-level, so an empty-patch mergeConfig would still RE-SERIALIZE it to our 2-space layout. The fix makes
+    // hooksPatchWithoutOurs return {} here and removeHooksIfPresent skip the write outright, so the bytes survive.
+    mkdirSync(codexDir(), { recursive: true });
+    const foreign =
+      JSON.stringify(
+        { hooks: { SessionStart: [{ matcher: "startup", hooks: [{ type: "command", command: "echo foreign" }] }] } },
+        null,
+        4, // deliberately NOT our 2-space serializer output
+      ) + "\n";
+    writeFileSync(hooksPath(), foreign);
+
+    const { removed, failed } = uninstallCodex({ home, dataDir, repoRoot: REPO });
+
+    expect(readFileSync(hooksPath(), "utf8")).toBe(foreign); // byte-for-byte unchanged — never reformatted
+    expect(removed).toEqual([]); // nothing of ours anywhere (config.toml + AGENTS.md absent too) → nothing changed
+    expect(failed).toEqual([]); // a skip is a clean no-op, not a failure
   });
 });
 

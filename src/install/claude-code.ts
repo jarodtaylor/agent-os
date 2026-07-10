@@ -16,7 +16,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { mergeConfig, removeConfigKeys, undo, type MergeResult } from "../configwrite/index";
 import { resolveDataDir, resolvePort } from "../paths";
-import { bunCommand, defaultRepoRoot, existingEntriesWithoutOurs, readJson, removeHooksIfPresent } from "./shared";
+import { bunCommand, defaultRepoRoot, errorText, existingEntriesWithoutOurs, readJson, removeHooksIfPresent, type UninstallOutcome } from "./shared";
 
 /** The brain's MCP server name in `~/.claude.json` (mirrors the Codex `[mcp_servers.agent-os]` plan). */
 const SERVER_NAME = "agent-os";
@@ -147,27 +147,30 @@ export function installClaudeCode(opts: InstallOptions = {}): InstallResult {
  * (`removeConfigKeys`) and strip ONLY our own entries from the settings.json hook arrays (a callback
  * array-replace against the engine's own read), preserving everything else on both files however they've
  * diverged. Idempotent — our keys already absent ⇒ each write no-ops — and per-target try/catch so a
- * diverged/corrupt target never aborts removal of the other.
+ * diverged/corrupt target never aborts removal of the other. Returns an `UninstallOutcome`: the paths actually
+ * changed, plus any per-target failures (so a caller can tell "nothing to remove" from "a target could not be
+ * cleaned" — both used to collapse into the same empty list).
  */
-export function uninstallClaudeCode(opts: { home?: string; dataDir?: string; repoRoot?: string } = {}): string[] {
+export function uninstallClaudeCode(opts: { home?: string; dataDir?: string; repoRoot?: string } = {}): UninstallOutcome {
   const home = opts.home ?? homedir();
   const dataDir = resolveDataDir(opts.dataDir);
   const repoRoot = opts.repoRoot ?? defaultRepoRoot();
   const removed: string[] = [];
+  const failed: UninstallOutcome["failed"] = [];
 
   // ── Hooks → ~/.claude/settings.json — strip only OUR SessionStart/SessionEnd entries, keep the user's ──
   // Shared uninstall-side stripper: exists-guarded (never CREATE a settings.json by uninstalling), no-op-gated,
-  // per-target try/catch so a diverged/corrupt settings.json never aborts the MCP removal below.
-  removed.push(
-    ...removeHooksIfPresent(
-      settingsPath(home),
-      [
-        ["SessionStart", bunCommand(repoRoot, "session-start.ts")],
-        ["SessionEnd", bunCommand(repoRoot, "session-end.ts")],
-      ],
-      { dataDir, errLabel: "could not remove our hooks from" },
-    ),
+  // per-target isolation — a diverged/corrupt settings.json is reported in `failed`, never aborts the MCP removal below.
+  const hooksOutcome = removeHooksIfPresent(
+    settingsPath(home),
+    [
+      ["SessionStart", bunCommand(repoRoot, "session-start.ts")],
+      ["SessionEnd", bunCommand(repoRoot, "session-end.ts")],
+    ],
+    { dataDir, errLabel: "could not remove our hooks from" },
   );
+  removed.push(...hooksOutcome.removed);
+  failed.push(...hooksOutcome.failed);
 
   // ── MCP server → ~/.claude.json — delete only mcpServers.agent-os, preserving CC's live state ──
   const claudeJson = claudeJsonPath(home);
@@ -176,7 +179,8 @@ export function uninstallClaudeCode(opts: { home?: string; dataDir?: string; rep
     if (!res.noop) removed.push(claudeJson);
   } catch (err) {
     console.error(`[agent-os] uninstall: could not remove '${SERVER_NAME}' from '${claudeJson}':`, err);
+    failed.push({ path: claudeJson, error: errorText(err) });
   }
 
-  return removed;
+  return { removed, failed };
 }

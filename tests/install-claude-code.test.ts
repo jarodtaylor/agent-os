@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { installClaudeCode, uninstallClaudeCode } from "../src/install/claude-code";
+import type { UninstallOutcome } from "../src/install/shared";
 
 // Fixture-home ONLY — every path is under a temp dir, so these tests never touch the real ~/.claude.
 const REPO = "/repo"; // injected repoRoot ⇒ deterministic command strings
@@ -149,7 +150,7 @@ describe("installClaudeCode", () => {
     expect(readJson(settingsPath()).hooks.SessionStart).toHaveLength(2); // user's + ours
     expect(readJson(claudeJsonPath()).mcpServers["agent-os"]).toBeDefined();
 
-    const removed = uninstallClaudeCode({ home, dataDir, repoRoot: REPO });
+    const { removed } = uninstallClaudeCode({ home, dataDir, repoRoot: REPO });
 
     // settings.json: our hook entries are gone; the user's hook and non-hook keys survive.
     const s = readJson(settingsPath());
@@ -216,15 +217,19 @@ describe("installClaudeCode", () => {
     rmSync(settingsPath());
     mkdirSync(settingsPath());
 
-    let removed: string[] = [];
+    let outcome: UninstallOutcome = { removed: [], failed: [] };
     expect(() => {
-      removed = uninstallClaudeCode({ home, dataDir, repoRoot: REPO });
+      outcome = uninstallClaudeCode({ home, dataDir, repoRoot: REPO });
     }).not.toThrow();
 
     // The settings failure was isolated: claude.json's agent-os entry is still removed, and only it is reported.
     expect(readJson(claudeJsonPath()).mcpServers?.["agent-os"]).toBeUndefined();
-    expect(removed).toContain(claudeJsonPath());
-    expect(removed).not.toContain(settingsPath());
+    expect(outcome.removed).toContain(claudeJsonPath());
+    expect(outcome.removed).not.toContain(settingsPath());
+    // FIX B: the settings failure is now NAMED in `failed` (with a non-empty error) — strictly stronger than
+    // merely being omitted from `removed`, which a true no-op would also satisfy.
+    expect(outcome.failed.map((f) => f.path)).toEqual([settingsPath()]);
+    expect(outcome.failed[0].error.length).toBeGreaterThan(0);
   });
 
   test("uninstall does not throw even when BOTH targets fail to write (each isolated, nothing reported removed)", () => {
@@ -235,11 +240,14 @@ describe("installClaudeCode", () => {
     rmSync(claudeJsonPath());
     mkdirSync(claudeJsonPath());
 
-    let removed: string[] = ["sentinel"];
+    let outcome: UninstallOutcome = { removed: ["sentinel"], failed: [] };
     expect(() => {
-      removed = uninstallClaudeCode({ home, dataDir, repoRoot: REPO });
+      outcome = uninstallClaudeCode({ home, dataDir, repoRoot: REPO });
     }).not.toThrow();
-    expect(removed).toEqual([]); // neither target could be processed, but uninstall completed cleanly
+    expect(outcome.removed).toEqual([]); // neither target could be processed, but uninstall completed cleanly
+    // FIX B: BOTH failing targets are named in `failed` with non-empty errors (not collapsed into empty `removed`).
+    expect(outcome.failed.map((f) => f.path).sort()).toEqual([claudeJsonPath(), settingsPath()].sort());
+    expect(outcome.failed.every((f) => f.error.length > 0)).toBe(true);
   });
 
   test("uninstall never fabricates hooks.SessionEnd on a settings.json that lacked it (touches only present events)", () => {
@@ -262,12 +270,38 @@ describe("installClaudeCode", () => {
     expect(readJson(settingsPath()).hooks).toEqual({ SessionStart: [] });
   });
 
+  test("uninstall leaves a foreign-formatted settings.json BYTE-for-byte unchanged when it holds none of our hooks (no reformat)", () => {
+    // A settings.json a dotfile tool wrote with 4-space indent, holding only FOREIGN hook entries (none of
+    // ours). An uninstall with nothing of ours to strip must not touch it — the engine's no-op short-circuit is
+    // BYTE-level, so an empty-patch mergeConfig would still RE-SERIALIZE it to our 2-space layout. The fix makes
+    // hooksPatchWithoutOurs return {} here and removeHooksIfPresent skip the write outright, so the bytes survive.
+    mkdirSync(join(home, ".claude"), { recursive: true });
+    const foreign =
+      JSON.stringify(
+        {
+          hooks: {
+            SessionStart: [{ matcher: "startup", hooks: [{ type: "command", command: "echo foreign-start" }] }],
+            SessionEnd: [{ hooks: [{ type: "command", command: "echo foreign-end" }] }],
+          },
+        },
+        null,
+        4, // deliberately NOT our 2-space serializer output
+      ) + "\n";
+    writeFileSync(settingsPath(), foreign);
+
+    const { removed, failed } = uninstallClaudeCode({ home, dataDir, repoRoot: REPO });
+
+    expect(readFileSync(settingsPath(), "utf8")).toBe(foreign); // byte-for-byte unchanged — never reformatted
+    expect(removed).toEqual([]); // nothing of ours present → nothing changed (claude.json is absent too)
+    expect(failed).toEqual([]); // a skip is a clean no-op, not a failure
+  });
+
   test("uninstall on a never-installed home returns [], doesn't throw, and creates no files", () => {
-    let removed: string[] = ["sentinel"];
+    let outcome: UninstallOutcome = { removed: ["sentinel"], failed: [{ path: "sentinel", error: "sentinel" }] };
     expect(() => {
-      removed = uninstallClaudeCode({ home, dataDir, repoRoot: REPO });
+      outcome = uninstallClaudeCode({ home, dataDir, repoRoot: REPO });
     }).not.toThrow();
-    expect(removed).toEqual([]);
+    expect(outcome).toEqual({ removed: [], failed: [] }); // nothing removed AND nothing failed — a true no-op
     expect(existsSync(settingsPath())).toBe(false); // uninstall must never CREATE a config
     expect(existsSync(claudeJsonPath())).toBe(false);
   });
@@ -275,12 +309,13 @@ describe("installClaudeCode", () => {
   test("double-uninstall is idempotent — the second uninstall returns [] and doesn't throw (DECISIONS #30)", () => {
     install();
     const first = uninstallClaudeCode({ home, dataDir, repoRoot: REPO });
-    expect(first.length).toBeGreaterThan(0); // the first uninstall removed real entries
+    expect(first.removed.length).toBeGreaterThan(0); // the first uninstall removed real entries
+    expect(first.failed).toEqual([]); // …and cleanly, with no per-target failures
 
-    let second: string[] = ["sentinel"];
+    let second: UninstallOutcome = { removed: ["sentinel"], failed: [{ path: "sentinel", error: "sentinel" }] };
     expect(() => {
       second = uninstallClaudeCode({ home, dataDir, repoRoot: REPO });
     }).not.toThrow();
-    expect(second).toEqual([]); // our keys already gone → every target no-ops
+    expect(second).toEqual({ removed: [], failed: [] }); // our keys already gone → every target no-ops
   });
 });

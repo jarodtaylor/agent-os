@@ -40,7 +40,7 @@ import { join } from "node:path";
 import { parse as parseToml } from "smol-toml";
 import { mergeConfig, removeConfigKeys, undo, type MergeResult } from "../configwrite/index";
 import { codexTokenPath, readCodexToken, resolveCodexToken, resolveDataDir, resolvePort, TOKEN_HEADER } from "../paths";
-import { bunCommand, defaultRepoRoot, existingEntriesWithoutOurs, readJson, removeHooksIfPresent } from "./shared";
+import { bunCommand, defaultRepoRoot, errorText, existingEntriesWithoutOurs, readJson, removeHooksIfPresent, type UninstallOutcome } from "./shared";
 
 /** The brain's MCP server name in `~/.codex/config.toml` (mirrors the Claude Code `mcpServers.agent-os` key). */
 const SERVER_NAME = "agent-os";
@@ -312,8 +312,10 @@ export function installCodex(opts: InstallOptions = {}): InstallResult {
  * on disk NOW), mirroring `uninstallClaudeCode`. Per-target try/catch so one diverged/corrupt target never
  * aborts the others — but credential revocation itself is NOT best-effort: it runs LAST, after the cleanups,
  * and THROWS if `codex.token` still exists afterward, so a caller never mistakes a non-revoking uninstall for
- * success. Returns the paths actually changed (the credential revocation is not a file "change" and is
- * deliberately not in that list).
+ * success. Returns an `UninstallOutcome`: the paths actually changed (the credential revocation is not a file
+ * "change" and is deliberately not in that list), plus any per-target failures — so a caller can tell "nothing
+ * to remove" from "a target could not be cleaned" (both used to collapse into the same empty list). A
+ * revocation failure is NOT reported through `failed`; it THROWS (see above), so the whole call fails loud.
  *
  * Three targeted removals, each tolerant of a target that diverged since install (the whole point — the old
  * whole-file `undo` restore THREW on the near-always-diverged live-state files and left our entries behind):
@@ -328,11 +330,12 @@ export function installCodex(opts: InstallOptions = {}): InstallResult {
  *       repoRoot: a repo-MOVED leftover points its command at a now-missing script and already fails open (inert).
  *   (c) AGENTS.md — strip our marked block (structural inverse of the upsert; it never went through the journal).
  */
-export function uninstallCodex(opts: { home?: string; dataDir?: string; repoRoot?: string } = {}): string[] {
+export function uninstallCodex(opts: { home?: string; dataDir?: string; repoRoot?: string } = {}): UninstallOutcome {
   const home = opts.home ?? homedir();
   const dataDir = resolveDataDir(opts.dataDir);
   const repoRoot = opts.repoRoot ?? defaultRepoRoot();
   const removed: string[] = [];
+  const failed: UninstallOutcome["failed"] = [];
 
   // ── (a) MCP server → ~/.codex/config.toml — delete only mcp_servers.agent-os, preserve Codex's live state ──
   const configToml = configTomlPath(home);
@@ -346,18 +349,19 @@ export function uninstallCodex(opts: { home?: string; dataDir?: string; repoRoot
       `[agent-os] uninstall: could not remove '${SERVER_NAME}' from '${configToml}' — any leftover entry is neutralized by the codex.token revocation below; remove it manually:`,
       err,
     );
+    failed.push({ path: configToml, error: errorText(err) });
   }
 
   // ── (b) SessionStart hook → ~/.codex/hooks.json — strip only OUR entry, keep every other hook ──
   // Shared uninstall-side stripper: exists-guarded (never CREATE a hooks.json by uninstalling), no-op-gated,
-  // per-target try/catch so a diverged/corrupt hooks.json never aborts the AGENTS.md strip or token revocation.
-  removed.push(
-    ...removeHooksIfPresent(
-      hooksJsonPath(home),
-      [["SessionStart", bunCommand(repoRoot, "codex-session-start.ts")]],
-      { dataDir, errLabel: "could not remove our SessionStart hook from" },
-    ),
+  // per-target isolation — a diverged/corrupt hooks.json is reported in `failed`, never aborts the AGENTS.md strip or token revocation.
+  const hooksOutcome = removeHooksIfPresent(
+    hooksJsonPath(home),
+    [["SessionStart", bunCommand(repoRoot, "codex-session-start.ts")]],
+    { dataDir, errLabel: "could not remove our SessionStart hook from" },
   );
+  removed.push(...hooksOutcome.removed);
+  failed.push(...hooksOutcome.failed);
 
   // ── (c) Pointer block → ~/.codex/AGENTS.md — structural strip, tolerant of the rest of the file changing ──
   const agentsMd = agentsMdPath(home);
@@ -365,6 +369,7 @@ export function uninstallCodex(opts: { home?: string; dataDir?: string; repoRoot
     if (stripAgentsMdBlock(agentsMd)) removed.push(agentsMd);
   } catch (err) {
     console.error(`[agent-os] uninstall: could not strip pointer block from '${agentsMd}':`, err);
+    failed.push({ path: agentsMd, error: errorText(err) });
   }
 
   // ── (d) Revoke the stable Codex credential — delete codex.token so the next boot re-mints fresh ──
@@ -384,5 +389,5 @@ export function uninstallCodex(opts: { home?: string; dataDir?: string; repoRoot
     );
   }
 
-  return removed;
+  return { removed, failed };
 }

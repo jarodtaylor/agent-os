@@ -98,9 +98,14 @@ export function mergeConfig(targetPath: string, patch: unknown, opts: MergeOptio
  * where a whole-file `undo` restore would throw on the (near-always) diverged file, or clobber the owner's live
  * state. A path that doesn't resolve is skipped, so a double-remove is an idempotent no-op; removing from a
  * target that doesn't exist is a no-op that never creates a file. Reversible like any write — `undo` re-adds
- * exactly what was removed.
+ * exactly what was removed. `opts` omits `replaceSubtrees` (a merge-only option this removal path never reads;
+ * accepting it would silently no-op).
  */
-export function removeConfigKeys(targetPath: string, keyPaths: string[], opts: MergeOptions = {}): MergeResult {
+export function removeConfigKeys(
+  targetPath: string,
+  keyPaths: string[],
+  opts: Omit<MergeOptions, "replaceSubtrees"> = {},
+): MergeResult {
   return publish(targetPath, opts, (base) => removeKeys(base, keyPaths), { createIfAbsent: false });
 }
 
@@ -258,8 +263,24 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
  * no-op. Prototype-pollution-safe: a `__proto__`/`constructor`/`prototype` segment is refused, so it never
  * walks onto the prototype (shares `deepMerge`'s FORBIDDEN_KEYS). `base` is the engine's OWN freshly-parsed
  * value (never a caller's object), so mutating it in place is safe and avoids a deep clone.
+ *
+ * TWO PASSES, resolve-then-mutate, so every path's target is fixed against the tree AS IT WAS WHEN THE CALL
+ * BEGAN — no deletion perturbs a target resolved earlier. Pass 1 walks each path to its (container,
+ * final-segment) target WITHOUT mutating; pass 2 applies the deletes, splicing each array's indices
+ * HIGHEST-FIRST so an earlier removal never renumbers a later target. This is what makes multiple numeric
+ * paths into the SAME array (`list.0` + `list.2`) remove exactly the ORIGINAL elements named, rather than
+ * splicing sequentially and shifting the ones behind each removal. Resolving up front also fixes the subtler
+ * case of a path that walks THROUGH a sibling another path removes: pass 1 captured its container reference,
+ * so pass 2's mutation still lands (splicing an array never invalidates a reference already taken to one of
+ * its elements). In short: the index in a path refers to the array as it was when the call began.
  */
 function removeKeys(base: unknown, keyPaths: string[]): unknown {
+  const objectDeletes: Array<{ container: Record<string, unknown>; key: string }> = [];
+  // Array removals grouped by container identity; the per-container Set dedupes two paths naming the same
+  // element (so one call removes it once) and lets pass 2 splice that container's indices highest-first.
+  const arraySplices = new Map<unknown[], Set<number>>();
+
+  // ── Pass 1: resolve every path to its target, mutating nothing ──
   for (const keyPath of keyPaths) {
     const segments = keyPath.split(".");
     // Walk to the container holding the FINAL segment; stop at the first dead end (absent/forbidden segment).
@@ -271,10 +292,20 @@ function removeKeys(base: unknown, keyPaths: string[]): unknown {
     if (container === undefined || FORBIDDEN_KEYS.has(last)) continue;
     if (Array.isArray(container)) {
       const idx = arrayIndex(container, last);
-      if (idx !== undefined) container.splice(idx, 1);
+      if (idx !== undefined) {
+        let indices = arraySplices.get(container);
+        if (!indices) arraySplices.set(container, (indices = new Set()));
+        indices.add(idx);
+      }
     } else if (isPlainObject(container)) {
-      delete container[last];
+      objectDeletes.push({ container, key: last });
     }
+  }
+
+  // ── Pass 2: apply. Object deletes in any order; each array's indices spliced highest-first. ──
+  for (const { container, key } of objectDeletes) delete container[key];
+  for (const [arr, indices] of arraySplices) {
+    for (const idx of [...indices].sort((a, b) => b - a)) arr.splice(idx, 1);
   }
   return base;
 }
@@ -290,12 +321,19 @@ function stepInto(container: unknown, segment: string): unknown {
   return undefined;
 }
 
+/** A canonical base-10 non-negative integer segment: `0`, or a nonzero-leading digit run. Gates `arrayIndex`
+ *  so the forms `Number()` would silently coerce to a misleading index never resolve — ""→0, "0x1"→1, "1e1"→10,
+ *  "01"→1, " 1"→1 — nor the negatives/decimals it also accepts; only a genuine canonical index gets through. */
+const CANONICAL_ARRAY_INDEX = /^(0|[1-9]\d*)$/;
+
 /** A dotted-path `segment` parsed as a valid, in-range index into `container` — the shared bounds-check
- *  behind both `stepInto`'s read and `removeKeys`'s splice. `undefined` for anything else (non-numeric,
- *  negative, or out of range), matching `stepInto`'s own dead-end sentinel. */
+ *  behind both `stepInto`'s read and `removeKeys`'s splice. `undefined` for anything else (non-canonical per
+ *  `CANONICAL_ARRAY_INDEX`, or out of range), matching `stepInto`'s own dead-end sentinel. The regex guarantees
+ *  a non-negative integer, so only the upper bound remains to check. */
 function arrayIndex(container: unknown[], segment: string): number | undefined {
+  if (!CANONICAL_ARRAY_INDEX.test(segment)) return undefined;
   const idx = Number(segment);
-  return Number.isInteger(idx) && idx >= 0 && idx < container.length ? idx : undefined;
+  return idx < container.length ? idx : undefined;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -453,6 +453,76 @@ describe("removeConfigKeys handles array-element removal (the real uninstall nee
   });
 });
 
+// ── resolve-then-mutate: multiple paths into ONE array target the ORIGINALS, not shifted positions (#4) ──
+
+describe("removeConfigKeys resolves every path before mutating (multi-path same-array correctness)", () => {
+  test("two numeric paths into the SAME array remove exactly the ORIGINAL elements named", () => {
+    // [a,b,c] minus original indices 0 and 2 = [b]. The old sequential-splice code left [b,c]: the second
+    // splice mis-targeted after the first had shifted everything down. Resolve-then-splice-descending fixes it.
+    const target = seed("settings.json", JSON.stringify({ list: ["a", "b", "c"] }, null, 2) + "\n");
+    removeConfigKeys(target, ["list.0", "list.2"], { dataDir });
+    expect(JSON.parse(read(target))).toEqual({ list: ["b"] });
+  });
+
+  test("adjacent indices 0 and 1 remove the two named originals, not a shifted pair", () => {
+    // [a,b,c] minus original 0 and 1 = [c]. Sequential splicing removed a then (post-shift) c, wrongly leaving [b].
+    const target = seed("settings.json", JSON.stringify({ list: ["a", "b", "c"] }, null, 2) + "\n");
+    removeConfigKeys(target, ["list.0", "list.1"], { dataDir });
+    expect(JSON.parse(read(target))).toEqual({ list: ["c"] });
+  });
+
+  test("mixed object-key and array-index paths in one call each hit their original target", () => {
+    const target = seed(
+      "settings.json",
+      JSON.stringify({ mcpServers: { "agent-os": { url: "x" }, other: { url: "y" } }, list: ["a", "b", "c"] }, null, 2) + "\n",
+    );
+    removeConfigKeys(target, ["mcpServers.agent-os", "list.0", "list.2"], { dataDir });
+    expect(JSON.parse(read(target))).toEqual({ mcpServers: { other: { url: "y" } }, list: ["b"] });
+  });
+
+  test("a path resolving THROUGH a sibling another path removes still lands (references fixed up front)", () => {
+    // Remove arr[0] AND a key inside arr[2]. Under sequential mutation, splicing arr[0] shifts arr[2]→arr[1],
+    // so `arr.2.z` would walk off the end and z would survive. Resolve-first captures arr[2]'s object in pass 1.
+    const target = seed("settings.json", JSON.stringify({ arr: [{ x: 1 }, { y: 2 }, { z: 3, keep: 4 }] }, null, 2) + "\n");
+    removeConfigKeys(target, ["arr.0", "arr.2.z"], { dataDir });
+    expect(JSON.parse(read(target))).toEqual({ arr: [{ y: 2 }, { keep: 4 }] });
+  });
+});
+
+// ── array-index segments are canonical-decimal only — Number()'s coercions never resolve to an index (#5) ──
+
+describe("removeConfigKeys array-index segment canonicalization", () => {
+  // Each non-canonical final segment reaches arrayIndex (the container IS an array) and must be a non-numeric
+  // dead end — a no-op leaving the array untouched — NOT silently coerced by Number() into a real index
+  // ("0x1"→1, "1e1"→10, "01"→1, " 1"→1, ""→0, "-1"→-1).
+  test.each([
+    ["empty string", ""],
+    ["hex 0x1", "0x1"],
+    ["exponential 1e1", "1e1"],
+    ["negative -1", "-1"],
+    ["leading-zero 01", "01"],
+    ["whitespace ' 1'", " 1"],
+  ])("segment (%s) is a no-op, never coerced to an index", (_label, segment) => {
+    const target = seed("settings.json", JSON.stringify({ list: ["a", "b"] }, null, 2) + "\n");
+    const res = removeConfigKeys(target, [`list.${segment}`], { dataDir });
+    expect(res.noop).toBe(true); // nothing resolved → no write
+    expect(JSON.parse(read(target))).toEqual({ list: ["a", "b"] }); // array untouched
+  });
+
+  test("canonical index '0' removes the first element", () => {
+    const target = seed("settings.json", JSON.stringify({ list: ["a", "b"] }, null, 2) + "\n");
+    removeConfigKeys(target, ["list.0"], { dataDir });
+    expect(JSON.parse(read(target))).toEqual({ list: ["b"] });
+  });
+
+  test("a multi-digit canonical index ('10') resolves and removes that element", () => {
+    const list = Array.from({ length: 11 }, (_, i) => `i${i}`); // i0..i10
+    const target = seed("settings.json", JSON.stringify({ list }, null, 2) + "\n");
+    removeConfigKeys(target, ["list.10"], { dataDir });
+    expect(JSON.parse(read(target)).list).toEqual(Array.from({ length: 10 }, (_, i) => `i${i}`)); // i10 gone, rest intact
+  });
+});
+
 test("undo of a removal restores the removed key byte-identically", () => {
   const original = JSON.stringify({ a: 1, gone: { x: 2 } }, null, 2) + "\n";
   const target = seed("settings.json", original);
@@ -496,6 +566,31 @@ test("removing an absent key is a no-op; a double-remove is idempotent (no secon
 
   expect(listUndo(dataDir).length).toBe(1); // only the first, real removal was journaled
   expect(bakCount()).toBe(1);
+});
+
+// ── double-remove idempotence holds for TOML/YAML too, not just JSON — the no-op short-circuit depends on each
+//    serializer's round-trip being byte-stable on the REMOVE path (TOML is Codex's live config.toml). ──
+
+describe("removeConfigKeys double-remove is a true no-op for TOML and YAML (per-serializer round-trip stability)", () => {
+  test.each([
+    ["config.toml", 'keep = 1\n[mcp_servers.agent-os]\nurl = "x"\n', "mcp_servers.agent-os"],
+    ["config.yaml", "keep: 1\nservers:\n  agent-os:\n    url: x\n", "servers.agent-os"],
+  ] as const)("%s: the second remove writes nothing, backs up nothing, journals nothing", (name, seedContent, path) => {
+    const target = seed(name, seedContent);
+
+    const first = removeConfigKeys(target, [path], { dataDir });
+    expect(first.noop).toBe(false);
+    const afterFirst = read(target);
+
+    const second = removeConfigKeys(target, [path], { dataDir });
+    expect(second.noop).toBe(true); // fails loudly if the serializer round-trip is not byte-stable after a remove
+    expect(second.undoId).toBeNull();
+    expect(second.backupPath).toBeNull();
+
+    expect(read(target)).toBe(afterFirst);
+    expect(listUndo(dataDir).length).toBe(1);
+    expect(bakCount()).toBe(1);
+  });
 });
 
 test("removing from a target that doesn't exist is a no-op that creates nothing", () => {
@@ -629,5 +724,38 @@ describe("mergeConfig replaceSubtrees", () => {
     expect(mergeConfig(target, patch, { dataDir, replaceSubtrees: ["mcpServers.agent-os"] }).noop).toBe(true);
     expect(listUndo(dataDir)).toEqual([]);
     expect(bakCount()).toBe(0);
+  });
+
+  test("a callback patch composes with replaceSubtrees — callback sees the engine's own read; owned subtree replaced fresh", () => {
+    const target = seed(
+      "claude.json",
+      JSON.stringify(
+        { mcpServers: { "agent-os": { url: "old", headers: { token: "STALE" } }, other: { url: "keep" } }, list: [1, 2] },
+        null,
+        2,
+      ) + "\n",
+    );
+
+    // A primitive captured AT call time — safe from the in-place subtree strip the engine runs AFTER the callback.
+    let sawStaleTokenInRead = false;
+    const res = mergeConfig(
+      target,
+      (current: unknown) => {
+        const cur = current as { mcpServers?: { "agent-os"?: { headers?: { token?: string } } }; list?: number[] };
+        sawStaleTokenInRead = cur.mcpServers?.["agent-os"]?.headers?.token === "STALE";
+        const list = (cur.list ?? []).slice();
+        list.push(3); // RMW a sibling array from the SAME read the engine merges
+        return { mcpServers: { "agent-os": { url: "new", headersHelper: "cmd" } }, list };
+      },
+      { dataDir, replaceSubtrees: ["mcpServers.agent-os"] },
+    );
+
+    expect(res.noop).toBe(false);
+    expect(sawStaleTokenInRead).toBe(true); // the callback received the engine's own parsed read (stale key present)
+    expect(JSON.parse(read(target))).toEqual({
+      // replaceSubtrees dropped the stale `headers`; the sibling `other` and the RMW `list` all composed correctly.
+      mcpServers: { "agent-os": { url: "new", headersHelper: "cmd" }, other: { url: "keep" } },
+      list: [1, 2, 3],
+    });
   });
 });

@@ -40,7 +40,7 @@ import { join } from "node:path";
 import { parse as parseToml } from "smol-toml";
 import { mergeConfig, removeConfigKeys, undo, type MergeResult } from "../configwrite/index";
 import { codexTokenPath, readCodexToken, resolveCodexToken, resolveDataDir, resolvePort, TOKEN_HEADER } from "../paths";
-import { bunCommand, defaultRepoRoot, existingEntriesWithoutOurs, hooksPatchWithoutOurs, readJson } from "./shared";
+import { bunCommand, defaultRepoRoot, existingEntriesWithoutOurs, readJson, removeHooksIfPresent } from "./shared";
 
 /** The brain's MCP server name in `~/.codex/config.toml` (mirrors the Claude Code `mcpServers.agent-os` key). */
 const SERVER_NAME = "agent-os";
@@ -349,21 +349,15 @@ export function uninstallCodex(opts: { home?: string; dataDir?: string; repoRoot
   }
 
   // ── (b) SessionStart hook → ~/.codex/hooks.json — strip only OUR entry, keep every other hook ──
-  // Only when the file exists: mergeConfig would otherwise CREATE it, and uninstall must never write a
-  // hooks.json that never existed. `hooksPatchWithoutOurs` yields an empty (no-op) patch when nothing is ours.
-  const hooksJson = hooksJsonPath(home);
-  if (existsSync(hooksJson)) {
-    try {
-      const res = mergeConfig(
-        hooksJson,
-        (current: unknown) => hooksPatchWithoutOurs(current, [["SessionStart", bunCommand(repoRoot, "codex-session-start.ts")]]),
-        { dataDir },
-      );
-      if (!res.noop) removed.push(hooksJson);
-    } catch (err) {
-      console.error(`[agent-os] uninstall: could not remove our SessionStart hook from '${hooksJson}':`, err);
-    }
-  }
+  // Shared uninstall-side stripper: exists-guarded (never CREATE a hooks.json by uninstalling), no-op-gated,
+  // per-target try/catch so a diverged/corrupt hooks.json never aborts the AGENTS.md strip or token revocation.
+  removed.push(
+    ...removeHooksIfPresent(
+      hooksJsonPath(home),
+      [["SessionStart", bunCommand(repoRoot, "codex-session-start.ts")]],
+      { dataDir, errLabel: "could not remove our SessionStart hook from" },
+    ),
+  );
 
   // ── (c) Pointer block → ~/.codex/AGENTS.md — structural strip, tolerant of the rest of the file changing ──
   const agentsMd = agentsMdPath(home);

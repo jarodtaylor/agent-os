@@ -460,6 +460,55 @@ describe("installCodex", () => {
     expect(userEntry?.matcher).toBe("startup|resume|clear|compact");
     expect(userEntry?.hooks).toHaveLength(1);
   });
+
+  test("uninstall isolates MULTIPLE failing targets in one call — config.toml + hooks.json both fail, yet AGENTS.md is stripped and codex.token revoked", () => {
+    install();
+    expect(existsSync(codexTokenPath(dataDir))).toBe(true); // minted during install
+
+    // Corrupt BOTH structured targets so their uninstall writes each throw and are caught independently:
+    //   (a) config.toml → removeConfigKeys parses it → invalid TOML throws
+    //   (b) hooks.json  → removeHooksIfPresent's mergeConfig parses it → invalid JSON throws
+    // (A dangling symlink would instead make existsSync false and SKIP hooks.json without exercising its catch,
+    // so corrupt content is used here to force a genuine caught failure on BOTH targets.)
+    writeFileSync(configPath(), "not = [valid toml");
+    writeFileSync(hooksPath(), "{ not json");
+
+    let removed: string[] = [];
+    expect(() => {
+      removed = uninstallCodex({ home, dataDir, repoRoot: REPO });
+    }).not.toThrow();
+
+    // Both failures were isolated — the later steps still ran:
+    expect(existsSync(agentsMdPath())).toBe(false); // (c) AGENTS.md block stripped (install created it fresh → deleted)
+    expect(removed).toContain(agentsMdPath());
+    expect(existsSync(codexTokenPath(dataDir))).toBe(false); // (d) the credential was still revoked
+    // …and the two failed targets are omitted from `removed`.
+    expect(removed).not.toContain(configPath());
+    expect(removed).not.toContain(hooksPath());
+  });
+
+  test("uninstall on a never-installed home returns [], doesn't throw, and creates no files", () => {
+    let removed: string[] = ["sentinel"];
+    expect(() => {
+      removed = uninstallCodex({ home, dataDir, repoRoot: REPO });
+    }).not.toThrow();
+    expect(removed).toEqual([]);
+    expect(existsSync(configPath())).toBe(false); // uninstall must never CREATE a config
+    expect(existsSync(hooksPath())).toBe(false);
+    expect(existsSync(agentsMdPath())).toBe(false);
+  });
+
+  test("double-uninstall is idempotent — the second uninstall returns [] and doesn't throw (DECISIONS #30)", () => {
+    install();
+    const first = uninstallCodex({ home, dataDir, repoRoot: REPO });
+    expect(first.length).toBeGreaterThan(0); // the first uninstall removed real entries
+
+    let second: string[] = ["sentinel"];
+    expect(() => {
+      second = uninstallCodex({ home, dataDir, repoRoot: REPO });
+    }).not.toThrow();
+    expect(second).toEqual([]); // our keys already gone, credential already revoked → every step no-ops
+  });
 });
 
 describe("existingEntriesWithoutOurs (FIX B: nested-hook-level filtering, not whole-entry drop)", () => {

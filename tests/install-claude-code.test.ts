@@ -206,4 +206,81 @@ describe("installClaudeCode", () => {
     expect(entry.headersHelper).toBe(MCP_CMD); // replaced with our current, token-free helper
     expect(entry.url).toBe("http://127.0.0.1:4319/mcp");
   });
+
+  test("uninstall isolates a failing settings.json write — claude.json's agent-os is still removed (per-target try/catch)", () => {
+    install();
+    expect(readJson(claudeJsonPath()).mcpServers["agent-os"]).toBeDefined();
+
+    // Force the settings.json uninstall write to throw: replace the file with a DIRECTORY, so the engine's
+    // readFileSync(target) hits EISDIR. (existsSync is true for a dir, so the exists-guard doesn't skip it.)
+    rmSync(settingsPath());
+    mkdirSync(settingsPath());
+
+    let removed: string[] = [];
+    expect(() => {
+      removed = uninstallClaudeCode({ home, dataDir, repoRoot: REPO });
+    }).not.toThrow();
+
+    // The settings failure was isolated: claude.json's agent-os entry is still removed, and only it is reported.
+    expect(readJson(claudeJsonPath()).mcpServers?.["agent-os"]).toBeUndefined();
+    expect(removed).toContain(claudeJsonPath());
+    expect(removed).not.toContain(settingsPath());
+  });
+
+  test("uninstall does not throw even when BOTH targets fail to write (each isolated, nothing reported removed)", () => {
+    install();
+    // Sabotage both configs into directories so each uninstall write throws (and is caught per-target).
+    rmSync(settingsPath());
+    mkdirSync(settingsPath());
+    rmSync(claudeJsonPath());
+    mkdirSync(claudeJsonPath());
+
+    let removed: string[] = ["sentinel"];
+    expect(() => {
+      removed = uninstallClaudeCode({ home, dataDir, repoRoot: REPO });
+    }).not.toThrow();
+    expect(removed).toEqual([]); // neither target could be processed, but uninstall completed cleanly
+  });
+
+  test("uninstall never fabricates hooks.SessionEnd on a settings.json that lacked it (touches only present events)", () => {
+    // Hand-write settings.json bypassing install(): SessionStart present (holding OUR command, so there's
+    // something to strip), SessionEnd entirely ABSENT. Uninstall must strip our SessionStart entry but NOT
+    // introduce SessionEnd: [].
+    mkdirSync(join(home, ".claude"), { recursive: true });
+    writeFileSync(
+      settingsPath(),
+      JSON.stringify(
+        { hooks: { SessionStart: [{ matcher: "startup|resume|clear", hooks: [{ type: "command", command: START_CMD, timeout: 10 }] }] } },
+        null,
+        2,
+      ) + "\n",
+    );
+
+    uninstallClaudeCode({ home, dataDir, repoRoot: REPO });
+
+    // Our SessionStart entry was stripped (it was the only one → the array is now empty); SessionEnd was never invented.
+    expect(readJson(settingsPath()).hooks).toEqual({ SessionStart: [] });
+  });
+
+  test("uninstall on a never-installed home returns [], doesn't throw, and creates no files", () => {
+    let removed: string[] = ["sentinel"];
+    expect(() => {
+      removed = uninstallClaudeCode({ home, dataDir, repoRoot: REPO });
+    }).not.toThrow();
+    expect(removed).toEqual([]);
+    expect(existsSync(settingsPath())).toBe(false); // uninstall must never CREATE a config
+    expect(existsSync(claudeJsonPath())).toBe(false);
+  });
+
+  test("double-uninstall is idempotent — the second uninstall returns [] and doesn't throw (DECISIONS #30)", () => {
+    install();
+    const first = uninstallClaudeCode({ home, dataDir, repoRoot: REPO });
+    expect(first.length).toBeGreaterThan(0); // the first uninstall removed real entries
+
+    let second: string[] = ["sentinel"];
+    expect(() => {
+      second = uninstallClaudeCode({ home, dataDir, repoRoot: REPO });
+    }).not.toThrow();
+    expect(second).toEqual([]); // our keys already gone → every target no-ops
+  });
 });

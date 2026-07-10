@@ -11,12 +11,12 @@
  * (identical bytes ⇒ the engine no-ops). The MCP registration is an object key (`mcpServers.agent-os`), which
  * `deepMerge` merges safely without clobbering other servers, so it needs no read-modify-write.
  */
-import { existsSync, mkdirSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { mergeConfig, removeConfigKeys, undo, type MergeResult } from "../configwrite/index";
 import { resolveDataDir, resolvePort } from "../paths";
-import { bunCommand, defaultRepoRoot, existingEntriesWithoutOurs, hooksPatchWithoutOurs, readJson } from "./shared";
+import { bunCommand, defaultRepoRoot, existingEntriesWithoutOurs, readJson, removeHooksIfPresent } from "./shared";
 
 /** The brain's MCP server name in `~/.claude.json` (mirrors the Codex `[mcp_servers.agent-os]` plan). */
 const SERVER_NAME = "agent-os";
@@ -156,25 +156,18 @@ export function uninstallClaudeCode(opts: { home?: string; dataDir?: string; rep
   const removed: string[] = [];
 
   // ── Hooks → ~/.claude/settings.json — strip only OUR SessionStart/SessionEnd entries, keep the user's ──
-  // Only when the file exists: mergeConfig would otherwise CREATE it, and uninstall must never write a
-  // settings.json that never existed. `hooksPatchWithoutOurs` yields an empty (no-op) patch when nothing is ours.
-  const settings = settingsPath(home);
-  if (existsSync(settings)) {
-    try {
-      const res = mergeConfig(
-        settings,
-        (current: unknown) =>
-          hooksPatchWithoutOurs(current, [
-            ["SessionStart", bunCommand(repoRoot, "session-start.ts")],
-            ["SessionEnd", bunCommand(repoRoot, "session-end.ts")],
-          ]),
-        { dataDir },
-      );
-      if (!res.noop) removed.push(settings);
-    } catch (err) {
-      console.error(`[agent-os] uninstall: could not remove our hooks from '${settings}':`, err);
-    }
-  }
+  // Shared uninstall-side stripper: exists-guarded (never CREATE a settings.json by uninstalling), no-op-gated,
+  // per-target try/catch so a diverged/corrupt settings.json never aborts the MCP removal below.
+  removed.push(
+    ...removeHooksIfPresent(
+      settingsPath(home),
+      [
+        ["SessionStart", bunCommand(repoRoot, "session-start.ts")],
+        ["SessionEnd", bunCommand(repoRoot, "session-end.ts")],
+      ],
+      { dataDir, errLabel: "could not remove our hooks from" },
+    ),
+  );
 
   // ── MCP server → ~/.claude.json — delete only mcpServers.agent-os, preserving CC's live state ──
   const claudeJson = claudeJsonPath(home);

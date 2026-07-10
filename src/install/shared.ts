@@ -5,6 +5,7 @@
  */
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { mergeConfig } from "../configwrite/index";
 
 /** This repo's root: `src/install/shared.ts` → `../..`. Safe for any `src/install/` caller — `import.meta.dir`
  *  is THIS file's own directory, and `claude-code.ts` / `codex.ts` live in that same directory. */
@@ -74,4 +75,28 @@ export function hooksPatchWithoutOurs(
     if (Array.isArray(hooks[event])) patch[event] = existingEntriesWithoutOurs(config, event, ourCommand);
   }
   return Object.keys(patch).length > 0 ? { hooks: patch } : {};
+}
+
+/**
+ * The uninstall-side hook stripper both installers share: when `targetPath` exists, run a `mergeConfig`
+ * callback that rewrites each named event's array to itself MINUS our own entry (`hooksPatchWithoutOurs`),
+ * against the engine's OWN read. Returns `[targetPath]` when that actually changed the file, or `[]` on a
+ * no-op / an absent file (never CREATE a hooks file by uninstalling — hence the `existsSync` guard). A
+ * diverged/corrupt/symlinked target is logged with `errLabel` and swallowed, returning `[]`, so ONE target's
+ * failure never aborts an uninstall's other removals (per-target isolation). `events` is the same
+ * `[event, ourCommand]` list `hooksPatchWithoutOurs` takes.
+ */
+export function removeHooksIfPresent(
+  targetPath: string,
+  events: ReadonlyArray<readonly [event: string, ourCommand: string]>,
+  opts: { dataDir: string; errLabel: string },
+): string[] {
+  if (!existsSync(targetPath)) return [];
+  try {
+    const res = mergeConfig(targetPath, (current: unknown) => hooksPatchWithoutOurs(current, events), { dataDir: opts.dataDir });
+    return res.noop ? [] : [targetPath];
+  } catch (err) {
+    console.error(`[agent-os] uninstall: ${opts.errLabel} '${targetPath}':`, err);
+    return [];
+  }
 }

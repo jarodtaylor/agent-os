@@ -113,20 +113,28 @@ export function mergeConfig(targetPath: string, patch: unknown, opts: MergeOptio
   if (!isCallback && patch !== MERGE_NOOP && !isPlainObject(patch)) {
     throw new Error("configwrite: patch must be a plain object (a partial config to merge)");
   }
-  return publish(targetPath, opts, (base) => {
-    const resolved = isCallback ? (patch as (current: unknown) => unknown)(base) : patch;
-    // Abstain: a callback (or static patch) returning MERGE_NOOP forces publish's zero-effect short-circuit.
-    if (resolved === MERGE_NOOP) return MERGE_NOOP;
-    if (!isPlainObject(resolved)) {
-      throw new Error("configwrite: patch must be a plain object (a partial config to merge)");
-    }
-    // replaceSubtrees: strip each owned path from the base so the merge re-adds it FRESH — a wholesale replace
-    // that drops any stale key on a pre-existing entry the caller no longer writes (see MergeOptions). The
-    // strip's `deleted` flag is irrelevant here — in this deepMerge branch a no-op is the byte-compare in
-    // `publish`, never MERGE_NOOP (that abstain path returned earlier, before this replaceSubtrees strip).
-    const stripped = opts.replaceSubtrees?.length ? removeKeys(base, opts.replaceSubtrees).value : base;
-    return deepMerge(stripped, resolved);
-  });
+  return publish(
+    targetPath,
+    opts,
+    (base) => {
+      const resolved = isCallback ? (patch as (current: unknown) => unknown)(base) : patch;
+      // Abstain: a callback (or static patch) returning MERGE_NOOP forces publish's zero-effect short-circuit.
+      if (resolved === MERGE_NOOP) return MERGE_NOOP;
+      if (!isPlainObject(resolved)) {
+        throw new Error("configwrite: patch must be a plain object (a partial config to merge)");
+      }
+      // replaceSubtrees: strip each owned path from the base so the merge re-adds it FRESH — a wholesale replace
+      // that drops any stale key on a pre-existing entry the caller no longer writes (see MergeOptions). The
+      // strip's `deleted` flag is irrelevant here — in this deepMerge branch a no-op is the byte-compare in
+      // `publish`, never MERGE_NOOP (that abstain path returned earlier, before this replaceSubtrees strip).
+      const stripped = opts.replaceSubtrees?.length ? removeKeys(base, opts.replaceSubtrees).value : base;
+      return deepMerge(stripped, resolved);
+    },
+    // Alias guard fires ONLY when replaceSubtrees strips subtrees — THAT branch runs `removeKeys` on `base` in
+    // place, so on aliased YAML it carries the same corruption risk as removeConfigKeys. A plain deepMerge builds
+    // NEW trees and never mutates `base`, so an aliased document merges fine and stays unguarded.
+    { guardsRemoval: !!opts.replaceSubtrees?.length },
+  );
 }
 
 /**
@@ -171,7 +179,7 @@ export function removeConfigKeys(
       // the normal serialize + byte-compare path (which then writes, since a resolved delete always changes the bytes).
       return deleted ? value : MERGE_NOOP;
     },
-    { createIfAbsent: false },
+    { createIfAbsent: false, guardsRemoval: true },
   );
 }
 
@@ -185,12 +193,16 @@ export function removeConfigKeys(
  * `createIfAbsent` (default true, for merge) writes the transform's result as a NEW file when the target is
  * absent; `false` (for removal) makes an absent target a no-op — there is nothing to remove, and a removal must
  * never CREATE a file.
+ *
+ * `guardsRemoval` (default false) marks a transform with REMOVAL semantics — one that runs `removeKeys` on the
+ * parsed base IN PLACE (always for removeConfigKeys; for mergeConfig only when `replaceSubtrees` strips subtrees).
+ * On a YAML target it arms the anchor/alias shared-identity guard below; every other caller leaves it false.
  */
 function publish(
   targetPath: string,
   opts: MergeOptions,
   transform: (base: unknown) => unknown,
-  { createIfAbsent = true }: { createIfAbsent?: boolean } = {},
+  { createIfAbsent = true, guardsRemoval = false }: { createIfAbsent?: boolean; guardsRemoval?: boolean } = {},
 ): MergeResult {
   const format = detectFormat(targetPath, opts.format);
   const dataDir = resolveDataDir(opts.dataDir);
@@ -210,6 +222,20 @@ function publish(
 
   // Parse BEFORE anything is written. A corrupt existing config aborts here, leaving it untouched.
   const base = existed ? parseConfig(format, currentText!, targetPath) : undefined;
+
+  // Anchor/alias shared-identity guard — fail CLOSED before the transform runs, so nothing is ever mutated. A
+  // YAML `&anchor`/`*alias` makes the parser hand back the SAME JS object under two paths (`a: &x {…}` + `b: *x`
+  // → a and b are ONE object), and a removal transform mutates the parsed tree IN PLACE (delete a key / splice an
+  // array element), so an in-place delete under `a` would silently corrupt the untargeted `b` on serialize. Only
+  // YAML can produce these shared identities — JSON.parse and smol-toml build a fresh object per node and
+  // structurally never alias — so this walk runs for YAML removals ONLY (zero cost on JSON/TOML and plain merges).
+  // Copy-on-write removal that would make this safe is deferred (issue #32); until then we refuse over corrupt.
+  if (guardsRemoval && format === "yaml" && hasSharedIdentity(base)) {
+    throw new Error(
+      `configwrite: refusing targeted removal on '${targetPath}' — the YAML document uses anchors/aliases (shared nodes), which in-place removal would corrupt; tracked as issue #32`,
+    );
+  }
+
   const next = transform(base);
   // A transform may force a TRUE no-op by returning MERGE_NOOP — nothing resolved to change — so we must NOT
   // serialize (and, on an absent target, must NOT create it: this short-circuit runs BEFORE the serialize and
@@ -415,6 +441,36 @@ function arrayIndex(container: unknown[], segment: string): number | undefined {
   if (!CANONICAL_ARRAY_INDEX.test(segment)) return undefined;
   const idx = Number(segment);
   return idx < container.length ? idx : undefined;
+}
+
+/**
+ * Does `root` hold a container reachable from 2+ parent slots — a YAML anchor/alias resolved to a SHARED JS
+ * identity (`a: &x {…}` + `b: *x` → a and b are ONE object), or an alias cycle? `publish` calls this to arm the
+ * fail-closed removal guard on YAML: `removeKeys` mutates the parsed tree IN PLACE, so a delete/splice under one
+ * path to a shared node silently corrupts every OTHER path to it.
+ *
+ * Walks exactly the containers `removeKeys` can descend into and mutate — plain objects and arrays (a `Date` or
+ * scalar leaf is opaque, never mutated, so a shared one is harmless and skipped, mirroring `stepInto`) — with ONE
+ * `seen` set: the first time a container is popped it is recorded and its children pushed; encountering it AGAIN
+ * means a second parent slot reached it (shared identity) OR an alias cycle led back to it — either way, return
+ * true. Never descending into an already-seen node is also what makes the walk TERMINATE on a cyclic document
+ * (`x.self: *x`) instead of looping forever — seeing the repeat IS the signal, so it is reported, not followed.
+ */
+function hasSharedIdentity(root: unknown): boolean {
+  const seen = new Set<object>();
+  const stack: unknown[] = [root];
+  while (stack.length > 0) {
+    const node = stack.pop();
+    if (!Array.isArray(node) && !isPlainObject(node)) continue; // scalar / Date / class instance — an opaque leaf
+    if (seen.has(node)) return true; // reached via a second parent slot (shared alias) or closed an alias cycle
+    seen.add(node);
+    if (Array.isArray(node)) {
+      for (const child of node) stack.push(child);
+    } else {
+      for (const key of Object.keys(node)) stack.push(node[key]);
+    }
+  }
+  return false;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

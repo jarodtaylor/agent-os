@@ -1014,3 +1014,85 @@ test("a post-commit journal failure throws AppliedButUnjournaledError with the w
   // The backup is KEPT (not rolled back), so the applied write stays recoverable.
   expect(existsSync(err.backupPath!)).toBe(true);
 });
+
+// ══════════════════════════════════════════════════════════════════════════════════
+// YAML anchor/alias shared-identity guard (adversarial: in-place removal corrupts untargeted paths). A YAML
+// `&anchor`/`*alias` makes the parser hand back the SAME JS object under two paths (`a: &x {…}` + `b: *x` → a
+// and b are ONE object). removeKeys mutates the parsed tree IN PLACE, so deleting `a.owned` (or splicing an
+// aliased array) would ALSO strip `b`'s copy on serialize — untargeted data silently lost. Copy-on-write that
+// would make this safe is deferred (issue #32); until then removal semantics FAIL CLOSED on an aliased document.
+// ══════════════════════════════════════════════════════════════════════════════════
+
+describe("removeConfigKeys refuses removal on YAML with anchors/aliases (shared identity would corrupt untargeted paths)", () => {
+  test("object alias: removing a key under an anchored+aliased node THROWS before any write", () => {
+    // `a` and `b` resolve to the SAME object. Deleting `a.owned` in place would strip `b.owned` too, so refuse.
+    const original = "a: &x {owned: 1, keep: 2}\nb: *x\n";
+    const target = seed("config.yaml", original);
+
+    expect(() => removeConfigKeys(target, ["a.owned"], { dataDir })).toThrow(/anchors\/aliases/);
+    expect(read(target)).toBe(original); // untouched — refused right after parse, before backup/write/journal
+    expect(bakCount()).toBe(0);
+    expect(listUndo(dataDir)).toEqual([]);
+  });
+
+  test("array alias: removing an element from an anchored+aliased array THROWS before any write", () => {
+    // The array is shared between `a` and `b`; an in-place splice under `a` would drop `b`'s element too.
+    const original = "a: &x [1, 2, 3]\nb: *x\n";
+    const target = seed("config.yaml", original);
+
+    expect(() => removeConfigKeys(target, ["a.0"], { dataDir })).toThrow(/anchors\/aliases/);
+    expect(read(target)).toBe(original);
+    expect(bakCount()).toBe(0);
+    expect(listUndo(dataDir)).toEqual([]);
+  });
+
+  test("a self-referential (cyclic) alias throws the refusal promptly instead of hanging the detector", () => {
+    // `x.self` points back to `x`. The seen-set walk must not recurse into an already-seen node — seeing it
+    // again IS the shared-identity signal — so the detector terminates and throws rather than looping forever.
+    const original = "x: &a\n  self: *a\n";
+    const target = seed("config.yaml", original);
+
+    expect(() => removeConfigKeys(target, ["x.self"], { dataDir })).toThrow(/anchors\/aliases/);
+    expect(read(target)).toBe(original);
+    expect(bakCount()).toBe(0);
+    expect(listUndo(dataDir)).toEqual([]);
+  });
+
+  test("alias-FREE YAML removal is unaffected — the guard never false-positives on an ordinary document", () => {
+    // No anchors → no shared identity → the guard is a no-op and removal proceeds exactly as before.
+    const target = seed("config.yaml", "keep: 1\nservers:\n  agent-os:\n    url: x\n  other:\n    url: y\n");
+    const res = removeConfigKeys(target, ["servers.agent-os"], { dataDir });
+    expect(res.noop).toBe(false);
+    expect(parseYaml(read(target))).toEqual({ keep: 1, servers: { other: { url: "y" } } });
+  });
+});
+
+describe("mergeConfig replaceSubtrees is guarded on aliased YAML, but a plain merge is not (replaceSubtrees runs removeKeys; deepMerge does not)", () => {
+  test("replaceSubtrees on aliased YAML THROWS (its removeKeys strip mutates the shared tree in place)", () => {
+    // replaceSubtrees strips `a.owned` from the shared node before re-adding it — the same in-place delete that
+    // corrupts `b`. Guarded identically to removeConfigKeys.
+    const original = "a: &x {owned: 1, keep: 2}\nb: *x\n";
+    const target = seed("config.yaml", original);
+
+    expect(() => mergeConfig(target, { a: { owned: 9 } }, { dataDir, replaceSubtrees: ["a.owned"] })).toThrow(
+      /anchors\/aliases/,
+    );
+    expect(read(target)).toBe(original);
+    expect(bakCount()).toBe(0);
+    expect(listUndo(dataDir)).toEqual([]);
+  });
+
+  test("a plain merge (NO replaceSubtrees) on the SAME aliased file still writes — deepMerge builds new trees, never mutating base in place", () => {
+    const original = "a: &x {owned: 1, keep: 2}\nb: *x\n";
+    const target = seed("config.yaml", original);
+
+    const res = mergeConfig(target, { added: 3 }, { dataDir }); // legitimate write, not a removal → unguarded
+    expect(res.noop).toBe(false);
+
+    const parsed = parseYaml(read(target)) as { a: unknown; b: unknown; added: unknown };
+    expect(parsed.added).toBe(3);
+    // The aliased data survives intact on BOTH paths — the plain merge neither dropped nor corrupted it.
+    expect(parsed.a).toEqual({ owned: 1, keep: 2 });
+    expect(parsed.b).toEqual({ owned: 1, keep: 2 });
+  });
+});

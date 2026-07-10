@@ -55,6 +55,14 @@
 10. **L3 doubles as OS substrate (Jarod, 2026-07-01).** The raw vector archive isn't only memory —
     full session logs in Pinecone (or another vector DB) become fuel for later Agent OS
     observability, planning, and eval features. Capture once, exploit many ways.
+11. **AGENT-FIRST, human-second (Jarod, 2026-07-09, decision #35).** The brain/wiki is **not for
+    human use** — its primary readers and writers are agents; Jarod consumes *answers and
+    resurfacing*, not the structure. Do NOT import human "second brain" taxonomies (PARA-style
+    folders-for-browsing): that conflation is a named past mistake. L2's organization optimizes
+    for agent retrieval/curation (atomic notes, typed links, machine navigability); the human
+    surface is ask/query, never folder archaeology. Write policy decided with it: agent-written
+    by default + provenance + rollback + precedence rule; human review = a flagged-entries
+    *lens* in the UI later, never an approval *gate*.
 
 ## Open decisions to resolve (when we go deep)
 

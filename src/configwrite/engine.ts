@@ -84,11 +84,22 @@ export function mergeConfig(targetPath: string, patch: unknown, opts: MergeOptio
       throw new Error("configwrite: patch must be a plain object (a partial config to merge)");
     }
     // replaceSubtrees: strip each owned path from the base so the merge re-adds it FRESH — a wholesale replace
-    // that drops any stale key on a pre-existing entry the caller no longer writes (see MergeOptions).
-    const stripped = opts.replaceSubtrees?.length ? removeKeys(base, opts.replaceSubtrees) : base;
+    // that drops any stale key on a pre-existing entry the caller no longer writes (see MergeOptions). The
+    // strip's `deleted` flag is irrelevant here — merge's no-op is the byte-compare in `publish`, never NOOP.
+    const stripped = opts.replaceSubtrees?.length ? removeKeys(base, opts.replaceSubtrees).value : base;
     return deepMerge(stripped, resolved);
   });
 }
+
+/**
+ * Sentinel a `publish` transform returns to force a TRUE no-op: nothing resolved to change, so publish skips
+ * serialize / backup / write entirely. The removal path returns it when NO key actually matched — without it,
+ * re-serializing the (unchanged) parsed tree would rewrite a foreign-formatted file (4-space JSON, comment-
+ * bearing TOML that `smol-toml` drops on reserialize) to our canonical layout for a delete that removed
+ * nothing, creating backup/journal noise and a false `removed` report. A unique symbol so it can never collide
+ * with a real config value. Merge never returns it — merge's no-op is the byte-compare inside `publish`.
+ */
+const NOOP = Symbol("configwrite.transform-noop");
 
 /**
  * Remove each dotted key path from the config at `targetPath` — the reverse of `mergeConfig`, on the SAME
@@ -106,7 +117,18 @@ export function removeConfigKeys(
   keyPaths: string[],
   opts: Omit<MergeOptions, "replaceSubtrees"> = {},
 ): MergeResult {
-  return publish(targetPath, opts, (base) => removeKeys(base, keyPaths), { createIfAbsent: false });
+  return publish(
+    targetPath,
+    opts,
+    (base) => {
+      const { value, deleted } = removeKeys(base, keyPaths);
+      // Nothing resolved for deletion ⇒ force a true no-op (NOOP), so an absent-key removal never re-serializes
+      // and thus never reformats a foreign-formatted live config. A real deletion falls through to the normal
+      // serialize + byte-compare path (which then writes, since a resolved delete always changes the bytes).
+      return deleted ? value : NOOP;
+    },
+    { createIfAbsent: false },
+  );
 }
 
 /**
@@ -148,7 +170,15 @@ function publish(
 
   // Parse BEFORE anything is written. A corrupt existing config aborts here, leaving it untouched.
   const base = existed ? parseConfig(format, currentText!, targetPath) : undefined;
-  const nextText = serializeConfig(format, transform(base));
+  const next = transform(base);
+  // A transform may force a TRUE no-op by returning NOOP — nothing resolved to change — so we must NOT
+  // serialize. The removal path uses this: re-serializing an unchanged tree would rewrite a foreign-formatted
+  // file to our canonical layout for a delete that removed nothing. (Merge never returns NOOP; its
+  // formatting-claim no-op is the byte-compare below.)
+  if (next === NOOP) {
+    return { targetPath, noop: true, created: false, undoId: null, backupPath: null };
+  }
+  const nextText = serializeConfig(format, next);
 
   // No-op short-circuit: if the computed bytes already match disk, do nothing — no backup, no write, no
   // journal entry. This is what makes the engine idempotent in PRACTICE: an installer re-run (every
@@ -257,7 +287,10 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
 }
 
 /**
- * Delete each dotted `keyPath` from `base` in place, returning it. Objects delete the key; arrays splice a
+ * Delete each dotted `keyPath` from `base` in place, returning `{ value, deleted }`: `value` is the (mutated)
+ * `base`, and `deleted` reports whether ANY path actually resolved to a real target. The removal caller maps a
+ * `deleted:false` into a TRUE no-op (skipping serialize/write), so an absent-key removal never reformats a
+ * foreign-formatted live config by re-serializing an unchanged tree. Objects delete the key; arrays splice a
  * numeric index (so `hooks.SessionStart.0` removes the first entry). A path that doesn't resolve — a missing
  * segment or an out-of-range index — is skipped, which is exactly what makes a double-remove an idempotent
  * no-op. Prototype-pollution-safe: a `__proto__`/`constructor`/`prototype` segment is refused, so it never
@@ -274,7 +307,7 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
  * so pass 2's mutation still lands (splicing an array never invalidates a reference already taken to one of
  * its elements). In short: the index in a path refers to the array as it was when the call began.
  */
-function removeKeys(base: unknown, keyPaths: string[]): unknown {
+function removeKeys(base: unknown, keyPaths: string[]): { value: unknown; deleted: boolean } {
   const objectDeletes: Array<{ container: Record<string, unknown>; key: string }> = [];
   // Array removals grouped by container identity; the per-container Set dedupes two paths naming the same
   // element (so one call removes it once) and lets pass 2 splice that container's indices highest-first.
@@ -307,7 +340,10 @@ function removeKeys(base: unknown, keyPaths: string[]): unknown {
   for (const [arr, indices] of arraySplices) {
     for (const idx of [...indices].sort((a, b) => b - a)) arr.splice(idx, 1);
   }
-  return base;
+  // `deleted` iff pass 1 recorded at least one target (an object key, or a resolved in-range array index —
+  // each `arraySplices` entry is a non-empty Set by construction). The removal caller turns `false` into a
+  // true no-op so an absent-key remove never re-serializes (and thus never reformats) a foreign-formatted file.
+  return { value: base, deleted: objectDeletes.length > 0 || arraySplices.size > 0 };
 }
 
 /** One navigation step for `removeKeys`: index into an array by numeric segment, or read an object key.

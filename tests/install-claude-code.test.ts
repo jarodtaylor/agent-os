@@ -296,6 +296,29 @@ describe("installClaudeCode", () => {
     expect(failed).toEqual([]); // a skip is a clean no-op, not a failure
   });
 
+  test("uninstall surfaces a DANGLING settings.json symlink as a failure instead of silently skipping it (never throws; claude.json still cleaned)", () => {
+    install();
+    // Replace settings.json with a symlink to a now-missing target — a dangling link. existsSync FOLLOWS it and
+    // reports false, so the old presence gate treated it as clean absence and left the live symlinked hook
+    // registration behind (restoring the target would reactivate it). The lstat gate now surfaces it in `failed`,
+    // while the MCP removal on claude.json still runs.
+    rmSync(settingsPath());
+    symlinkSync(join(root, "gone-settings-target.json"), settingsPath());
+    expect(existsSync(settingsPath())).toBe(false); // dangling: existsSync follows to the missing target
+
+    let outcome: UninstallOutcome = { removed: [], failed: [] };
+    expect(() => {
+      outcome = uninstallClaudeCode({ home, dataDir, repoRoot: REPO });
+    }).not.toThrow();
+
+    // The dangling settings.json symlink is NAMED in `failed` with a non-empty error — not swallowed as a no-op…
+    const hooksFailure = outcome.failed.find((f) => f.path === settingsPath());
+    expect(hooksFailure).toBeDefined();
+    expect(hooksFailure!.error.length).toBeGreaterThan(0);
+    // …while the OTHER target was still processed: our agent-os MCP entry is removed from claude.json.
+    expect(outcome.removed).toContain(claudeJsonPath());
+  });
+
   test("uninstall on a never-installed home returns [], doesn't throw, and creates no files", () => {
     let outcome: UninstallOutcome = { removed: ["sentinel"], failed: [{ path: "sentinel", error: "sentinel" }] };
     expect(() => {

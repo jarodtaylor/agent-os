@@ -3,7 +3,7 @@
  * read-modify-write config upserts (backup-first, atomic, journaled undo lives in `../configwrite/index`;
  * this module only holds the small pre-merge shaping both installers do the same way).
  */
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { mergeConfig } from "../configwrite/index";
 
@@ -108,6 +108,29 @@ export function errorText(err: unknown): string {
 }
 
 /**
+ * Presence gate for the uninstall hook stripper that does NOT mistake a dangling symlink for absence. Returns
+ * false only for a genuine no-entry (`lstat` throws ENOENT) — the one clean "nothing of ours here" skip. Returns
+ * true for an entry that resolves. THROWS for a dangling symlink (the entry exists per `lstat`, but points at a
+ * missing target so it doesn't resolve) or any non-ENOENT lookup error, so the caller records it in `failed`
+ * instead of swallowing it as a no-op. `existsSync` alone can't tell these apart: it FOLLOWS the broken link and
+ * returns false, indistinguishable from true absence, which would leave the still-live symlinked registration
+ * behind (restoring its target reactivates the hook).
+ */
+function targetExistsResolving(path: string): boolean {
+  let link;
+  try {
+    link = lstatSync(path);
+  } catch (err) {
+    if ((err as { code?: string }).code === "ENOENT") return false; // genuinely absent → the one clean skip
+    throw err; // EACCES on a parent dir, a bad path component, etc. → a real failure, not "nothing of ours here"
+  }
+  if (link.isSymbolicLink() && !existsSync(path)) {
+    throw new Error(`'${path}' is a dangling symlink (its target is missing); refusing to treat it as clean absence`);
+  }
+  return true;
+}
+
+/**
  * The uninstall-side hook stripper both installers share: when `targetPath` exists AND holds one of our hooks,
  * run a `mergeConfig` callback that rewrites each named event's array to itself MINUS our own entry
  * (`hooksPatchWithoutOurs`), against the engine's OWN read. Reports an `UninstallOutcome`: `removed` names
@@ -129,8 +152,11 @@ export function removeHooksIfPresent(
   events: ReadonlyArray<readonly [event: string, ourCommand: string]>,
   opts: { dataDir: string; errLabel: string },
 ): UninstallOutcome {
-  if (!existsSync(targetPath)) return { removed: [], failed: [] };
   try {
+    // Presence gate on lstat semantics, NOT existsSync (see `targetExistsResolving`): a genuine no-entry is the
+    // only clean skip, while a dangling hook symlink — which existsSync would report as absent, silently leaving
+    // its live registration behind — throws here and surfaces in `failed` below, like any other lookup error.
+    if (!targetExistsResolving(targetPath)) return { removed: [], failed: [] };
     // Skip the write ENTIRELY when none of our hooks are on disk (empty patch) — see the header on why an
     // empty-patch mergeConfig would still reformat a foreign file. `readJson` throwing on a corrupt/unreadable
     // target lands in the catch below, exactly as the mergeConfig parse used to.

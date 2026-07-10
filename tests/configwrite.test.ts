@@ -593,6 +593,60 @@ describe("removeConfigKeys double-remove is a true no-op for TOML and YAML (per-
   });
 });
 
+// ── absent-key removal is a TRUE no-op even on a FOREIGN-formatted file: removeKeys reports an actually-deleted
+//    flag and publish short-circuits BEFORE serialize, so a delete that matches nothing never re-serializes (and
+//    thus never reformats / strips comments from) a live config an owner also hand-edits (adversarial U14 gate). ──
+
+describe("removeConfigKeys leaves a foreign-formatted file byte-for-byte unchanged when no target key resolves", () => {
+  test("JSON: a 4-space-indent file with only foreign keys is NOT reformatted by removing an absent key", () => {
+    // A settings.json a dotfile tool wrote 4-space (NOT our 2-space serializer output), holding none of ours.
+    // Re-serializing it for a delete that removes nothing would rewrite it to canonical layout, spawn a backup
+    // + journal entry, and falsely report it in `removed`. The no-op short-circuit prevents all of that.
+    const foreign = JSON.stringify({ foreign: { a: 1 }, other: 2 }, null, 4) + "\n";
+    const target = seed("settings.json", foreign);
+
+    const res = removeConfigKeys(target, ["mcpServers.agent-os"], { dataDir });
+
+    expect(res.noop).toBe(true);
+    expect(res.undoId).toBeNull();
+    expect(res.backupPath).toBeNull();
+    expect(read(target)).toBe(foreign); // byte-for-byte unchanged — never reformatted
+    expect(bakCount()).toBe(0); // no backup
+    expect(listUndo(dataDir)).toEqual([]); // no journal entry
+  });
+
+  test("TOML: a commented, hand-formatted file with no agent-os key is left byte-for-byte intact", () => {
+    // smol-toml DROPS comments on reserialize, so re-serializing for an absent-key delete would strip this
+    // owner's comments + inline notes — the exact damage the no-op short-circuit prevents on Codex's config.toml.
+    const foreign = '# my Codex config\nmodel = "gpt-5.5"  # inline note\n\n[tui]\ntheme = "dark"\n';
+    const target = seed("config.toml", foreign);
+
+    const res = removeConfigKeys(target, ["mcp_servers.agent-os"], { dataDir });
+
+    expect(res.noop).toBe(true);
+    expect(res.undoId).toBeNull();
+    expect(res.backupPath).toBeNull();
+    expect(read(target)).toBe(foreign); // comments + hand formatting survive untouched
+    expect(bakCount()).toBe(0);
+    expect(listUndo(dataDir)).toEqual([]);
+  });
+
+  test("a PRESENT key IS still removed from a commented TOML (the delete path is unchanged for a real match)", () => {
+    // The short-circuit fires ONLY when nothing resolves. A key that DOES resolve is removed as before — comments
+    // are lost to the inherent parse-reserialize (the byte-exact backup makes it reversible), so we assert only
+    // the removal + noop:false here, NOT comment survival.
+    const target = seed(
+      "config.toml",
+      '# my Codex config\nkeep = 1\n\n[mcp_servers.agent-os]\nurl = "x"\n\n[mcp_servers.other]\nurl = "y"\n',
+    );
+
+    const res = removeConfigKeys(target, ["mcp_servers.agent-os"], { dataDir });
+
+    expect(res.noop).toBe(false); // a real match → a real write
+    expect(parseToml(read(target))).toEqual({ keep: 1, mcp_servers: { other: { url: "y" } } }); // our table gone, sibling kept
+  });
+});
+
 test("removing from a target that doesn't exist is a no-op that creates nothing", () => {
   const target = join(configsDir, "absent.json");
   expect(existsSync(target)).toBe(false);

@@ -504,8 +504,8 @@ describe("installCodex", () => {
     // Corrupt BOTH structured targets so their uninstall writes each throw and are caught independently:
     //   (a) config.toml → removeConfigKeys parses it → invalid TOML throws
     //   (b) hooks.json  → removeHooksIfPresent's mergeConfig parses it → invalid JSON throws
-    // (A dangling symlink would instead make existsSync false and SKIP hooks.json without exercising its catch,
-    // so corrupt content is used here to force a genuine caught failure on BOTH targets.)
+    // (Corrupt content forces a genuine caught failure on BOTH targets; the dangling-symlink case is now a
+    // reported failure too — see the dedicated dangling-symlink test below.)
     writeFileSync(configPath(), "not = [valid toml");
     writeFileSync(hooksPath(), "{ not json");
 
@@ -570,6 +570,46 @@ describe("installCodex", () => {
     expect(readFileSync(hooksPath(), "utf8")).toBe(foreign); // byte-for-byte unchanged — never reformatted
     expect(removed).toEqual([]); // nothing of ours anywhere (config.toml + AGENTS.md absent too) → nothing changed
     expect(failed).toEqual([]); // a skip is a clean no-op, not a failure
+  });
+
+  test("uninstall leaves a foreign-formatted commented config.toml BYTE-for-byte unchanged when it holds none of ours (no reformat)", () => {
+    // The config.toml analogue of the hooks.json no-reformat guarantee above, on the removeConfigKeys path. A
+    // config.toml Codex / a dotfile tool hand-wrote with comments and NONE of our mcp_servers.agent-os: uninstall's
+    // targeted removeConfigKeys must NOT re-serialize it (smol-toml drops comments) for a delete that removes
+    // nothing — else it reformats a live config, strips the owner's comments, and falsely reports it in `removed`.
+    mkdirSync(codexDir(), { recursive: true });
+    const foreign = '# my Codex config\nmodel = "gpt-5.5"  # inline note\n\n[tui]\ntheme = "dark"\n';
+    writeFileSync(configPath(), foreign);
+
+    const { removed, failed } = uninstallCodex({ home, dataDir, repoRoot: REPO });
+
+    expect(readFileSync(configPath(), "utf8")).toBe(foreign); // comments + hand formatting untouched
+    expect(removed).toEqual([]); // nothing of ours anywhere → nothing changed
+    expect(failed).toEqual([]); // a skip is a clean no-op, not a failure
+  });
+
+  test("uninstall surfaces a DANGLING hooks.json symlink as a failure instead of silently skipping it (never throws; other targets still cleaned)", () => {
+    install();
+    // Replace hooks.json with a symlink to a now-missing target — a dangling link. existsSync FOLLOWS it and
+    // reports false, so the old presence gate treated it as clean absence and left the live symlinked hook
+    // registration behind (restoring the target would reactivate it). The lstat gate now surfaces it in `failed`,
+    // while the rest of the uninstall still runs.
+    rmSync(hooksPath());
+    symlinkSync(join(root, "gone-hooks-target.json"), hooksPath());
+    expect(existsSync(hooksPath())).toBe(false); // dangling: existsSync follows to the missing target
+
+    let outcome: UninstallOutcome = { removed: [], failed: [] };
+    expect(() => {
+      outcome = uninstallCodex({ home, dataDir, repoRoot: REPO });
+    }).not.toThrow();
+
+    // The dangling hooks symlink is NAMED in `failed` with a non-empty error — not swallowed as a clean no-op…
+    const hooksFailure = outcome.failed.find((f) => f.path === hooksPath());
+    expect(hooksFailure).toBeDefined();
+    expect(hooksFailure!.error.length).toBeGreaterThan(0);
+    // …while the OTHER targets were still processed: our MCP entry removed and the credential revoked.
+    expect(outcome.removed).toContain(configPath());
+    expect(existsSync(codexTokenPath(dataDir))).toBe(false);
   });
 });
 

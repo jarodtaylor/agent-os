@@ -3,8 +3,10 @@
  * parity action (U10) is built on. R11 / KTD6: no config write anywhere in Agent OS bypasses this,
  * because Jarod's *live* `~/.claude`, `~/.claude.json`, and `~/.codex` configs are the write targets.
  *
- * The discipline, in order:
- *   parse (fail CLOSED on a corrupt config) → deep-merge (don't clobber unrelated keys) → serialize
+ * Two public primitives share one discipline: `mergeConfig` (add/replace keys — merge-don't-clobber) and
+ * `removeConfigKeys` (delete keys/array-elements — targeted removal, the correct reversal for a config a
+ * foreign process also owns and rewrites). Both run through the shared `publish` core, in order:
+ *   parse (fail CLOSED on a corrupt config) → transform (merge or remove) → serialize
  *   → short-circuit if the result already matches disk → byte-exact backup → atomic temp-write+rename
  *   → journal the undo entry.
  *
@@ -35,6 +37,11 @@ export interface MergeOptions {
    *  restores the file's pre-install mode. Omitted ⇒ preserve the existing file's mode — the default, correct
    *  for the non-secret configs every other caller writes (CC's settings.json / ~/.claude.json). */
   targetMode?: number;
+  /** Dotted paths (same vocabulary as `removeConfigKeys`) whose subtrees are REPLACED wholesale instead of
+   *  deep-merged: each is stripped from the base before the patch re-adds it, so a stale key on a pre-existing
+   *  entry — an embedded-token `headers`/`http_headers` a caller no longer writes — cannot survive the merge.
+   *  Still idempotent: a re-merge that reproduces the same bytes no-ops like any other write. */
+  replaceSubtrees?: string[];
 }
 
 export interface MergeResult {
@@ -51,16 +58,69 @@ export interface MergeResult {
 
 /**
  * Deep-merge `patch` into a config at `targetPath`, backing it up first and publishing atomically.
- * The one entry point callers use; see the module header for the full safety contract.
+ * The primary entry point callers use; see the module header for the full safety contract.
+ *
+ * `patch` is either a partial config OBJECT (deep-merged into the current config) or a CALLBACK
+ * `(current) => patch` that receives the engine's OWN parsed read and returns that partial config. The
+ * callback form closes an installer's non-atomic double-read: a read-modify-write — e.g. appending one hook to
+ * an already-populated array, which deepMerge REPLACES, so the caller must hand over the whole desired array —
+ * builds its result from the SAME read the engine merges, instead of from a separate pre-read a concurrent
+ * foreign write could land after and be reverted. `current` is `undefined` when the target does not exist yet
+ * (mirrors the shared installers' `readJson`).
  */
 export function mergeConfig(targetPath: string, patch: unknown, opts: MergeOptions = {}): MergeResult {
-  // Fail closed: a patch is a partial config, hence always a plain object (JSON object / TOML table /
-  // YAML map). A null/undefined/array/scalar patch would hit deepMerge's non-object fallback and REPLACE
-  // the whole config wholesale — a silent clobber that violates merge-don't-clobber — so reject it here,
-  // before any file work, rather than let it through.
-  if (!isPlainObject(patch)) {
+  // Fail closed on a STATIC non-object patch before any file work (the CALLBACK form is resolved against the
+  // parsed base inside `publish`, and its RETURN is validated there the same way). A patch is a partial config,
+  // hence always a plain object (JSON object / TOML table / YAML map). A null/undefined/array/scalar patch would
+  // hit deepMerge's non-object fallback and REPLACE the whole config wholesale — a silent clobber that violates
+  // merge-don't-clobber — so reject it here rather than let it through.
+  const isCallback = typeof patch === "function";
+  if (!isCallback && !isPlainObject(patch)) {
     throw new Error("configwrite: patch must be a plain object (a partial config to merge)");
   }
+  return publish(targetPath, opts, (base) => {
+    const resolved = isCallback ? (patch as (current: unknown) => unknown)(base) : patch;
+    if (!isPlainObject(resolved)) {
+      throw new Error("configwrite: patch must be a plain object (a partial config to merge)");
+    }
+    // replaceSubtrees: strip each owned path from the base so the merge re-adds it FRESH — a wholesale replace
+    // that drops any stale key on a pre-existing entry the caller no longer writes (see MergeOptions).
+    const stripped = opts.replaceSubtrees?.length ? removeKeys(base, opts.replaceSubtrees) : base;
+    return deepMerge(stripped, resolved);
+  });
+}
+
+/**
+ * Remove each dotted key path from the config at `targetPath` — the reverse of `mergeConfig`, on the SAME
+ * discipline (byte-exact 0600 backup → atomic temp-write+rename → journaled undo). This is TARGETED removal: it
+ * deletes only the named keys/array-elements and preserves everything else, so it is the correct reversal for a
+ * config a FOREIGN process also owns and rewrites continuously (`~/.claude.json`, `~/.codex/config.toml`) —
+ * where a whole-file `undo` restore would throw on the (near-always) diverged file, or clobber the owner's live
+ * state. A path that doesn't resolve is skipped, so a double-remove is an idempotent no-op; removing from a
+ * target that doesn't exist is a no-op that never creates a file. Reversible like any write — `undo` re-adds
+ * exactly what was removed.
+ */
+export function removeConfigKeys(targetPath: string, keyPaths: string[], opts: MergeOptions = {}): MergeResult {
+  return publish(targetPath, opts, (base) => removeKeys(base, keyPaths), { createIfAbsent: false });
+}
+
+/**
+ * The shared write discipline behind `mergeConfig` and `removeConfigKeys`: parse the current config (fail
+ * CLOSED on corruption), apply `transform` to compute the next value, and — only when the serialized result
+ * differs from disk — back up byte-exact, publish atomically, and journal the undo entry. Extracting it keeps
+ * the two public primitives on ONE audited implementation of the backup / atomic-rename / journal invariants
+ * rather than two copies that could drift.
+ *
+ * `createIfAbsent` (default true, for merge) writes the transform's result as a NEW file when the target is
+ * absent; `false` (for removal) makes an absent target a no-op — there is nothing to remove, and a removal must
+ * never CREATE a file.
+ */
+function publish(
+  targetPath: string,
+  opts: MergeOptions,
+  transform: (base: unknown) => unknown,
+  { createIfAbsent = true }: { createIfAbsent?: boolean } = {},
+): MergeResult {
   const format = detectFormat(targetPath, opts.format);
   const dataDir = resolveDataDir(opts.dataDir);
 
@@ -73,14 +133,19 @@ export function mergeConfig(targetPath: string, patch: unknown, opts: MergeOptio
   }
 
   const existed = existsSync(targetPath);
+  // A removal (createIfAbsent:false) on a missing target is a no-op: nothing to remove, and we must never
+  // create a file by removing keys from it.
+  if (!existed && !createIfAbsent) {
+    return { targetPath, noop: true, created: false, undoId: null, backupPath: null };
+  }
   const originalMode = existed ? statSync(targetPath).mode & 0o777 : null;
   const currentText = existed ? readFileSync(targetPath, "utf8") : undefined;
 
   // Parse BEFORE anything is written. A corrupt existing config aborts here, leaving it untouched.
   const base = existed ? parseConfig(format, currentText!, targetPath) : undefined;
-  const nextText = serializeConfig(format, deepMerge(base, patch));
+  const nextText = serializeConfig(format, transform(base));
 
-  // No-op short-circuit: if the merged bytes already match disk, do nothing — no backup, no write, no
+  // No-op short-circuit: if the computed bytes already match disk, do nothing — no backup, no write, no
   // journal entry. This is what makes the engine idempotent in PRACTICE: an installer re-run (every
   // session, say) neither rewrites the file nor accumulates backups/journal noise.
   if (existed && nextText === currentText) {
@@ -184,6 +249,45 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
   if (v === null || typeof v !== "object" || Array.isArray(v)) return false;
   const proto = Object.getPrototypeOf(v);
   return proto === Object.prototype || proto === null;
+}
+
+/**
+ * Delete each dotted `keyPath` from `base` in place, returning it. Objects delete the key; arrays splice a
+ * numeric index (so `hooks.SessionStart.0` removes the first entry). A path that doesn't resolve — a missing
+ * segment or an out-of-range index — is skipped, which is exactly what makes a double-remove an idempotent
+ * no-op. Prototype-pollution-safe: a `__proto__`/`constructor`/`prototype` segment is refused, so it never
+ * walks onto the prototype (shares `deepMerge`'s FORBIDDEN_KEYS). `base` is the engine's OWN freshly-parsed
+ * value (never a caller's object), so mutating it in place is safe and avoids a deep clone.
+ */
+function removeKeys(base: unknown, keyPaths: string[]): unknown {
+  for (const keyPath of keyPaths) {
+    const segments = keyPath.split(".");
+    // Walk to the container holding the FINAL segment; stop at the first dead end (absent/forbidden segment).
+    let container: unknown = base;
+    for (let i = 0; i < segments.length - 1 && container !== undefined; i++) {
+      container = FORBIDDEN_KEYS.has(segments[i]!) ? undefined : stepInto(container, segments[i]!);
+    }
+    const last = segments[segments.length - 1]!;
+    if (container === undefined || FORBIDDEN_KEYS.has(last)) continue;
+    if (Array.isArray(container)) {
+      const idx = Number(last);
+      if (Number.isInteger(idx) && idx >= 0 && idx < container.length) container.splice(idx, 1);
+    } else if (isPlainObject(container)) {
+      delete container[last];
+    }
+  }
+  return base;
+}
+
+/** One navigation step for `removeKeys`: index into an array by numeric segment, or read an object key.
+ *  Returns `undefined` — a dead end the caller stops descending from — for any non-container or absent segment. */
+function stepInto(container: unknown, segment: string): unknown {
+  if (Array.isArray(container)) {
+    const idx = Number(segment);
+    return Number.isInteger(idx) && idx >= 0 && idx < container.length ? container[idx] : undefined;
+  }
+  if (isPlainObject(container)) return container[segment];
+  return undefined;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

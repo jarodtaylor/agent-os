@@ -16,7 +16,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse as parseToml } from "smol-toml";
 import { parse as parseYaml } from "yaml";
-import { deepMerge, listUndo, mergeConfig, undo } from "../src/configwrite/index";
+import { deepMerge, listUndo, mergeConfig, removeConfigKeys, undo } from "../src/configwrite/index";
 import { backupsDir, journalPath } from "../src/configwrite/internal";
 
 // Each test gets an isolated workspace: `configs/` holds the target files a caller mutates, `data/`
@@ -399,4 +399,235 @@ test("recordUndo isolates a torn journal tail so a later entry still survives", 
   const ids = listUndo(dataDir).map((e) => e.id);
   expect(ids).toContain(first.undoId!); // the earlier clean entry is intact
   expect(ids).toContain(second.undoId!); // and the later one survived the torn tail
+});
+
+// ══════════════════════════════════════════════════════════════════════════════════
+// removeConfigKeys — targeted removal (U14 extension, issue #21): the reverse of merge,
+// same backup → atomic-write → journal discipline, for uninstalling from a diverged live config.
+// ══════════════════════════════════════════════════════════════════════════════════
+
+describe("removeConfigKeys deletes keys at dotted paths across all three formats", () => {
+  test("JSON: a nested key is removed, siblings + unrelated keys preserved", () => {
+    const target = seed(
+      "settings.json",
+      JSON.stringify({ mcpServers: { "agent-os": { url: "x" }, other: { url: "y" } }, keep: 1 }, null, 2) + "\n",
+    );
+    const res = removeConfigKeys(target, ["mcpServers.agent-os"], { dataDir });
+    expect(res.noop).toBe(false);
+    expect(JSON.parse(read(target))).toEqual({ mcpServers: { other: { url: "y" } }, keep: 1 });
+  });
+
+  test("TOML: a nested table is removed, sibling table + bare key survive", () => {
+    const target = seed("config.toml", 'keep = 1\n[mcp_servers.agent-os]\nurl = "x"\n\n[mcp_servers.other]\nurl = "y"\n');
+    removeConfigKeys(target, ["mcp_servers.agent-os"], { dataDir });
+    expect(parseToml(read(target))).toEqual({ keep: 1, mcp_servers: { other: { url: "y" } } });
+  });
+
+  test("YAML: a nested key is removed, siblings survive", () => {
+    const target = seed("config.yaml", "keep: 1\nservers:\n  agent-os:\n    url: x\n  other:\n    url: y\n");
+    removeConfigKeys(target, ["servers.agent-os"], { dataDir });
+    expect(parseYaml(read(target))).toEqual({ keep: 1, servers: { other: { url: "y" } } });
+  });
+});
+
+describe("removeConfigKeys handles array-element removal (the real uninstall need: strip OUR entry)", () => {
+  test("a whole array element is removed by numeric index; the others shift down", () => {
+    const target = seed("settings.json", JSON.stringify({ list: ["a", "b", "c"] }, null, 2) + "\n");
+    removeConfigKeys(target, ["list.1"], { dataDir });
+    expect(JSON.parse(read(target))).toEqual({ list: ["a", "c"] });
+  });
+
+  test("a key nested UNDER an array element is removed via a numeric path segment", () => {
+    const target = seed(
+      "settings.json",
+      JSON.stringify({ hooks: { SessionStart: [{ matcher: "m", drop: true }] } }, null, 2) + "\n",
+    );
+    removeConfigKeys(target, ["hooks.SessionStart.0.drop"], { dataDir });
+    expect(JSON.parse(read(target))).toEqual({ hooks: { SessionStart: [{ matcher: "m" }] } });
+  });
+
+  test("an out-of-range index is a no-op (never throws, never touches a neighbor)", () => {
+    const target = seed("settings.json", JSON.stringify({ list: ["a"] }, null, 2) + "\n");
+    expect(removeConfigKeys(target, ["list.5"], { dataDir }).noop).toBe(true);
+    expect(JSON.parse(read(target))).toEqual({ list: ["a"] });
+  });
+});
+
+test("undo of a removal restores the removed key byte-identically", () => {
+  const original = JSON.stringify({ a: 1, gone: { x: 2 } }, null, 2) + "\n";
+  const target = seed("settings.json", original);
+
+  const res = removeConfigKeys(target, ["gone"], { dataDir });
+  expect(JSON.parse(read(target))).toEqual({ a: 1 }); // removed
+
+  undo(res.undoId!, dataDir);
+  expect(read(target)).toBe(original); // the byte-exact backup re-adds exactly what was removed
+});
+
+test("a removal that fails mid-write leaves the original file untouched and cleans up", () => {
+  // Assumes a non-root runner: root ignores directory permission bits. Mirrors the mergeConfig failure test —
+  // proves removeConfigKeys shares the same rollback path (the extracted `publish` core).
+  const original = JSON.stringify({ a: 1, gone: 2 }, null, 2) + "\n";
+  const target = seed("settings.json", original);
+
+  chmodSync(configsDir, 0o500); // the backup (into dataDir) still succeeds, but the sibling temp write fails
+  expect(() => removeConfigKeys(target, ["gone"], { dataDir })).toThrow();
+  chmodSync(configsDir, 0o700);
+
+  expect(read(target)).toBe(original); // original never touched
+  expect(bakCount()).toBe(0); // the orphaned backup was rolled back
+  expect(listUndo(dataDir)).toEqual([]); // nothing journaled for a removal that didn't land
+});
+
+test("removing an absent key is a no-op; a double-remove is idempotent (no second write/backup/journal)", () => {
+  const target = seed("settings.json", JSON.stringify({ a: 1, gone: 2 }, null, 2) + "\n");
+
+  const first = removeConfigKeys(target, ["gone"], { dataDir });
+  expect(first.noop).toBe(false);
+
+  // The key is already gone → re-removing it is a true no-op.
+  const second = removeConfigKeys(target, ["gone"], { dataDir });
+  expect(second.noop).toBe(true);
+  expect(second.undoId).toBeNull();
+  expect(second.backupPath).toBeNull();
+
+  // A never-present key is likewise a no-op.
+  expect(removeConfigKeys(target, ["never-existed"], { dataDir }).noop).toBe(true);
+
+  expect(listUndo(dataDir).length).toBe(1); // only the first, real removal was journaled
+  expect(bakCount()).toBe(1);
+});
+
+test("removing from a target that doesn't exist is a no-op that creates nothing", () => {
+  const target = join(configsDir, "absent.json");
+  expect(existsSync(target)).toBe(false);
+
+  const res = removeConfigKeys(target, ["anything"], { dataDir });
+  expect(res.noop).toBe(true);
+  expect(res.created).toBe(false);
+  expect(existsSync(target)).toBe(false); // a removal must NEVER create a file
+  expect(listUndo(dataDir)).toEqual([]);
+});
+
+test("removeConfigKeys refuses a symlinked target (shares the engine's fail-closed guard)", () => {
+  const realFile = seed("real.json", JSON.stringify({ a: 1, gone: 2 }, null, 2) + "\n");
+  const link = join(configsDir, "link.json");
+  symlinkSync(realFile, link);
+
+  expect(() => removeConfigKeys(link, ["gone"], { dataDir })).toThrow(/symlink/);
+  expect(JSON.parse(read(realFile))).toEqual({ a: 1, gone: 2 }); // the real file behind the link is untouched
+});
+
+test("a __proto__ / constructor segment in a remove path is refused (no prototype walk)", () => {
+  const target = seed("settings.json", JSON.stringify({ a: 1 }, null, 2) + "\n");
+
+  // Forbidden segments are skipped, so the removal resolves to nothing — a no-op — and never mutates the prototype.
+  expect(removeConfigKeys(target, ["__proto__.polluted", "constructor.x"], { dataDir }).noop).toBe(true);
+  expect(JSON.parse(read(target))).toEqual({ a: 1 });
+  expect(({} as { polluted?: unknown }).polluted).toBeUndefined();
+});
+
+// ══════════════════════════════════════════════════════════════════════════════════
+// mergeConfig callback patch — the RMW reads the engine's OWN parse (closes the double-read)
+// ══════════════════════════════════════════════════════════════════════════════════
+
+describe("mergeConfig callback patch (current) => patch", () => {
+  test("the callback receives the current parsed config and its result is merged", () => {
+    const target = seed("settings.json", JSON.stringify({ list: [1, 2], keep: true }, null, 2) + "\n");
+
+    // Read-modify-write the array from the value the callback is HANDED — not a separate pre-read — so a
+    // concurrent write landing before the engine's read is included, not reverted.
+    const res = mergeConfig(
+      target,
+      (current: unknown) => {
+        const list = ((current as { list?: number[] }).list ?? []).slice();
+        list.push(3);
+        return { list };
+      },
+      { dataDir },
+    );
+
+    expect(res.noop).toBe(false);
+    expect(JSON.parse(read(target))).toEqual({ list: [1, 2, 3], keep: true });
+  });
+
+  test("the callback receives undefined for a target that doesn't exist yet", () => {
+    const target = join(configsDir, "created-via-callback.json");
+    let received: unknown = "sentinel";
+
+    mergeConfig(
+      target,
+      (current: unknown) => {
+        received = current;
+        return { created: true };
+      },
+      { dataDir },
+    );
+
+    expect(received).toBeUndefined(); // no pre-existing config → undefined, mirroring readJson
+    expect(JSON.parse(read(target))).toEqual({ created: true });
+  });
+
+  test("a callback returning a non-object is rejected after parse, before any write", () => {
+    const original = JSON.stringify({ keep: true }, null, 2) + "\n";
+    const target = seed("settings.json", original);
+
+    expect(() =>
+      mergeConfig(target, () => null as unknown as Record<string, unknown>, { dataDir }),
+    ).toThrow(/patch must be a plain object/);
+
+    expect(read(target)).toBe(original); // untouched — no partial write from a bad callback
+    expect(bakCount()).toBe(0);
+    expect(listUndo(dataDir)).toEqual([]);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════════════
+// mergeConfig replaceSubtrees — wholesale-replace an owned subtree (install stale-key cleanup)
+// ══════════════════════════════════════════════════════════════════════════════════
+
+describe("mergeConfig replaceSubtrees", () => {
+  test("a stale key on a pre-existing owned entry does NOT survive the replace; siblings do", () => {
+    const target = seed(
+      "claude.json",
+      JSON.stringify(
+        { mcpServers: { "agent-os": { url: "old", headers: { token: "STALE" } }, other: { url: "keep" } } },
+        null,
+        2,
+      ) + "\n",
+    );
+
+    mergeConfig(target, { mcpServers: { "agent-os": { url: "new", headersHelper: "cmd" } } }, {
+      dataDir,
+      replaceSubtrees: ["mcpServers.agent-os"],
+    });
+
+    expect(JSON.parse(read(target))).toEqual({
+      mcpServers: { "agent-os": { url: "new", headersHelper: "cmd" }, other: { url: "keep" } },
+    });
+  });
+
+  test("WITHOUT replaceSubtrees the stale key survives — proving the option is what drops it", () => {
+    const target = seed(
+      "claude.json",
+      JSON.stringify({ mcpServers: { "agent-os": { url: "old", headers: { token: "STALE" } } } }, null, 2) + "\n",
+    );
+
+    mergeConfig(target, { mcpServers: { "agent-os": { url: "new", headersHelper: "cmd" } } }, { dataDir });
+
+    // A plain deepMerge re-merges the agent-os subtree, so the stale `headers` lingers (the exact bug #21 fixes).
+    expect((JSON.parse(read(target)) as { mcpServers: { "agent-os": { headers?: unknown } } }).mcpServers["agent-os"].headers).toEqual({
+      token: "STALE",
+    });
+  });
+
+  test("replaceSubtrees stays idempotent — re-merging the same value is a true no-op", () => {
+    const target = seed("claude.json", JSON.stringify({ mcpServers: { "agent-os": { url: "x" } } }, null, 2) + "\n");
+    const patch = { mcpServers: { "agent-os": { url: "x" } } };
+
+    // base already equals the patch → strip-then-remerge reproduces identical bytes → no-op (no churn on re-install).
+    expect(mergeConfig(target, patch, { dataDir, replaceSubtrees: ["mcpServers.agent-os"] }).noop).toBe(true);
+    expect(listUndo(dataDir)).toEqual([]);
+    expect(bakCount()).toBe(0);
+  });
 });

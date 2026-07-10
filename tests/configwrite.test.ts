@@ -647,6 +647,123 @@ describe("removeConfigKeys leaves a foreign-formatted file byte-for-byte unchang
   });
 });
 
+// ── missing-leaf exactness (#29): a path whose PARENT exists but whose final key does NOT must resolve to
+//    nothing, so the removal never re-serializes (and thus never reformats) a foreign-formatted live config.
+//    Distinct from the parent-ABSENT case above, which the walk already dead-ended before the final segment. ──
+
+describe("removeConfigKeys missing-leaf exactness (#29 — parent present, leaf absent)", () => {
+  test("JSON: a 4-space file whose mcpServers holds ONLY foreign servers is NOT reformatted by removing our absent leaf", () => {
+    // The parent (`mcpServers`) EXISTS but our leaf (`agent-os`) does not — the parent-exists/leaf-absent case the
+    // old unconditional object-delete got wrong: it queued a phantom delete, flipped `deleted` true, and
+    // re-serialized this 4-space file to our 2-space layout for a removal that removed nothing.
+    const foreign = JSON.stringify({ mcpServers: { other: { url: "y" } }, keep: 1 }, null, 4) + "\n";
+    const target = seed("settings.json", foreign);
+
+    const res = removeConfigKeys(target, ["mcpServers.agent-os"], { dataDir });
+
+    expect(res.noop).toBe(true);
+    expect(res.undoId).toBeNull();
+    expect(res.backupPath).toBeNull();
+    expect(read(target)).toBe(foreign); // byte-for-byte unchanged — never reformatted
+    expect(bakCount()).toBe(0);
+    expect(listUndo(dataDir)).toEqual([]);
+  });
+
+  test("TOML: a commented, hand-formatted file whose mcp_servers holds ONLY a foreign table is left byte-for-byte intact", () => {
+    // Parent-present/leaf-absent on TOML: `mcp_servers` exists (a foreign table) but `agent-os` doesn't. smol-toml
+    // DROPS comments on reserialize, so the old phantom delete would strip this owner's comments for a no-match delete.
+    const foreign = '# my Codex config\nmodel = "gpt-5.5"  # inline note\n\n[mcp_servers.foreign]\nurl = "y"\n';
+    const target = seed("config.toml", foreign);
+
+    const res = removeConfigKeys(target, ["mcp_servers.agent-os"], { dataDir });
+
+    expect(res.noop).toBe(true);
+    expect(res.undoId).toBeNull();
+    expect(res.backupPath).toBeNull();
+    expect(read(target)).toBe(foreign); // comments + hand formatting survive untouched
+    expect(bakCount()).toBe(0);
+    expect(listUndo(dataDir)).toEqual([]);
+  });
+
+  test("one present + one absent-leaf path in the SAME call: the present key is removed, the absent leaf ignored (deleted-dominance)", () => {
+    const target = seed(
+      "settings.json",
+      JSON.stringify({ mcpServers: { "agent-os": { url: "x" }, other: { url: "y" } } }, null, 2) + "\n",
+    );
+
+    // `mcpServers.agent-os` resolves (removed); `mcpServers.nope` is an absent leaf (skipped). Because at least one
+    // path resolved, the write proceeds — and the absent leaf is simply a no-op, never a phantom delete.
+    const res = removeConfigKeys(target, ["mcpServers.agent-os", "mcpServers.nope"], { dataDir });
+
+    expect(res.noop).toBe(false);
+    expect(JSON.parse(read(target))).toEqual({ mcpServers: { other: { url: "y" } } });
+  });
+
+  test("an own key whose value is null is still present and IS removed (hasOwn, not truthiness)", () => {
+    const target = seed("settings.json", JSON.stringify({ gone: null, keep: 1 }, null, 2) + "\n");
+
+    // `gone` is falsy but PRESENT — `hasOwn` resolves it; a truthiness check would wrongly skip it and no-op.
+    const res = removeConfigKeys(target, ["gone"], { dataDir });
+
+    expect(res.noop).toBe(false);
+    expect(JSON.parse(read(target))).toEqual({ keep: 1 });
+  });
+});
+
+// ── fail-closed presence (#30): the ONE `statTarget` decision. An INDETERMINATE lookup (EACCES on an
+//    unreadable parent) must THROW, never read as absence — a removal would fake a clean no-op leaving our
+//    registration live; a merge would route an unreadable existing config to the create path. A dangling
+//    symlink is caught as a symlink (refusal), never as absence. ──
+
+describe("removeConfigKeys / mergeConfig fail closed on an indeterminate presence lookup (#30)", () => {
+  test("removeConfigKeys THROWS when the target's parent dir is unreadable (EACCES is indeterminate, never a clean no-op)", () => {
+    // Assumes a non-root runner: root ignores directory permission bits. 0o000 (no search bit) makes lstat(target)
+    // fail EACCES — indeterminate, NOT ENOENT-absent. Old code's existsSync-false read that as absence and returned
+    // a clean noop:true (leaving our registration live); the unified statTarget rethrows the EACCES instead.
+    const dir = join(configsDir, "locked-remove");
+    mkdirSync(dir);
+    const target = join(dir, "settings.json");
+    writeFileSync(target, JSON.stringify({ mcpServers: { "agent-os": { url: "x" } } }, null, 2) + "\n");
+    chmodSync(dir, 0o000);
+    try {
+      expect(() => removeConfigKeys(target, ["mcpServers.agent-os"], { dataDir })).toThrow();
+      expect(bakCount()).toBe(0); // threw at the presence check — before any backup/journal side effect
+      expect(listUndo(dataDir)).toEqual([]);
+    } finally {
+      chmodSync(dir, 0o700); // restore so afterEach's recursive rm can traverse back in
+    }
+  });
+
+  test("mergeConfig THROWS on an unreadable-parent target instead of clobber-creating it (fail-closed presence)", () => {
+    // existsSync-false would have routed this UNREADABLE existing config to the create path; statTarget rethrows the
+    // indeterminate EACCES so we never temp+rename-clobber a file we could not read. (Both regimes throw here — the
+    // old write also failed EACCES — so this pins the CONTRACT; #30's behavior change is proven by the removal test above.)
+    const dir = join(configsDir, "locked-merge");
+    mkdirSync(dir);
+    const target = join(dir, "settings.json");
+    writeFileSync(target, JSON.stringify({ a: 1 }, null, 2) + "\n");
+    chmodSync(dir, 0o000);
+    try {
+      expect(() => mergeConfig(target, { b: 2 }, { dataDir })).toThrow();
+    } finally {
+      chmodSync(dir, 0o700);
+    }
+  });
+
+  test("removeConfigKeys throws the symlink refusal on a DANGLING symlink target (caught as a symlink, not read as absence)", () => {
+    // A dangling symlink: lstat SUCCEEDS (so statTarget classifies it as a symlink and refuses), while existsSync
+    // FOLLOWS it to the missing target and reports false. Presence must key off lstat, so this refuses — it must
+    // never be mistaken for ENOENT-absence (which would silently no-op and leave the live symlinked target behind).
+    const link = join(configsDir, "dangling.json");
+    symlinkSync(join(configsDir, "no-such-target.json"), link);
+    expect(existsSync(link)).toBe(false); // existsSync follows the link → false; must NOT read as absence
+
+    expect(() => removeConfigKeys(link, ["anything"], { dataDir })).toThrow(/symlink/);
+    expect(bakCount()).toBe(0);
+    expect(listUndo(dataDir)).toEqual([]);
+  });
+});
+
 test("removing from a target that doesn't exist is a no-op that creates nothing", () => {
   const target = join(configsDir, "absent.json");
   expect(existsSync(target)).toBe(false);

@@ -296,6 +296,27 @@ describe("installClaudeCode", () => {
     expect(failed).toEqual([]); // a skip is a clean no-op, not a failure
   });
 
+  test("uninstall leaves a foreign-formatted claude.json BYTE-for-byte unchanged when its mcpServers holds none of ours (no reformat, #29)", () => {
+    // The claude.json (mcpServers) twin of the settings.json no-reformat guarantee above, exercising the
+    // removeConfigKeys path. A ~/.claude.json a dotfile tool wrote 4-space whose `mcpServers` EXISTS but holds
+    // only a FOREIGN server (never installed → no agent-os leaf): the parent-present/leaf-absent case. Removing
+    // our absent `mcpServers.agent-os` must NOT re-serialize it to our 2-space layout — the missing-leaf
+    // exactness fix (#29) makes removeConfigKeys a true no-op here, so the owner's bytes survive.
+    const foreign =
+      JSON.stringify(
+        { numStartups: 7, mcpServers: { other: { type: "http", url: "http://127.0.0.1:9999/mcp" } } },
+        null,
+        4, // deliberately NOT our 2-space serializer output
+      ) + "\n";
+    writeFileSync(claudeJsonPath(), foreign);
+
+    const { removed, failed } = uninstallClaudeCode({ home, dataDir, repoRoot: REPO });
+
+    expect(readFileSync(claudeJsonPath(), "utf8")).toBe(foreign); // byte-for-byte unchanged — never reformatted
+    expect(removed).toEqual([]); // nothing of ours anywhere (settings.json is absent too) → nothing changed
+    expect(failed).toEqual([]); // a true no-op, not a failure
+  });
+
   test("uninstall surfaces a DANGLING settings.json symlink as a failure instead of silently skipping it (never throws; claude.json still cleaned)", () => {
     install();
     // Replace settings.json with a symlink to a now-missing target — a dangling link. existsSync FOLLOWS it and

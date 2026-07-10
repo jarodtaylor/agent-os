@@ -611,6 +611,32 @@ describe("installCodex", () => {
     expect(outcome.removed).toContain(configPath());
     expect(existsSync(codexTokenPath(dataDir))).toBe(false);
   });
+
+  test("uninstall surfaces a DANGLING config.toml symlink as a failure but still strips AGENTS.md and revokes the token (#30, config.toml twin)", () => {
+    install();
+    // The config.toml twin of the dangling hooks.json symlink test above, on the removeConfigKeys path. Replace
+    // config.toml with a symlink to a now-missing target: existsSync FOLLOWS it and reports false, but statTarget
+    // lstat-catches it as a symlink and throws the refusal, so removeConfigKeys(a) surfaces it in `failed` — never
+    // swallowed as clean absence — while the AGENTS.md strip (c) and the codex.token revocation (d) still run.
+    rmSync(configPath());
+    symlinkSync(join(root, "gone-config-target.toml"), configPath());
+    expect(existsSync(configPath())).toBe(false); // dangling: existsSync follows to the missing target
+
+    let outcome: UninstallOutcome = { removed: [], failed: [] };
+    expect(() => {
+      outcome = uninstallCodex({ home, dataDir, repoRoot: REPO });
+    }).not.toThrow();
+
+    // config.toml is NAMED in `failed` with a non-empty error — not silently treated as clean absence…
+    const configFailure = outcome.failed.find((f) => f.path === configPath());
+    expect(configFailure).toBeDefined();
+    expect(configFailure!.error.length).toBeGreaterThan(0);
+    // …while the OTHER targets were still processed: AGENTS.md stripped (install created it fresh → deleted) and the
+    // stable credential revoked.
+    expect(existsSync(agentsMdPath())).toBe(false);
+    expect(outcome.removed).toContain(agentsMdPath());
+    expect(existsSync(codexTokenPath(dataDir))).toBe(false);
+  });
 });
 
 describe("existingEntriesWithoutOurs (FIX B: nested-hook-level filtering, not whole-entry drop)", () => {

@@ -17,7 +17,7 @@
  *      may not preserve comments/formatting in a hand-edited TOML file, but `undo` restores the raw
  *      bytes, so nothing a merge drops is ever unrecoverable.
  */
-import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync, chmodSync } from "node:fs";
+import { copyFileSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync, chmodSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { basename, extname, join } from "node:path";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
@@ -151,15 +151,11 @@ function publish(
   const format = detectFormat(targetPath, opts.format);
   const dataDir = resolveDataDir(opts.dataDir);
 
-  // Fail closed on a symlink target: renameSync would replace the link itself with a regular file,
-  // silently breaking a dotfile-managed config and defeating byte-exact reversibility (the backup holds
-  // only dereferenced bytes, so undo can't restore the link). Symlink write-through is a deferred
-  // enhancement — no dotfile manager is in use today.
-  if (isSymlink(targetPath)) {
-    throw new Error(`configwrite: refusing to write '${targetPath}' — it is a symlink; symlinked configs are not supported yet`);
-  }
-
-  const existed = existsSync(targetPath);
+  // ONE presence decision for both merge and removal (see `statTarget`): a regular file is "present", a genuine
+  // ENOENT is "absent", and everything indeterminate — a symlink, or a lookup that failed for any other reason —
+  // THROWS rather than silently reading as absence (which would fake a clean no-op on removal, or route an
+  // unreadable existing config to the create path on merge).
+  const existed = statTarget(targetPath) === "present";
   // A removal (createIfAbsent:false) on a missing target is a no-op: nothing to remove, and we must never
   // create a file by removing keys from it.
   if (!existed && !createIfAbsent) {
@@ -291,9 +287,10 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
  * `base`, and `deleted` reports whether ANY path actually resolved to a real target. The removal caller maps a
  * `deleted:false` into a TRUE no-op (skipping serialize/write), so an absent-key removal never reformats a
  * foreign-formatted live config by re-serializing an unchanged tree. Objects delete the key; arrays splice a
- * numeric index (so `hooks.SessionStart.0` removes the first entry). A path that doesn't resolve — a missing
- * segment or an out-of-range index — is skipped, which is exactly what makes a double-remove an idempotent
- * no-op. Prototype-pollution-safe: a `__proto__`/`constructor`/`prototype` segment is refused, so it never
+ * numeric index (so `hooks.SessionStart.0` removes the first entry). A path resolves only to an EXISTING
+ * target — an own key (by `hasOwn`, so a null/false/"" value still counts as present) or an in-range index;
+ * anything else — a missing segment, an absent final key, or an out-of-range index — is skipped, which is
+ * exactly what makes a double-remove an idempotent no-op. Prototype-pollution-safe: a `__proto__`/`constructor`/`prototype` segment is refused, so it never
  * walks onto the prototype (shares `deepMerge`'s FORBIDDEN_KEYS). `base` is the engine's OWN freshly-parsed
  * value (never a caller's object), so mutating it in place is safe and avoids a deep clone.
  *
@@ -313,7 +310,7 @@ function removeKeys(base: unknown, keyPaths: string[]): { value: unknown; delete
   // element (so one call removes it once) and lets pass 2 splice that container's indices highest-first.
   const arraySplices = new Map<unknown[], Set<number>>();
 
-  // ── Pass 1: resolve every path to its target, mutating nothing ──
+  // ── Pass 1: resolve every path to its EXISTING target (an own key or in-range index), mutating nothing ──
   for (const keyPath of keyPaths) {
     const segments = keyPath.split(".");
     // Walk to the container holding the FINAL segment; stop at the first dead end (absent/forbidden segment).
@@ -330,7 +327,11 @@ function removeKeys(base: unknown, keyPaths: string[]): { value: unknown; delete
         if (!indices) arraySplices.set(container, (indices = new Set()));
         indices.add(idx);
       }
-    } else if (isPlainObject(container)) {
+    } else if (isPlainObject(container) && Object.hasOwn(container, last)) {
+      // Require the OWN key to EXIST (mirroring the array branch's in-range `idx` check above) — by `hasOwn`,
+      // not truthiness, so a null/false/"" value still counts as present. A parent-exists/leaf-absent path
+      // resolves to NOTHING: recording it would flip `deleted` true and re-serialize, reformatting a
+      // foreign-formatted live config for a delete that removes nothing.
       objectDeletes.push({ container, key: last });
     }
   }
@@ -340,9 +341,9 @@ function removeKeys(base: unknown, keyPaths: string[]): { value: unknown; delete
   for (const [arr, indices] of arraySplices) {
     for (const idx of [...indices].sort((a, b) => b - a)) arr.splice(idx, 1);
   }
-  // `deleted` iff pass 1 recorded at least one target (an object key, or a resolved in-range array index —
-  // each `arraySplices` entry is a non-empty Set by construction). The removal caller turns `false` into a
-  // true no-op so an absent-key remove never re-serializes (and thus never reformats) a foreign-formatted file.
+  // `deleted` iff pass 1 recorded at least one target (an EXISTING own object key, or a resolved in-range array
+  // index — each `arraySplices` entry is a non-empty Set by construction). The removal caller turns `false` into
+  // a true no-op so an absent-key remove never re-serializes (and thus never reformats) a foreign-formatted file.
   return { value: base, deleted: objectDeletes.length > 0 || arraySplices.size > 0 };
 }
 
@@ -445,13 +446,30 @@ function backupName(targetPath: string): string {
   return `${basename(targetPath)}.${stamp}.${randomUUID().slice(0, 8)}.bak`;
 }
 
-/** True iff `path` is itself a symlink (even a broken one). Uses lstat so it never follows the link. */
-function isSymlink(path: string): boolean {
+/**
+ * The engine's ONE presence decision, shared by merge and removal. Three outcomes: a regular file is
+ * "present"; a genuinely missing entry (lstat ENOENT — including a path made unreachable by a missing parent,
+ * which is indistinguishable by errno and equivalent for our purposes) is "absent"; everything else THROWS —
+ * a symlink (dangling or resolved: renameSync would replace the LINK itself with a regular file, silently
+ * breaking a dotfile-managed config, and the byte-exact backup holds only dereferenced bytes so undo could not
+ * restore the link — symlink write-through is a deferred enhancement), or an indeterminate lookup (EACCES,
+ * ENOTDIR, EIO, …). Indeterminate must NEVER read as absence: on a removal it would fake a clean no-op while our
+ * registration stays live; on a merge it is worse — an existsSync-false verdict routed an UNREADABLE existing
+ * config to the create path, where temp+rename would clobber a file we never read. Uses lstat, so it never
+ * follows the link.
+ */
+function statTarget(path: string): "present" | "absent" {
+  let stat;
   try {
-    return lstatSync(path).isSymbolicLink();
-  } catch {
-    return false; // path doesn't exist / inaccessible — not a symlink we need to guard against
+    stat = lstatSync(path);
+  } catch (err) {
+    if ((err as { code?: string }).code === "ENOENT") return "absent";
+    throw err; // EACCES / ENOTDIR / EIO / … — indeterminate, never silently "absent"
   }
+  if (stat.isSymbolicLink()) {
+    throw new Error(`configwrite: refusing to write '${path}' — it is a symlink; symlinked configs are not supported yet`);
+  }
+  return "present";
 }
 
 /** Best-effort removal; used only on the failure path where the caller is already throwing. */

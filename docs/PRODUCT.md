@@ -3,7 +3,7 @@
 > **For humans.** Plain language, outcomes first, short on purpose. The deep/agent-grade state lives in [`START-HERE.md`](START-HERE.md) + [`DECISIONS.md`](DECISIONS.md); this page is their product-level projection.
 > **Freshness rule:** `/handoff` updates this page whenever something ships. If this page and reality ever disagree, that's a bug — flag it.
 
-_Last updated: 2026-07-09 · Status: **v0.1 "Continuity" in progress — 10 of 15 units shipped**_
+_Last updated: 2026-07-10 · Status: **v0.1 "Continuity" in progress — 10 of 15 units shipped** · Roadmap postures locked by the 2026-07-10 interview (decisions #32–#41)_
 
 ## TL;DR
 
@@ -64,7 +64,7 @@ The 4-layer design ([`MEMORY-SYSTEM-VISION.md`](MEMORY-SYSTEM-VISION.md)):
 
 CTO view: **L4, the write path, is the real product.** Status: vision sketch + open forks (biggest: how retrieval routing works); the NotebookLM notebooks are connected and ready to mine when this phase starts.
 **Proof when it ships:** ask any harness something whose answer lives in work I did months ago — it answers from the brain, citing the source.
-**Open trust decisions (queued for scoping):** who may write L2/L3 (human-approved vs agent-written with provenance + rollback), correction/deletion, per-project boundaries.
+**Trust posture decided** (decision #35): agent-written by default + provenance + rollback + the precedence rule; human review = a flagged-entries *lens*, never a gate; and the brain is **agent-first** — agents own the organization, Jarod consumes answers. Still open for the design phase: correction/deletion mechanics, per-project boundaries, retrieval routing.
 
 **Coordination — driving the team.**
 *Problem: I can see the team but can't drive it as one.*

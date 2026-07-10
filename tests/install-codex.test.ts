@@ -90,11 +90,11 @@ describe("installCodex", () => {
     expect(statSync(configPath()).mode & 0o777).toBe(0o600);
   });
 
-  test("uninstall restores config.toml's pre-install mode (0644) that install tightened to 0600 — the targeted-removal regression", () => {
-    // THE regression: install tightens a pre-existing 0644 config.toml to 0600 (the test above proves that half);
-    // the retired whole-file undo restored the recorded 0644, but the targeted removeConfigKeys preserves the
-    // CURRENT (0600) mode. Uninstall must put 0644 back — from install provenance in the undo journal — else the
-    // user's config is left permanently owner-only.
+  test("uninstall keeps config.toml at 0600 that install tightened from a pre-existing 0644 — never-loosen policy", () => {
+    // Policy: a targeted uninstall NEVER loosens a mode Agent OS tightened. Install tightens a pre-existing 0644
+    // config.toml to 0600 (the test above proves that half); the targeted removeConfigKeys preserves the CURRENT
+    // mode, so the file STAYS 0600 after removal. Loosening back to 0644 could expose a secret added to the file
+    // while it was held owner-only, so a tightening is never autonomously reversed (full mode-lifecycle: issue #33).
     mkdirSync(codexDir(), { recursive: true });
     writeFileSync(configPath(), `model = "gpt-5.5"\n`);
     chmodSync(configPath(), 0o644);
@@ -104,23 +104,23 @@ describe("installCodex", () => {
 
     const { removed, warnings } = uninstallCodex({ home, dataDir, repoRoot: REPO });
 
-    expect(statSync(configPath()).mode & 0o777).toBe(0o644); // pre-install mode restored
+    expect(statSync(configPath()).mode & 0o777).toBe(0o600); // STAYS 0600 — never loosened back to 0644
     const c = readToml(configPath());
     expect(c.mcp_servers?.["agent-os"]).toBeUndefined(); // our entry still removed…
     expect(c.model).toBe("gpt-5.5"); // …and the user's key otherwise intact
     expect(removed).toContain(configPath());
-    expect(warnings).toEqual([]); // a clean restore emits no mode-restore warning
+    expect(warnings).toEqual([]); // no mode-restore step → no warning
   });
 
-  test("uninstall does NOT override a post-install user chmod — a 0640 config.toml stays 0640 (user intent wins)", () => {
-    // If the user chmod'd config.toml to something OTHER than our imposed 0600 after install, that is their
-    // intent — mode-restore must skip it. The targeted removal still succeeds; only the chmod is withheld.
+  test("uninstall leaves a post-install user chmod untouched — a 0640 config.toml stays 0640", () => {
+    // The user chmod'd config.toml to 0640 after install. Targeted removal preserves the file's current mode and
+    // never rewrites it, so 0640 is untouched — the uninstall changes the mode in neither direction.
     mkdirSync(codexDir(), { recursive: true });
     writeFileSync(configPath(), `model = "gpt-5.5"\n`);
     chmodSync(configPath(), 0o644);
 
     install();
-    chmodSync(configPath(), 0o640); // user re-tightens post-install — their call, not ours to undo
+    chmodSync(configPath(), 0o640); // user re-tightens post-install
 
     uninstallCodex({ home, dataDir, repoRoot: REPO });
 
@@ -128,9 +128,9 @@ describe("installCodex", () => {
     expect(readToml(configPath()).mcp_servers?.["agent-os"]).toBeUndefined(); // removal still succeeded
   });
 
-  test("uninstall leaves a config.toml install CREATED fresh at 0600 unchanged — nothing pre-dated us (no crash, no warning)", () => {
-    // No pre-existing config.toml: install CREATES it at 0600, so there is no pre-Agent-OS mode to restore (the
-    // oldest journal entry is a create, mode:null). Mode-restore must be a clean no-op — 0600 stays, no throw.
+  test("uninstall leaves a config.toml install CREATED fresh at 0600 unchanged (no crash, no warning)", () => {
+    // No pre-existing config.toml: install CREATES it at 0600. Targeted removal preserves the current mode, so it
+    // stays 0600 — nothing to loosen, and the removal is a clean no-throw.
     install(); // fresh machine — install creates config.toml
     expect(statSync(configPath()).mode & 0o777).toBe(0o600);
 
@@ -141,9 +141,9 @@ describe("installCodex", () => {
     expect(warnings).toEqual([]);
   });
 
-  test("uninstall over a config.toml that was already 0600 pre-install leaves it 0600 (trivially stable, no chmod churn)", () => {
-    // A pre-existing config.toml ALREADY at 0600: install keeps 0600, and mode-restore finds the pre-install mode
-    // equals the imposed mode, so it short-circuits without a redundant chmod. End state is 0600 either way.
+  test("uninstall over a config.toml that was already 0600 pre-install leaves it 0600", () => {
+    // A pre-existing config.toml ALREADY at 0600: install keeps 0600 and targeted removal preserves the current
+    // mode, so it stays 0600. Nothing to loosen either way.
     mkdirSync(codexDir(), { recursive: true });
     writeFileSync(configPath(), `model = "gpt-5.5"\n`);
     chmodSync(configPath(), 0o600);

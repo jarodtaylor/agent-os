@@ -41,12 +41,14 @@ export interface MergeOptions {
   /** Force the PUBLISHED file's mode to this — chmod the temp to it BEFORE the atomic rename — instead of
    *  preserving an existing target's mode. Use for a file this write embeds a SECRET into (the Codex
    *  installer's config.toml), so the secret is never on disk at a looser mode, even for the transient window
-   *  between rename and a post-hoc chmod. The undo journal records the ORIGINAL mode either way, but pre-install
-   *  mode is restored by two DIFFERENT paths: a whole-file `undo` re-applies that recorded mode directly, while
-   *  the targeted-removal uninstall path (`removeConfigKeys`, which preserves the CURRENT mode) restores it via
-   *  install provenance in the uninstaller (`restorePreInstallMode`) — and only while the file still carries the
-   *  imposed mode. Omitted ⇒ preserve the existing file's mode — the default, correct for the non-secret configs
-   *  every other caller writes (CC's settings.json / ~/.claude.json). */
+   *  between rename and a post-hoc chmod. The undo journal records the ORIGINAL mode, but the two reversal paths
+   *  treat it differently: a whole-file `undo` re-applies that recorded mode directly, restoring the pre-install
+   *  mode; a TARGETED uninstall (`removeConfigKeys`) preserves the file's CURRENT mode and deliberately NEVER
+   *  loosens it — a file tightened to 0600 at install STAYS 0600 after targeted removal. Loosening on uninstall
+   *  is unsafe: a secret added to the file while Agent OS held it at 0600 would be exposed by widening the mode
+   *  back, so a tightening is never autonomously reversed (full mode-lifecycle restoration is deferred — issue
+   *  #33). Omitted ⇒ preserve the existing file's mode — the default, correct for the non-secret configs every
+   *  other caller writes (CC's settings.json / ~/.claude.json). */
   targetMode?: number;
   /** Dotted paths (same vocabulary as `removeConfigKeys`) whose subtrees are REPLACED wholesale instead of
    *  deep-merged: each is stripped from the base before the patch re-adds it, so a stale key on a pre-existing
@@ -289,9 +291,9 @@ function publish(
     // and the original survives untouched if any step above threw. `targetMode` (when set) wins over the
     // preserved original mode, so a secret-bearing file is PUBLISHED owner-only — never renamed into place at
     // a looser inherited mode and tightened afterwards (which leaves a readable window). `originalMode` is
-    // recorded above so pre-install mode stays recoverable by BOTH reversal paths: a whole-file `undo` re-applies
-    // it directly, while the targeted-removal uninstall (which preserves the CURRENT mode) restores it from this
-    // journal provenance in the uninstaller (see `restorePreInstallMode`).
+    // recorded above so a whole-file `undo` can re-apply it directly; a TARGETED uninstall, by contrast,
+    // preserves the current mode and deliberately never loosens it (see `MergeOptions.targetMode`) — full
+    // mode-lifecycle restoration is deferred (issue #33).
     writeFileSync(tmpPath, nextText, { mode: 0o600 });
     chmodSync(tmpPath, opts.targetMode ?? originalMode ?? 0o600);
     renameSync(tmpPath, targetPath);

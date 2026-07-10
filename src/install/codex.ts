@@ -40,7 +40,7 @@ import { join } from "node:path";
 import { parse as parseToml } from "smol-toml";
 import { AppliedButUnjournaledError, mergeConfig, removeConfigKeys, undo, type MergeResult } from "../configwrite/index";
 import { codexTokenPath, readCodexToken, resolveCodexToken, resolveDataDir, resolvePort, TOKEN_HEADER } from "../paths";
-import { bunCommand, defaultRepoRoot, errorText, existingEntriesWithoutOurs, readJson, removeHooksIfPresent, restorePreInstallMode, type UninstallOutcome } from "./shared";
+import { bunCommand, defaultRepoRoot, errorText, existingEntriesWithoutOurs, readJson, removeHooksIfPresent, type UninstallOutcome } from "./shared";
 
 /** The brain's MCP server name in `~/.codex/config.toml` (mirrors the Claude Code `mcpServers.agent-os` key). */
 const SERVER_NAME = "agent-os";
@@ -259,8 +259,8 @@ export function installCodex(opts: InstallOptions = {}): InstallResult {
     },
     // targetMode 0600: this file embeds the bearer token, so publish it owner-only — never rename it into place
     // at a pre-existing looser mode and tighten afterwards (that leaves a world-readable window a local observer
-    // could catch). The engine journals the original mode; uninstallCodex restores it from that provenance
-    // (restorePreInstallMode) AFTER the targeted removal — which itself only preserves the current (0600) mode.
+    // could catch). The engine journals the original mode, but a targeted uninstall deliberately never loosens it
+    // back — a file tightened here STAYS 0600 after removal (keeps 0600 by design — see uninstallCodex; issue #33).
     { dataDir, targetMode: 0o600, replaceSubtrees: [`mcp_servers.${SERVER_NAME}`] },
   );
 
@@ -343,22 +343,11 @@ export function uninstallCodex(opts: { home?: string; dataDir?: string; repoRoot
   const configToml = configTomlPath(home);
   try {
     const res = removeConfigKeys(configToml, [`mcp_servers.${SERVER_NAME}`], { dataDir });
-    if (!res.noop) {
-      removed.push(configToml);
-      // U8 PUBLISHED config.toml at 0600 (it embeds the token); the targeted removeConfigKeys above preserves the
-      // file's CURRENT mode, so restore the pre-install mode from install provenance — the mode-restoration the
-      // retired whole-file undo used to do directly. Its OWN try/catch: the removal already SUCCEEDED, so a
-      // chmod/journal-read failure must NOT fail the uninstall — surface it as a warning and leave the file at 0600.
-      try {
-        restorePreInstallMode(configToml, dataDir);
-      } catch (err) {
-        console.error(
-          `[agent-os] uninstall: removed '${SERVER_NAME}' from '${configToml}' but could not restore its pre-install file mode (left at 0600):`,
-          err,
-        );
-        warnings.push({ path: configToml, error: errorText(err) });
-      }
-    }
+    // config.toml was PUBLISHED 0600 at install (it embeds the token) and the targeted removeConfigKeys preserves
+    // the file's CURRENT mode, so it STAYS 0600 after removal — we deliberately never loosen it back. A secret
+    // added to the file while Agent OS held it at 0600 would be exposed by widening the mode on uninstall, so
+    // tightening is never autonomously reversed (keeps 0600 by design; full mode-lifecycle restoration: issue #33).
+    if (!res.noop) removed.push(configToml);
   } catch (err) {
     if (err instanceof AppliedButUnjournaledError) {
       // The delete LANDED (mcp_servers.agent-os is gone) but its undo entry didn't record — count it removed,

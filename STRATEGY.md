@@ -1,23 +1,25 @@
 ---
 name: Agent OS
-last_updated: 2026-07-01
+last_updated: 2026-07-10
 ---
 
 # Agent OS Strategy
 
 ## Target problem
 
-I run a dozen AI harnesses — Claude Code, Codex, Hermes, Antigravity, Cursor, Minimax, OpenClaw and more — each powerful on its own but walled off from the others. They share no memory, so I re-explain my ways-of-working and ADHD needs to every one and each starts cold; there's no shared surface, so work can't be tracked or evaluated across them; and juggling that many terminals overloads my ADHD, so I collapse back to just Claude Code and lose the team. The crux: my agents are a team that can't act like one, because nothing connects them.
+I run a dozen AI harnesses — Claude Code, Codex, Hermes, Cursor, Antigravity, OpenCode and more — each powerful on its own but walled off from the others. And I point this team at **everything**: code, research, content, learning, etc. — any list of project types here is illustrative, never the boundary (#39). They share no memory, so I re-explain my ways-of-working and ADHD needs to every one and each starts cold; there's no shared surface, so work can't be tracked or evaluated across them; and juggling that many terminals overloads my ADHD, so I collapse back to just Claude Code and lose the team. The crux: my agents are a team that can't act like one, because nothing connects them.
 
 ## Our approach
 
 **Connect, don't replace — with shared memory as the wedge.** Agent OS is the connective tissue over the harnesses I already use: a thin control plane plus a shared brain that every agent plugs into, so they act as one co-located team while each keeps its own best-in-class harness. The hard line that makes this a choice and not a wish: I never build or fork my own agent harness.
 
+Two more hard lines (2026-07-10 interview): the team is **operator-directed** — routing optimizes for the right harness on the right task, never utilization for its own sake, and automation acts only within policies I've defined (#33/#34). And Agent OS **never takes custody of credentials** — auth stays with each harness; we show status and launch native logins, nothing more (#36).
+
 ## Who it's for
 
 **Primary — Jarod, the operator.** A solo builder with ADHD running a team of AI agents across a dozen harnesses. I'm hiring Agent OS to give those agents one shared brain and one shared work surface, so I can drive them as a co-located team — without repeating myself, juggling terminals, or collapsing back to just Claude Code.
 
-**Secondary — the agents themselves, as autonomous operators.** Claude Code, Codex, Hermes and the rest are machine consumers of the substrate: they read and write the shared brain and task board without me relaying by hand. This is why the brain and board must be agent-legible — MCP-native and typed — not just a human dashboard. (Example: I dump raw input; the agents curate, relate, and resurface it at the right moment.)
+**Secondary — the agents themselves, as autonomous operators.** Claude Code, Codex, Hermes and the rest are machine consumers of the substrate: they read and write the shared brain and task board without me relaying by hand. This is why the brain and board must be agent-legible — MCP-native and typed — not just a human dashboard. (Example: I dump raw input; the agents curate, relate, and resurface it at the right moment.) The brain itself is **agent-first, human-second** (#35): agents own how knowledge is organized; I consume answers and resurfacing, never folder taxonomy.
 
 ## Key metrics
 
@@ -25,7 +27,7 @@ _Inputs to the Self-Improvement Loop (Track 4), not just a scoreboard. Three of 
 
 - **Repeat-yourself count → 0** — how often I re-explain ways-of-working / ADHD needs / project context to an agent that should already know. Self-tracked, later instrumented.
 - **Shared-brain hit rate** — fraction of agent sessions (any harness) that actually read/write the brain vs. run cold. From the MCP gateway.
-- **Team, not terminal** — share of real work driven as a coordinated team through Agent OS vs. collapsing to solo Claude Code. Behavioral / self-tracked.
+- **Team, not terminal** — share of real work **of any type** driven as a coordinated team through Agent OS vs. collapsing to solo Claude Code. Measures outcomes and coordination, never harness-count — routing quality over utilization (#33). Behavioral / self-tracked.
 - **Brain payoff moments** — rate at which the brain resurfaces something I'd forgotten that changes a project's direction. Self-tracked / qualitative.
 
 ## Tracks
@@ -44,7 +46,7 @@ _Why it serves the approach:_ makes the team visible and drivable — "connect" 
 
 ### Coordination
 
-One task board across harnesses *and* instances (fixing the single-gateway Hermes-Kanban silo), plus the Hermes-flavored chief-of-staff that plans, dispatches, and drives work autonomously.
+One task board across harnesses *and* instances (fixing the single-gateway Hermes-Kanban silo), plus the Hermes-flavored chief-of-staff that plans, **proposes** (propose-first when no policy exists; policy-covered work runs with an audit trail — #34), dispatches, and drives work. Proof milestone: one complete **non-coding** workflow driven end-to-end (#37). Sequenced after the Memory phase (#38).
 
 _Why it serves the approach:_ the shared work surface + orchestration that let the agents act as one team, not parallel soloists.
 
@@ -58,3 +60,5 @@ _Why it serves the approach:_ makes the connected team *compound* over time, not
 
 - **Replacing or forking any agent harness.** Connect, don't compete — the harnesses are built by big, well-funded teams; Agent OS wraps them, never rebuilds them.
 - **Remote / multi-machine control (for now).** Rung 2 is local-first on one machine; the two seams are built remote-*ready*, but driving agents on other machines / a VPS is Rung 3 — a later extension, not v1.
+- **Credential custody.** Agent OS never stores, proxies, or refreshes harness credentials — status badges + native-login launch only (#36).
+- **Utilization as a goal.** Harnesses may legitimately sit idle; the roster tracks real usage, and integrations wait for real rotation (#33, #40 — Grok Build's promotion trigger is the pattern).

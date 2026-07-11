@@ -14,9 +14,9 @@
 import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { listUndo, mergeConfig, undo, type MergeResult } from "../configwrite/index";
+import { mergeConfig, undo, type MergeResult } from "../configwrite/index";
 import { resolveDataDir, resolvePort } from "../paths";
-import { bunCommand, defaultRepoRoot, existingEntriesWithoutOurs, readJson } from "./shared";
+import { bunCommand, defaultRepoRoot, existingEntriesWithoutOurs, readJson, removeHooksIfPresent, removeKeysIfPresent, type UninstallOutcome } from "./shared";
 
 /** The brain's MCP server name in `~/.claude.json` (mirrors the Codex `[mcp_servers.agent-os]` plan). */
 const SERVER_NAME = "agent-os";
@@ -66,35 +66,41 @@ export function installClaudeCode(opts: InstallOptions = {}): InstallResult {
   // ── Hooks → ~/.claude/settings.json — read-modify-write the arrays (deepMerge would REPLACE them) ──────
   const startCmd = bunCommand(repoRoot, "session-start.ts");
   const endCmd = bunCommand(repoRoot, "session-end.ts");
-  const current = readJson(settingsPath(home));
-  // Pre-flight the SECOND target too, before writing EITHER file: the two mergeConfig writes below are not a
-  // cross-file transaction, so a corrupt ~/.claude.json would otherwise throw AFTER settings.json is already
-  // mutated (a partial install). Parsing it now makes the pair all-or-nothing on the realistic failure — an
-  // unparseable existing config. mergeConfig re-reads it authoritatively for the actual merge.
+  // Pre-flight-parse BOTH targets before writing EITHER file (fail fast, with a friendly error, on a corrupt
+  // existing config): the two mergeConfig writes below are not a cross-file transaction, so a corrupt
+  // ~/.claude.json would otherwise throw AFTER settings.json is already mutated (a partial install). Parsing
+  // both now makes the pair all-or-nothing on the realistic failure — an unparseable existing config. The
+  // parsed values are DISCARDED: the RMW arrays are built inside the callback below from the engine's OWN
+  // single read, so a concurrent CC write landing after this pre-flight can't be reverted (the non-atomic
+  // double-read is closed — deepMerge REPLACES the arrays, so they must be rebuilt from the read that merges).
+  readJson(settingsPath(home));
   readJson(claudeJsonPath(home));
-  const sessionStart = [
-    ...existingEntriesWithoutOurs(current, "SessionStart", startCmd),
-    // matcher = the "fresh/reset context" moments (KTD5); a mid-session `compact` is deliberately excluded.
-    { matcher: "startup|resume|clear", hooks: [{ type: "command", command: startCmd, timeout: HOOK_TIMEOUT_S }] },
-  ];
-  const sessionEnd = [
-    ...existingEntriesWithoutOurs(current, "SessionEnd", endCmd),
-    // no matcher ⇒ every end reason marks a graceful end (the point is "not a crash", whatever the reason).
-    { hooks: [{ type: "command", command: endCmd, timeout: HOOK_TIMEOUT_S }] },
-  ];
   const settings = mergeConfig(
     settingsPath(home),
-    { hooks: { SessionStart: sessionStart, SessionEnd: sessionEnd } },
+    (current: unknown) => ({
+      hooks: {
+        SessionStart: [
+          ...existingEntriesWithoutOurs(current, "SessionStart", startCmd),
+          // matcher = the "fresh/reset context" moments (KTD5); a mid-session `compact` is deliberately excluded.
+          { matcher: "startup|resume|clear", hooks: [{ type: "command", command: startCmd, timeout: HOOK_TIMEOUT_S }] },
+        ],
+        SessionEnd: [
+          ...existingEntriesWithoutOurs(current, "SessionEnd", endCmd),
+          // no matcher ⇒ every end reason marks a graceful end (the point is "not a crash", whatever the reason).
+          { hooks: [{ type: "command", command: endCmd, timeout: HOOK_TIMEOUT_S }] },
+        ],
+      },
+    }),
     { dataDir },
   );
 
   // ── MCP server → ~/.claude.json ──────────────────────────────────────────────────────────────────────
   // deepMerge preserves OTHER servers (object-key merge), so no read-modify-write of `mcpServers` is needed.
-  // KNOWN LIMITATION (tracked follow-up): merge also RE-MERGES the agent-os subtree rather than replacing it,
-  // so a PRE-EXISTING agent-os entry carrying a static `headers` (embedded token) would keep it. Unreachable
-  // on the supported path — U6 only ever writes `headersHelper`, never a static `headers` key, so nothing
-  // Agent OS produces embeds a token; only a hand-edited or foreign-tool entry could. The wholesale-replace
-  // fix shares the U14 key-removal/replace primitive the deferred targeted-uninstall needs.
+  // `replaceSubtrees` wholesale-replaces the OWNED `mcpServers.agent-os` subtree instead of re-merging it, so a
+  // PRE-EXISTING agent-os entry carrying a stale key we no longer write — a static `headers` embedding a token,
+  // say — cannot survive the merge (Codex gate #1). Unreachable on the supported path (U6 only ever writes
+  // `headersHelper`, never a static `headers`), but real for a hand-edited/foreign entry; the replace stays
+  // idempotent (reproducing the same bytes ⇒ the engine no-ops on re-install).
   //
   // Cross-file transactionality: the settings write above is now LIVE. If this MCP write fails (symlink
   // target, unwritable, a journal error — anything the pre-flight parse couldn't foresee), roll the settings
@@ -113,7 +119,7 @@ export function installClaudeCode(opts: InstallOptions = {}): InstallResult {
   };
   let mcp: MergeResult;
   try {
-    mcp = mergeConfig(claudeJsonPath(home), mcpPatch, { dataDir });
+    mcp = mergeConfig(claudeJsonPath(home), mcpPatch, { dataDir, replaceSubtrees: [`mcpServers.${SERVER_NAME}`] });
   } catch (err) {
     if (settings.undoId) {
       try {
@@ -129,34 +135,53 @@ export function installClaudeCode(opts: InstallOptions = {}): InstallResult {
 }
 
 /**
- * Reverse the install by restoring each target from the U14 undo journal — CROSS-PROCESS by design (reads the
- * on-disk journal, finds the most-recent mutation of each target, and undoes it), so `agent-os uninstall` can
- * run days later in a fresh process. Returns the paths actually restored.
+ * Reverse the install by TARGETED removal of only what we added — the correct reversal for configs a FOREIGN
+ * process co-owns and rewrites continuously. CROSS-PROCESS by design: nothing here depends on install-time
+ * journal state; it removes our keys from whatever is on disk NOW, so `agent-os uninstall` runs days later in a
+ * fresh process. Returns the paths actually changed.
  *
- * KNOWN LIMITATION (tracked follow-up): undo is a byte-exact WHOLE-FILE restore, identity-checked so it THROWS
- * rather than clobber a file changed since install. `~/.claude/settings.json` is relatively static, so its undo
- * usually succeeds; but `~/.claude.json` is Claude Code's continuously-rewritten live-state file, so it has
- * almost always diverged by uninstall time and its undo is SKIPPED — leaving the (harmless) `mcpServers.agent-os`
- * entry behind. The correct reversal is TARGETED removal (delete only what we added, preserving CC's live state),
- * which needs a U14 key-removal primitive that does not exist yet — deferred. Per-target try/catch here ensures
- * a skipped/diverged target never aborts the loop (which would otherwise leave BOTH files unrestored).
+ * Why not the whole-file `undo` restore this used to do: `~/.claude.json` is Claude Code's live-state file
+ * (`numStartups`, `projects`, …), so by uninstall time it has almost always diverged from what install wrote —
+ * the identity-checked `undo` would THROW rather than clobber it, leaving `mcpServers.agent-os` behind, and a
+ * forced restore would wipe CC's accumulated state. Instead we delete ONLY our `mcpServers.agent-os` object key
+ * (`removeConfigKeys`) and strip ONLY our own entries from the settings.json hook arrays (a callback
+ * array-replace against the engine's own read), preserving everything else on both files however they've
+ * diverged. Idempotent — our keys already absent ⇒ each write no-ops — and per-target try/catch so a
+ * diverged/corrupt target never aborts removal of the other. Returns an `UninstallOutcome`: the paths actually
+ * changed, plus any per-target failures (so a caller can tell "nothing to remove" from "a target could not be
+ * cleaned" — both used to collapse into the same empty list).
  */
-export function uninstallClaudeCode(opts: { home?: string; dataDir?: string } = {}): string[] {
+export function uninstallClaudeCode(opts: { home?: string; dataDir?: string; repoRoot?: string } = {}): UninstallOutcome {
   const home = opts.home ?? homedir();
   const dataDir = resolveDataDir(opts.dataDir);
-  const entries = listUndo(dataDir);
-  const restored: string[] = [];
-  for (const target of [claudeJsonPath(home), settingsPath(home)]) {
-    const entry = entries.findLast((e) => e.targetPath === target);
-    if (!entry) continue;
-    try {
-      undo(entry.id, dataDir);
-      restored.push(target);
-    } catch (err) {
-      // Diverged since install (identity check) or otherwise unrestorable — skip it, keep the loop going so
-      // the other target is still restored. See the KNOWN LIMITATION above (targeted-removal follow-up).
-      console.error(`[agent-os] uninstall: could not restore '${target}' (changed since install?):`, err);
-    }
-  }
-  return restored;
+  const repoRoot = opts.repoRoot ?? defaultRepoRoot();
+  const removed: string[] = [];
+  const failed: UninstallOutcome["failed"] = [];
+  const warnings: UninstallOutcome["warnings"] = [];
+
+  // ── Hooks → ~/.claude/settings.json — strip only OUR SessionStart/SessionEnd entries, keep the user's ──
+  // Shared uninstall-side stripper. The engine's SINGLE read drives everything: an absent or already-clean
+  // settings.json makes the callback abstain (MERGE_NOOP), so nothing is created or written; per-target isolation
+  // means a diverged/corrupt settings.json is reported in `failed`, never aborts the MCP removal below.
+  const hooksOutcome = removeHooksIfPresent(
+    settingsPath(home),
+    [
+      ["SessionStart", bunCommand(repoRoot, "session-start.ts")],
+      ["SessionEnd", bunCommand(repoRoot, "session-end.ts")],
+    ],
+    { dataDir, errLabel: "could not remove our hooks from" },
+  );
+  removed.push(...hooksOutcome.removed);
+  failed.push(...hooksOutcome.failed);
+  warnings.push(...hooksOutcome.warnings);
+
+  // ── MCP server → ~/.claude.json — delete only mcpServers.agent-os, preserving CC's live state ──
+  // Shared uninstall-side key stripper (object-keyed twin of removeHooksIfPresent): same single-read presence
+  // semantics and per-target isolation — a diverged/corrupt/symlinked claude.json is reported in `failed`.
+  const mcpOutcome = removeKeysIfPresent(claudeJsonPath(home), [`mcpServers.${SERVER_NAME}`], { dataDir, errLabel: SERVER_NAME });
+  removed.push(...mcpOutcome.removed);
+  failed.push(...mcpOutcome.failed);
+  warnings.push(...mcpOutcome.warnings);
+
+  return { removed, failed, warnings };
 }

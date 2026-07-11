@@ -89,7 +89,7 @@ if (next === MERGE_NOOP) {
 }
 ```
 
-**The presence primitive both merge and removal share (`engine.ts:561-573`):**
+**The presence primitive both merge and removal share (`engine.ts:570-589`):**
 ```ts
 function statTarget(path: string): "present" | "absent" {
   let stat;
@@ -101,6 +101,12 @@ function statTarget(path: string): "present" | "absent" {
   }
   if (stat.isSymbolicLink()) {
     throw new Error(`configwrite: refusing to write '${path}' — it is a symlink; ...`);
+  }
+  // Any other non-regular node (directory, FIFO, socket, device) must NOT read as "present":
+  // a later readFileSync on a writer-less FIFO would BLOCK forever, a directory throws EISDIR —
+  // refuse here at the lstat presence check, before any open.
+  if (!stat.isFile()) {
+    throw new Error(`configwrite: refusing to use '${path}' — not a regular file (...); configs must be regular files`);
   }
   return "present";
 }

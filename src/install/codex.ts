@@ -38,9 +38,9 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, sta
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { parse as parseToml } from "smol-toml";
-import { AppliedButUnjournaledError, mergeConfig, removeConfigKeys, undo, type MergeResult } from "../configwrite/index";
+import { mergeConfig, undo, type MergeResult } from "../configwrite/index";
 import { codexTokenPath, readCodexToken, resolveCodexToken, resolveDataDir, resolvePort, TOKEN_HEADER } from "../paths";
-import { bunCommand, defaultRepoRoot, errorText, existingEntriesWithoutOurs, readJson, removeHooksIfPresent, type UninstallOutcome } from "./shared";
+import { bunCommand, defaultRepoRoot, errorText, existingEntriesWithoutOurs, readJson, removeHooksIfPresent, removeKeysIfPresent, type UninstallOutcome } from "./shared";
 
 /** The brain's MCP server name in `~/.codex/config.toml` (mirrors the Claude Code `mcpServers.agent-os` key). */
 const SERVER_NAME = "agent-os";
@@ -340,38 +340,26 @@ export function uninstallCodex(opts: { home?: string; dataDir?: string; repoRoot
   const warnings: UninstallOutcome["warnings"] = [];
 
   // ── (a) MCP server → ~/.codex/config.toml — delete only mcp_servers.agent-os, preserve Codex's live state ──
-  const configToml = configTomlPath(home);
-  try {
-    const res = removeConfigKeys(configToml, [`mcp_servers.${SERVER_NAME}`], { dataDir });
-    // config.toml was PUBLISHED 0600 at install (it embeds the token) and the targeted removeConfigKeys preserves
-    // the file's CURRENT mode, so it STAYS 0600 after removal — we deliberately never loosen it back. A secret
-    // added to the file while Agent OS held it at 0600 would be exposed by widening the mode on uninstall, so
-    // tightening is never autonomously reversed (keeps 0600 by design; full mode-lifecycle restoration: issue #33).
-    if (!res.noop) removed.push(configToml);
-  } catch (err) {
-    if (err instanceof AppliedButUnjournaledError) {
-      // The delete LANDED (mcp_servers.agent-os is gone) but its undo entry didn't record — count it removed,
-      // and warn (recover from the backup only if reverting), never failed: the entry really is gone.
-      console.error(
-        `[agent-os] uninstall: removed '${SERVER_NAME}' from '${configToml}' but journaling failed (recover from backup if reverting):`,
-        err,
-      );
-      removed.push(configToml);
-      warnings.push({ path: configToml, error: errorText(err) });
-    } else {
-      // A corrupt / symlinked / unwritable config.toml can't be targeted-removed. The entry lingers, but the
-      // codex.token revocation below makes it INERT (it authenticates with codex.token, which we delete).
-      console.error(
-        `[agent-os] uninstall: could not remove '${SERVER_NAME}' from '${configToml}' — any leftover entry is neutralized by the codex.token revocation below; remove it manually:`,
-        err,
-      );
-      failed.push({ path: configToml, error: errorText(err) });
-    }
-  }
+  // Shared uninstall-side key stripper (same single-read presence semantics + per-target isolation as the CC
+  // installer's claude.json removal). config.toml was PUBLISHED 0600 at install (it embeds the token) and the
+  // targeted removeConfigKeys preserves the file's CURRENT mode, so it STAYS 0600 after removal — we deliberately
+  // never loosen it back. A secret added to the file while Agent OS held it at 0600 would be exposed by widening
+  // the mode on uninstall, so tightening is never autonomously reversed (keeps 0600 by design; full mode-lifecycle
+  // restoration: issue #33). A corrupt/symlinked config.toml that can't be stripped lands in `failed`, but the
+  // codex.token revocation below makes any lingering entry INERT — the `failedSuffix` carries that operator note.
+  const configOutcome = removeKeysIfPresent(configTomlPath(home), [`mcp_servers.${SERVER_NAME}`], {
+    dataDir,
+    errLabel: SERVER_NAME,
+    failedSuffix: " — any leftover entry is neutralized by the codex.token revocation below; remove it manually",
+  });
+  removed.push(...configOutcome.removed);
+  failed.push(...configOutcome.failed);
+  warnings.push(...configOutcome.warnings);
 
   // ── (b) SessionStart hook → ~/.codex/hooks.json — strip only OUR entry, keep every other hook ──
-  // Shared uninstall-side stripper: exists-guarded (never CREATE a hooks.json by uninstalling), no-op-gated,
-  // per-target isolation — a diverged/corrupt hooks.json is reported in `failed`, never aborts the AGENTS.md strip or token revocation.
+  // Shared uninstall-side stripper. The engine's SINGLE read drives everything: an absent or already-clean
+  // hooks.json makes the callback abstain (MERGE_NOOP), so nothing is created or written; per-target isolation
+  // means a diverged/corrupt hooks.json is reported in `failed`, never aborts the AGENTS.md strip or token revocation.
   const hooksOutcome = removeHooksIfPresent(
     hooksJsonPath(home),
     [["SessionStart", bunCommand(repoRoot, "codex-session-start.ts")]],

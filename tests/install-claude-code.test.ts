@@ -212,8 +212,8 @@ describe("installClaudeCode", () => {
     install();
     expect(readJson(claudeJsonPath()).mcpServers["agent-os"]).toBeDefined();
 
-    // Force the settings.json uninstall write to throw: replace the file with a DIRECTORY, so the engine's
-    // readFileSync(target) hits EISDIR. (existsSync is true for a dir, so the exists-guard doesn't skip it.)
+    // Force the settings.json uninstall write to fail: replace the file with a DIRECTORY. The engine's statTarget
+    // refuses a non-regular target at the presence check (before any read), caught here as a per-target failure.
     rmSync(settingsPath());
     mkdirSync(settingsPath());
 
@@ -234,7 +234,8 @@ describe("installClaudeCode", () => {
 
   test("uninstall does not throw even when BOTH targets fail to write (each isolated, nothing reported removed)", () => {
     install();
-    // Sabotage both configs into directories so each uninstall write throws (and is caught per-target).
+    // Sabotage both configs into directories so the engine's statTarget refuses each (not a regular file) at the
+    // presence check — a caught per-target failure.
     rmSync(settingsPath());
     mkdirSync(settingsPath());
     rmSync(claudeJsonPath());

@@ -14,9 +14,9 @@
 import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { AppliedButUnjournaledError, mergeConfig, removeConfigKeys, undo, type MergeResult } from "../configwrite/index";
+import { mergeConfig, undo, type MergeResult } from "../configwrite/index";
 import { resolveDataDir, resolvePort } from "../paths";
-import { bunCommand, defaultRepoRoot, errorText, existingEntriesWithoutOurs, readJson, removeHooksIfPresent, type UninstallOutcome } from "./shared";
+import { bunCommand, defaultRepoRoot, existingEntriesWithoutOurs, readJson, removeHooksIfPresent, removeKeysIfPresent, type UninstallOutcome } from "./shared";
 
 /** The brain's MCP server name in `~/.claude.json` (mirrors the Codex `[mcp_servers.agent-os]` plan). */
 const SERVER_NAME = "agent-os";
@@ -160,8 +160,9 @@ export function uninstallClaudeCode(opts: { home?: string; dataDir?: string; rep
   const warnings: UninstallOutcome["warnings"] = [];
 
   // ── Hooks → ~/.claude/settings.json — strip only OUR SessionStart/SessionEnd entries, keep the user's ──
-  // Shared uninstall-side stripper: exists-guarded (never CREATE a settings.json by uninstalling), no-op-gated,
-  // per-target isolation — a diverged/corrupt settings.json is reported in `failed`, never aborts the MCP removal below.
+  // Shared uninstall-side stripper. The engine's SINGLE read drives everything: an absent or already-clean
+  // settings.json makes the callback abstain (MERGE_NOOP), so nothing is created or written; per-target isolation
+  // means a diverged/corrupt settings.json is reported in `failed`, never aborts the MCP removal below.
   const hooksOutcome = removeHooksIfPresent(
     settingsPath(home),
     [
@@ -175,22 +176,12 @@ export function uninstallClaudeCode(opts: { home?: string; dataDir?: string; rep
   warnings.push(...hooksOutcome.warnings);
 
   // ── MCP server → ~/.claude.json — delete only mcpServers.agent-os, preserving CC's live state ──
-  const claudeJson = claudeJsonPath(home);
-  try {
-    const res = removeConfigKeys(claudeJson, [`mcpServers.${SERVER_NAME}`], { dataDir });
-    if (!res.noop) removed.push(claudeJson);
-  } catch (err) {
-    if (err instanceof AppliedButUnjournaledError) {
-      // The delete LANDED (mcpServers.agent-os is gone) but its undo entry didn't record — count it removed,
-      // and warn (recover from the backup only if reverting), never failed: the entry really is gone.
-      console.error(`[agent-os] uninstall: removed '${SERVER_NAME}' from '${claudeJson}' but journaling failed (recover from backup if reverting):`, err);
-      removed.push(claudeJson);
-      warnings.push({ path: claudeJson, error: errorText(err) });
-    } else {
-      console.error(`[agent-os] uninstall: could not remove '${SERVER_NAME}' from '${claudeJson}':`, err);
-      failed.push({ path: claudeJson, error: errorText(err) });
-    }
-  }
+  // Shared uninstall-side key stripper (object-keyed twin of removeHooksIfPresent): same single-read presence
+  // semantics and per-target isolation — a diverged/corrupt/symlinked claude.json is reported in `failed`.
+  const mcpOutcome = removeKeysIfPresent(claudeJsonPath(home), [`mcpServers.${SERVER_NAME}`], { dataDir, errLabel: SERVER_NAME });
+  removed.push(...mcpOutcome.removed);
+  failed.push(...mcpOutcome.failed);
+  warnings.push(...mcpOutcome.warnings);
 
   return { removed, failed, warnings };
 }

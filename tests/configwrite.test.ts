@@ -12,6 +12,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse as parseToml } from "smol-toml";
@@ -761,6 +762,43 @@ describe("removeConfigKeys / mergeConfig fail closed on an indeterminate presenc
     expect(() => removeConfigKeys(link, ["anything"], { dataDir })).toThrow(/symlink/);
     expect(bakCount()).toBe(0);
     expect(listUndo(dataDir)).toEqual([]);
+  });
+
+  test("removeConfigKeys throws the not-a-regular-file refusal on a DIRECTORY target (never EISDIR at read)", () => {
+    // A directory standing where a config file is expected: lstat SUCCEEDS and it isn't a symlink, so the OLD
+    // code fell through to "present" and let publish's readFileSync hit EISDIR. statTarget now refuses at the
+    // presence check — before any read — so a non-regular node can never reach the read/copy path.
+    const dir = join(configsDir, "settings.json");
+    mkdirSync(dir);
+    expect(() => removeConfigKeys(dir, ["mcpServers.agent-os"], { dataDir })).toThrow(/not a regular file/);
+    expect(bakCount()).toBe(0); // refused before any backup/journal side effect
+    expect(listUndo(dataDir)).toEqual([]);
+  });
+
+  test("mergeConfig throws the not-a-regular-file refusal on a DIRECTORY target (never routed to create/EISDIR)", () => {
+    // The merge twin: a directory must be refused up front, never read as "present" (EISDIR at readFileSync) nor
+    // — were lstat to somehow miss it — routed to the create path that would try to write a file over a directory.
+    const dir = join(configsDir, "config.json");
+    mkdirSync(dir);
+    expect(() => mergeConfig(dir, { b: 2 }, { dataDir })).toThrow(/not a regular file/);
+    expect(bakCount()).toBe(0);
+    expect(listUndo(dataDir)).toEqual([]);
+  });
+
+  test("mergeConfig throws the not-a-regular-file refusal on a FIFO target WITHOUT blocking (the read that would hang never runs)", () => {
+    // A FIFO (named pipe) with no writer: the pre-fix code classified it "present" and publish's readFileSync
+    // BLOCKED the process forever waiting for a writer. statTarget refuses it at the lstat presence check
+    // (isFIFO → not a regular file), which never opens the pipe — so this test COMPLETING at all is itself the
+    // proof it can't hang. POSIX-only (mkfifo); this repo targets macOS/Linux.
+    const fifo = join(configsDir, "settings.json");
+    execFileSync("mkfifo", [fifo]);
+    try {
+      expect(() => mergeConfig(fifo, { b: 2 }, { dataDir })).toThrow(/not a regular file/);
+      expect(bakCount()).toBe(0);
+      expect(listUndo(dataDir)).toEqual([]);
+    } finally {
+      rmSync(fifo, { force: true }); // unlink the pipe (never opened) so afterEach's recursive rm is clean
+    }
   });
 });
 

@@ -5,7 +5,7 @@
  */
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { AppliedButUnjournaledError, mergeConfig, MERGE_NOOP } from "../configwrite/index";
+import { AppliedButUnjournaledError, mergeConfig, MERGE_NOOP, removeConfigKeys } from "../configwrite/index";
 
 /** This repo's root: `src/install/shared.ts` → `../..`. Safe for any `src/install/` caller — `import.meta.dir`
  *  is THIS file's own directory, and `claude-code.ts` / `codex.ts` live in that same directory. */
@@ -155,6 +155,42 @@ export function removeHooksIfPresent(
       return { removed: [targetPath], failed: [], warnings: [{ path: targetPath, error: errorText(err) }] };
     }
     console.error(`[agent-os] uninstall: ${opts.errLabel} '${targetPath}':`, err);
+    return { removed: [], failed: [{ path: targetPath, error: errorText(err) }], warnings: [] };
+  }
+}
+
+/**
+ * The uninstall-side KEY stripper both installers share (the object-keyed twin of `removeHooksIfPresent`): ONE
+ * `removeConfigKeys` call that deletes the named dotted `keyPaths` from `targetPath`, on the engine's own
+ * backup-then-atomic-write-then-journal discipline. Reports an `UninstallOutcome`: `removed` names `targetPath`
+ * when the delete actually changed the file; `warnings` names it when the delete LANDED but journaling failed
+ * (still removed, recoverable from backup); `failed` names it with the error when a diverged/corrupt/symlinked
+ * target can't be stripped. Each failure/warning is logged, and ONE target's failure never aborts an uninstall's
+ * other removals (per-target isolation).
+ *
+ * ALL presence semantics come from the engine's ONE read: an absent target — or one that resolves NONE of
+ * `keyPaths` — is a true no-op that CREATES nothing and never reformats a foreign-formatted file; a symlink or
+ * other non-regular target makes the engine's `statTarget` throw, caught here as a `failed` entry. `errLabel` is
+ * the entity being removed (e.g. the server name), woven into the log text as `'<errLabel>'`. `failedSuffix` is
+ * appended to the FAILED-branch log line only — a caller-specific tail (Codex adds "… neutralized by the
+ * codex.token revocation below; remove it manually"); it defaults to empty for callers with nothing to add.
+ */
+export function removeKeysIfPresent(
+  targetPath: string,
+  keyPaths: string[],
+  opts: { dataDir: string; errLabel: string; failedSuffix?: string },
+): UninstallOutcome {
+  try {
+    const res = removeConfigKeys(targetPath, keyPaths, { dataDir: opts.dataDir });
+    return { removed: res.noop ? [] : [targetPath], failed: [], warnings: [] };
+  } catch (err) {
+    if (err instanceof AppliedButUnjournaledError) {
+      // The delete LANDED (the keys are gone) but its undo entry didn't record — count it removed, and warn so
+      // the applied-but-unrecorded write is visible (recover from the backup only if reverting), never failed.
+      console.error(`[agent-os] uninstall: removed '${opts.errLabel}' from '${targetPath}' but journaling failed (recover from backup if reverting):`, err);
+      return { removed: [targetPath], failed: [], warnings: [{ path: targetPath, error: errorText(err) }] };
+    }
+    console.error(`[agent-os] uninstall: could not remove '${opts.errLabel}' from '${targetPath}'${opts.failedSuffix ?? ""}:`, err);
     return { removed: [], failed: [{ path: targetPath, error: errorText(err) }], warnings: [] };
   }
 }

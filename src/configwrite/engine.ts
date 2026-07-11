@@ -554,16 +554,18 @@ function backupName(targetPath: string): string {
 }
 
 /**
- * The engine's ONE presence decision, shared by merge and removal. Three outcomes: a regular file is
+ * The engine's ONE presence decision, shared by merge and removal. Three outcomes: a REGULAR FILE is
  * "present"; a genuinely missing entry (lstat ENOENT — including a path made unreachable by a missing parent,
  * which is indistinguishable by errno and equivalent for our purposes) is "absent"; everything else THROWS —
  * a symlink (dangling or resolved: renameSync would replace the LINK itself with a regular file, silently
  * breaking a dotfile-managed config, and the byte-exact backup holds only dereferenced bytes so undo could not
- * restore the link — symlink write-through is a deferred enhancement), or an indeterminate lookup (EACCES,
- * ENOTDIR, EIO, …). Indeterminate must NEVER read as absence: on a removal it would fake a clean no-op while our
- * registration stays live; on a merge it is worse — an existsSync-false verdict routed an UNREADABLE existing
- * config to the create path, where temp+rename would clobber a file we never read. Uses lstat, so it never
- * follows the link.
+ * restore the link — symlink write-through is a deferred enhancement); any OTHER non-regular node — a directory,
+ * FIFO, socket, or device — since reading "present" would hand it to publish's readFileSync/copyFileSync (a FIFO
+ * with no writer BLOCKS the process forever; a directory throws EISDIR), so a config target that isn't a plain
+ * file is refused up front; or an indeterminate lookup (EACCES, ENOTDIR, EIO, …). Indeterminate must NEVER read
+ * as absence: on a removal it would fake a clean no-op while our registration stays live; on a merge it is worse
+ * — an existsSync-false verdict routed an UNREADABLE existing config to the create path, where temp+rename would
+ * clobber a file we never read. Uses lstat, so it never follows the link (and never opens a FIFO to test it).
  */
 function statTarget(path: string): "present" | "absent" {
   let stat;
@@ -575,6 +577,13 @@ function statTarget(path: string): "present" | "absent" {
   }
   if (stat.isSymbolicLink()) {
     throw new Error(`configwrite: refusing to write '${path}' — it is a symlink; symlinked configs are not supported yet`);
+  }
+  // Anything else that isn't a plain file (directory, FIFO, socket, device) must NOT read as "present": publish
+  // would then readFileSync/copyFileSync it — a FIFO with no writer BLOCKS forever, a directory throws EISDIR — so
+  // refuse it here at the lstat presence check, before any open. Symlinks are handled just above; this catches
+  // every other non-regular node.
+  if (!stat.isFile()) {
+    throw new Error(`configwrite: refusing to use '${path}' — not a regular file (directory/FIFO/socket/device); configs must be regular files`);
   }
   return "present";
 }

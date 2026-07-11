@@ -54,10 +54,16 @@ The gap closed exactly as issue #21 proposed — but shipping `removeConfigKeys`
 
 **Array read-modify-write (preserve the user's entries, stay idempotent):**
 ```ts
-// deepMerge REPLACES arrays, so hand it the whole desired array: existing-minus-ours + ours.
-const existing = existingEntriesWithoutOurs(current, "SessionStart", ourCommand); // strip our prior entry
-const sessionStart = [...existing, { matcher: "startup|resume|clear", hooks: [{ type: "command", command: ourCommand }] }];
-mergeConfig(settingsPath, { hooks: { SessionStart: sessionStart } }, { dataDir }); // object-keyed hooks.* merges; the arrays are replaced wholesale
+// deepMerge REPLACES arrays, so hand it the whole desired array: existing-minus-ours + ours — and build it
+// INSIDE the callback from the engine's OWN read (`current`), never a separate pre-read (guidance 2 above).
+mergeConfig(settingsPath, (current) => ({
+  hooks: {
+    SessionStart: [
+      ...existingEntriesWithoutOurs(current, "SessionStart", ourCommand), // strip our prior entry
+      { matcher: "startup|resume|clear", hooks: [{ type: "command", command: ourCommand }] },
+    ],
+  },
+}), { dataDir }); // object-keyed hooks.* merges; the arrays are replaced wholesale
 ```
 
 **Cross-file transactional install (roll back the first write if the second fails):**

@@ -73,11 +73,15 @@ export function namedItems(ctx: ScanContext, runtime: Runtime, kind: ItemKind, s
     .map((name) => makeItem(ctx, runtime, kind, name));
 }
 
-/** True only for a plain object (a config table) — not `null`, not an array, not a scalar. The one gate
- *  both `asRecord` and `namedItems` (the per-child check) key off, so "is this a real config table?" is
- *  decided in exactly one place. */
+/** True only for a PLAIN object (a config table) — not `null`, not an array, and NOT a class instance. The
+ *  prototype check is load-bearing: `smol-toml` represents a TOML datetime scalar as a `TomlDate` OBJECT, so a
+ *  bare `typeof === "object"` test would accept `ghost = 2020-01-01T00:00:00Z` as a server table and emit a
+ *  phantom (Date/Map/etc. likewise). A real config table is always a plain `{}`. The one gate both `asRecord`
+ *  and `namedItems` (the per-child check) key off, so "is this a real config table?" is decided in one place. */
 export function isRecord(v: unknown): v is Record<string, unknown> {
-  return v !== null && typeof v === "object" && !Array.isArray(v);
+  if (v === null || typeof v !== "object" || Array.isArray(v)) return false;
+  const proto = Object.getPrototypeOf(v);
+  return proto === Object.prototype || proto === null;
 }
 
 /** A value as a plain-object record, or `{}` for anything else (array, `null`, scalar) — so a malformed

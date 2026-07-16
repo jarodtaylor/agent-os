@@ -320,4 +320,49 @@ describe("scan — review-hardening", () => {
     });
     expect(names(scanClaudeCode(ctx()), "claude-code", "mcp")).toEqual(["real"]); // non-table children skipped
   });
+
+  // Codex gate: a TOML datetime scalar parses to a TomlDate OBJECT — the plain-object prototype check must
+  // reject it, or a bare typeof-object test would emit it as a phantom server.
+  test("a TOML datetime-valued child is not a config table (no phantom from a TomlDate)", () => {
+    writeRaw(
+      join(home, ".codex", "config.toml"),
+      [`[mcp_servers]`, `ghost = 2020-01-01T00:00:00Z`, `[mcp_servers.real]`, `url = "http://x"`].join("\n"),
+    );
+    expect(names(scanCodex(ctx()), "codex", "mcp")).toEqual(["real"]); // datetime `ghost` skipped, not phantom
+  });
+
+  // Codex gate: the source-level backstop must not log a raw error either — an unexpected throw could carry
+  // config content. runScanners logs the error CLASS only, never its message.
+  test("runScanners never logs a thrown error's message (only its class)", async () => {
+    const SECRET = "sk-secret-inside-a-thrown-error";
+    const leaky: SourceScanner = () => {
+      throw new Error(`boom ${SECRET}`);
+    };
+    const errors: string[] = [];
+    const original = console.error;
+    console.error = (...args: unknown[]) => void errors.push(args.map(String).join(" "));
+    try {
+      await runScanners(ctx(), [{ runtime: "codex", scan: leaky }]);
+    } finally {
+      console.error = original;
+    }
+    expect(errors.length).toBeGreaterThan(0); // it DID log the degradation...
+    for (const e of errors) expect(e).not.toContain(SECRET); // ...but never the error message/secret
+  });
+
+  // Codex gate: composing scanner output must not RangeError on a large array — `push(...arr)` (a function-
+  // call spread of an untrusted-length array) does; `concat` does not.
+  test("runScanners composes a very large scanner output without a spread RangeError", async () => {
+    const N = 100_000;
+    const many: SourceScanner = (c) =>
+      Array.from({ length: N }, (_, i) => ({
+        runtime: "codex" as const,
+        kind: "mcp" as const,
+        name: `s${i}`,
+        machineId: c.machineId,
+        source: "agent-os" as const,
+      }));
+    const out = await runScanners(ctx(), [{ runtime: "codex", scan: many }]);
+    expect(out.length).toBe(N); // all composed, no crash
+  });
 });

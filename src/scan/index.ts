@@ -43,12 +43,17 @@ export async function runScanners(
   ctx: ScanContext,
   scanners: ReadonlyArray<{ runtime: Runtime; scan: SourceScanner }>,
 ): Promise<InventoryItem[]> {
-  const inventory: InventoryItem[] = [];
+  let inventory: InventoryItem[] = [];
   for (const { runtime, scan } of scanners) {
     try {
-      inventory.push(...(await scan(ctx)));
+      // `concat`, not `inventory.push(...items)`: a function-call spread of an untrusted-length array
+      // RangeErrors in V8/Bun on a pathological config (attacker-owns-HOME), which would nuke the whole scan.
+      inventory = inventory.concat(await scan(ctx));
     } catch (err) {
-      console.error(`[agent-os] inventory scan: '${runtime}' degraded this pass:`, err);
+      // Log the error CLASS only, never its message/stack: an unexpected throw could carry config content,
+      // and a config legitimately holds secrets (no secret escapes any read path — the same rule `readParsed`
+      // follows). The runtime + class is enough to know which source degraded and roughly why.
+      console.error(`[agent-os] inventory scan: '${runtime}' threw ${(err as Error)?.name ?? "an error"} and was degraded`);
     }
   }
   return inventory;

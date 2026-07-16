@@ -29,22 +29,21 @@ import { asRecord, listSkills, makeItem, namedItems, readJson, type ScanContext 
  *  + sync: reads the live files and returns the current inventory (R8) — no persistence, so a rescan always
  *  reflects disk (AE5). Fail-soft per surface; a wholesale throw is caught by `scanAll` (R9). */
 export function scanClaudeCode(ctx: ScanContext): InventoryItem[] {
-  const items: InventoryItem[] = [];
-
-  // ── MCP servers — from `~/.claude.json` (the trap: NOT settings.json) ──
+  // MCP servers — from `~/.claude.json` (the trap: NOT settings.json).
   const claudeJson = readJson(join(ctx.homeDir, ".claude.json"));
-  items.push(...namedItems(ctx, "claude-code", "mcp", claudeJson?.mcpServers));
 
-  // ── Skills — `~/.claude/skills/<name>/SKILL.md` ──
-  items.push(...listSkills(ctx, "claude-code", join(ctx.homeDir, ".claude", "skills")));
+  // Plugins — `settings.json .enabledPlugins`, a `{ "<name>@<mkt>": boolean }` map; enabled (=== true) only
+  // (a disabled plugin is `false`), and an empty key contributes nothing (contract `name.min(1)`).
+  const enabledPlugins = asRecord(readJson(join(ctx.homeDir, ".claude", "settings.json"))?.enabledPlugins);
+  const plugins = Object.keys(enabledPlugins)
+    .filter((name) => name.length > 0 && enabledPlugins[name] === true)
+    .map((name) => makeItem(ctx, "claude-code", "plugin", name));
 
-  // ── Plugins — `settings.json .enabledPlugins`, a `{ "<name>@<mkt>": boolean }` map; enabled (=== true)
-  //    only (a disabled plugin is `false`), and an empty key contributes nothing (contract `name.min(1)`). ──
-  const settings = readJson(join(ctx.homeDir, ".claude", "settings.json"));
-  const enabledPlugins = asRecord(settings?.enabledPlugins);
-  for (const name of Object.keys(enabledPlugins)) {
-    if (name.length > 0 && enabledPlugins[name] === true) items.push(makeItem(ctx, "claude-code", "plugin", name));
-  }
-
-  return items;
+  // Array-literal spread is iteration-based (no function-call arg limit), so it stays safe on a pathological
+  // huge surface — unlike `items.push(...arr)`, which RangeErrors on an untrusted-length array.
+  return [
+    ...namedItems(ctx, "claude-code", "mcp", claudeJson?.mcpServers),
+    ...listSkills(ctx, "claude-code", join(ctx.homeDir, ".claude", "skills")), // `~/.claude/skills/<name>/SKILL.md`
+    ...plugins,
+  ];
 }

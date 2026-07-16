@@ -284,4 +284,40 @@ describe("scan — review-hardening", () => {
       }
     }
   });
+
+  // Codex gate: a malformed config must NOT log the file content — smol-toml's error quotes the offending
+  // source line, and a config.toml legitimately holds secrets. The degraded warn is PATH-ONLY.
+  test("a malformed config's degraded warn never leaks the file content/secret", () => {
+    const SECRET = "sk-secret-on-a-broken-line";
+    writeRaw(join(home, ".codex", "config.toml"), `[mcp_servers.x]\napi_key = "${SECRET}\n`); // unterminated string
+    const warnings: string[] = [];
+    const original = console.warn;
+    console.warn = (...args: unknown[]) => void warnings.push(args.map(String).join(" "));
+    try {
+      expect(scanCodex(ctx())).toEqual([]); // degrades to empty, no throw
+    } finally {
+      console.warn = original;
+    }
+    expect(warnings.some((w) => w.includes("config.toml"))).toBe(true); // it DID surface the degraded file...
+    for (const w of warnings) expect(w).not.toContain(SECRET); // ...but never the secret it contained
+  });
+
+  // Codex gate: readFileSync on a FIFO/character-device blocks forever; a directory is the same non-regular
+  // branch (easy to create). A non-regular config path is skipped WITHOUT reading — never hangs the scan.
+  test("a config path that is a directory (non-regular) is skipped, never read", () => {
+    mkdirSync(join(home, ".claude.json"), { recursive: true }); // .claude.json is a DIRECTORY, not a file
+    makeSkill(join(home, ".claude", "skills"), "kept");
+    const items = scanClaudeCode(ctx()); // must return, not hang or throw
+    expect(names(items, "claude-code", "mcp")).toEqual([]); // the dir is skipped
+    expect(names(items, "claude-code", "skill")).toEqual(["kept"]); // other surfaces unaffected
+  });
+
+  // Codex gate: a scalar/array/null child is malformed, not a config table — emitting it would fabricate a
+  // phantom active server/plugin (e.g. `[mcp_servers]` with a stray `ghost = false`).
+  test("a scalar / array / null child value is not emitted as a phantom active entry", () => {
+    writeJson(join(home, ".claude.json"), {
+      mcpServers: { real: { url: "http://x" }, ghost: false, arr: [1], nul: null },
+    });
+    expect(names(scanClaudeCode(ctx()), "claude-code", "mcp")).toEqual(["real"]); // non-table children skipped
+  });
 });

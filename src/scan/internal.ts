@@ -51,10 +51,14 @@ export function makeItem(ctx: ScanContext, runtime: Runtime, kind: ItemKind, nam
  * One item per key of a name-keyed config surface (an `mcpServers` / `plugins` map) — the shape every
  * scanner's "enumerate this surface" step reduces to. Two honesty rules keep the inventory reflecting the
  * ACTUAL active stack (R8), not everything ever configured:
- *   - an entry whose config table is EXPLICITLY `enabled = false` is skipped. Codex writes `enabled` into
- *     each `[mcp_servers.x]` / `[plugins."y"]` table; Claude Code's `~/.claude.json .mcpServers` has no such
- *     flag, so all of its entries are kept. Present-and-unflagged counts as enabled — a missing flag is NOT
- *     "off" (a scanner must not invent a disable the config didn't state).
+ *   - the child value must itself be a config TABLE (object). A scalar/array/null child is malformed — e.g.
+ *     `[mcp_servers]` with a stray `ghost = false` makes `mcp_servers.ghost` the boolean `false`, NOT a
+ *     server table — so emitting it would fabricate a phantom active server (it also makes `enabled` look
+ *     absent). A real server/plugin is always a table; anything else is skipped.
+ *   - an entry whose table is EXPLICITLY `enabled = false` is skipped. Codex writes `enabled` into each
+ *     `[mcp_servers.x]` / `[plugins."y"]` table; Claude Code's `~/.claude.json .mcpServers` has no such flag,
+ *     so all of its entries are kept. Present-and-unflagged counts as enabled — a missing flag is NOT "off"
+ *     (a scanner must not invent a disable the config didn't state).
  *   - an empty-string key is skipped: it would emit `name: ""`, which the contract's `name.min(1)` rejects,
  *     so a hand-mangled `{"": {}}` never produces an item that fails `InventoryItem.parse` downstream.
  * A non-object surface yields `[]`. Returns an array to spread like `listSkills`, never mutating an accumulator.
@@ -62,15 +66,25 @@ export function makeItem(ctx: ScanContext, runtime: Runtime, kind: ItemKind, nam
 export function namedItems(ctx: ScanContext, runtime: Runtime, kind: ItemKind, surface: unknown): InventoryItem[] {
   const entries = asRecord(surface);
   return Object.keys(entries)
-    .filter((name) => name.length > 0 && asRecord(entries[name]).enabled !== false)
+    .filter((name) => {
+      const entry = entries[name];
+      return name.length > 0 && isRecord(entry) && entry.enabled !== false;
+    })
     .map((name) => makeItem(ctx, runtime, kind, name));
+}
+
+/** True only for a plain object (a config table) — not `null`, not an array, not a scalar. The one gate
+ *  both `asRecord` and `namedItems` (the per-child check) key off, so "is this a real config table?" is
+ *  decided in exactly one place. */
+export function isRecord(v: unknown): v is Record<string, unknown> {
+  return v !== null && typeof v === "object" && !Array.isArray(v);
 }
 
 /** A value as a plain-object record, or `{}` for anything else (array, `null`, scalar) — so a malformed
  *  config (`mcpServers: "oops"`, `mcpServers: [...]`) yields no keys and no throw, never junk like
  *  `Object.keys("oops")` → `["0",…]`. */
 export function asRecord(v: unknown): Record<string, unknown> {
-  return v !== null && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
+  return isRecord(v) ? v : {};
 }
 
 /** Keys of a value only when it is a plain object (see `asRecord`); `[]` for any non-object surface. */
@@ -89,34 +103,47 @@ export function readToml(path: string): Record<string, unknown> | null {
   return readParsed(path, (raw) => parseToml(raw));
 }
 
+/** Upper bound on a config we'll read into memory — generous (real configs are KBs; `~/.claude.json` can
+ *  reach low MBs), so it never rejects a legitimate file, but it bounds the OOM surface of a pathological
+ *  oversized one (the attacker-owns-HOME residual). */
+const MAX_CONFIG_BYTES = 16 * 1024 * 1024; // 16 MiB
+
 /**
- * Fail-SOFT by design: `null` on an absent, unreadable, OR malformed file. This is the DELIBERATE inverse
- * of the install-time readers (`install/shared.ts#readJson`, `install/codex.ts`'s local `readToml`), which
- * fail CLOSED — they throw on a corrupt config because they gate a merge INTO it. A scanner must instead
- * degrade one bad surface to empty and keep going (R9), so do not "consolidate" these same-named readers.
+ * Fail-SOFT by design: `null` on an absent, non-regular, oversized, unreadable, OR malformed file. The
+ * DELIBERATE inverse of the install-time readers (`install/shared.ts#readJson`, `install/codex.ts`'s local
+ * `readToml`), which fail CLOSED — they throw on a corrupt config to gate a merge INTO it. A scanner instead
+ * degrades one bad surface to empty and keeps going (R9), so do not "consolidate" these same-named readers.
  *
- * An ABSENT file (ENOENT — the surface simply isn't configured) is the normal case and stays silent; a
- * PRESENT-but-broken one (unreadable, or malformed content) is a real degradation and logs a `warn`, so a
- * corrupt config never vanishes without a trace. That warn is a debugging aid, NOT the structured
- * "shown as degraded" signal a consumer (U11 view / U10 provision) needs — the `{items, diagnostics}` result
- * is deferred to its consumer (issue #37).
+ * Two boundary guards are load-bearing, not cosmetic:
+ *   - The stat-before-read confirms a bounded REGULAR file. `readFileSync` on a FIFO / character-device path
+ *     BLOCKS INDEFINITELY (no writer ever comes), and because scans are synchronous + sequential one such
+ *     path would hang the WHOLE inventory past any try/catch. A directory/device/oversized target is skipped.
+ *   - The warns log the PATH ONLY — NEVER the parse error or file content. A `config.toml` legitimately holds
+ *     MCP bearer headers / env secrets, and smol-toml's error message quotes the offending source line, so
+ *     logging the error would leak a secret through stderr (no secret escapes any read path). This warn is a
+ *     debugging aid; the structured "shown as degraded" signal a consumer renders is deferred to issue #37.
+ *
+ * There is a mild stat→read TOCTOU (the path could become a FIFO between the two calls), acceptable for a
+ * scanner reading the user's own local configs — swapping the target mid-scan needs write access to HOME.
  */
 function readParsed(path: string, parse: (raw: string) => unknown): Record<string, unknown> | null {
   let raw: string;
   try {
-    raw = readFileSync(path, "utf8");
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
-      console.warn(`[agent-os] inventory scan: '${path}' is present but unreadable (degraded):`, err);
+    const stat = statSync(path);
+    if (!stat.isFile() || stat.size > MAX_CONFIG_BYTES) {
+      console.warn(`[agent-os] inventory scan: '${path}' is not a readable regular config file (degraded)`);
+      return null; // FIFO / device / directory / oversized — skip WITHOUT reading, so a FIFO can't hang the scan
     }
-    return null; // absent (silent) or unreadable (warned) — this surface contributes nothing, not an error
+    raw = readFileSync(path, "utf8");
+  } catch {
+    return null; // absent (ENOENT) or unreadable — silent; the surface simply contributes nothing
   }
   try {
     const v = parse(raw);
-    // A top-level non-object (e.g. a JSON array or bare scalar) is not a config map — treat as empty.
-    return v !== null && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
-  } catch (err) {
-    console.warn(`[agent-os] inventory scan: '${path}' is malformed (degraded):`, err);
+    // A top-level non-object (a JSON array or bare scalar) is not a config map — treat as empty.
+    return isRecord(v) ? v : null;
+  } catch {
+    console.warn(`[agent-os] inventory scan: '${path}' is malformed (degraded)`); // PATH only — never the error/content
     return null; // malformed → degrade this surface (R9), never throw
   }
 }

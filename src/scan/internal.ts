@@ -25,13 +25,9 @@ export interface ScanContext {
   homeDir: string;
   /** This machine's federation id (`paths.ts#resolveMachineId`), stamped onto every item. */
   machineId: string;
-  /**
-   * Optional project directory. When set, project-scoped surfaces are ALSO scanned (Claude Code's
-   * per-project `mcpServers` + the project `.mcp.json` + `<projectDir>/.claude/skills/`). Omitted →
-   * the global/user-scope stack only, which is what the cross-runtime "at a glance" inventory wants.
-   */
-  projectDir?: string;
 }
+// The per-project scope axis (a `projectDir` input + its per-project surfaces) is DEFERRED to U11 — see
+// issue #35. U9 scans the USER/GLOBAL stack, which is what cross-runtime parity acts on.
 
 /**
  * One source's scan. Returns its items, or its EMPTY shape on any internal fault (never throws for a
@@ -98,19 +94,29 @@ export function readToml(path: string): Record<string, unknown> | null {
  * of the install-time readers (`install/shared.ts#readJson`, `install/codex.ts`'s local `readToml`), which
  * fail CLOSED — they throw on a corrupt config because they gate a merge INTO it. A scanner must instead
  * degrade one bad surface to empty and keep going (R9), so do not "consolidate" these same-named readers.
+ *
+ * An ABSENT file (ENOENT — the surface simply isn't configured) is the normal case and stays silent; a
+ * PRESENT-but-broken one (unreadable, or malformed content) is a real degradation and logs a `warn`, so a
+ * corrupt config never vanishes without a trace. That warn is a debugging aid, NOT the structured
+ * "shown as degraded" signal a consumer (U11 view / U10 provision) needs — the `{items, diagnostics}` result
+ * is deferred to its consumer (issue #37).
  */
 function readParsed(path: string, parse: (raw: string) => unknown): Record<string, unknown> | null {
   let raw: string;
   try {
     raw = readFileSync(path, "utf8");
-  } catch {
-    return null; // absent / unreadable — this surface contributes nothing, not an error
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+      console.warn(`[agent-os] inventory scan: '${path}' is present but unreadable (degraded):`, err);
+    }
+    return null; // absent (silent) or unreadable (warned) — this surface contributes nothing, not an error
   }
   try {
     const v = parse(raw);
     // A top-level non-object (e.g. a JSON array or bare scalar) is not a config map — treat as empty.
     return v !== null && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
-  } catch {
+  } catch (err) {
+    console.warn(`[agent-os] inventory scan: '${path}' is malformed (degraded):`, err);
     return null; // malformed → degrade this surface (R9), never throw
   }
 }
@@ -149,17 +155,6 @@ export function listSkills(ctx: ScanContext, runtime: Runtime, skillsRoot: strin
     .filter((name) => isFile(join(skillsRoot, name, "SKILL.md")))
     .map((name) => makeItem(ctx, runtime, "skill", name));
 }
-
-/** Collapse items to one per `(kind, name)` within a runtime — a server present in BOTH the global and a
- *  project surface (or a skill reachable two ways) is one inventory item, not a duplicate. Runtime is
- *  fixed per scanner, so `(kind, name)` is the natural key here; the SAME item in a different runtime is
- *  intentionally distinct (that gap is exactly what parity propagation acts on). Order-stable. */
-export function dedupeItems(items: InventoryItem[]): InventoryItem[] {
-  const seen = new Set<string>();
-  return items.filter((it) => {
-    const key = `${it.kind} ${it.name}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-}
+// A `(kind, name)` dedupe helper lived here to collapse global+project overlap; it left with the per-project
+// axis (issue #35). Each user-scope surface has unique object keys, so a rescan can't produce duplicates —
+// dedupe returns with project scope, when it has a source of overlap again.

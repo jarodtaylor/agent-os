@@ -85,22 +85,7 @@ describe("scanClaudeCode", () => {
     expect(skills).not.toContain("broken");
   });
 
-  test("also scans project-scoped surfaces when projectDir is set, deduped against global", () => {
-    const projectDir = join(home, "proj");
-    writeJson(join(home, ".claude.json"), {
-      mcpServers: { global: {}, shared: {} }, // `shared` also appears in the project → must dedupe to one
-      projects: { [projectDir]: { mcpServers: { "proj-local": {} } } },
-    });
-    writeJson(join(projectDir, ".mcp.json"), { mcpServers: { "proj-file": {}, shared: {} } });
-    makeSkill(join(projectDir, ".claude", "skills"), "proj-skill");
-
-    const items = scanClaudeCode(ctx({ projectDir }));
-
-    expect(names(items, "claude-code", "mcp")).toEqual(["global", "proj-file", "proj-local", "shared"]);
-    // `shared` present in both global and the project surfaces resolves to exactly one item.
-    expect(items.filter((i) => i.kind === "mcp" && i.name === "shared")).toHaveLength(1);
-    expect(names(items, "claude-code", "skill")).toContain("proj-skill");
-  });
+  // Per-project scope (projectDir surfaces + user-vs-project plugin precedence) is deferred to U11 — issue #35.
 
   test("a malformed config never throws and never emits junk", () => {
     writeJson(join(home, ".claude.json"), { mcpServers: "oops" }); // not an object
@@ -119,7 +104,7 @@ describe("scanClaudeCode", () => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 describe("scanCodex", () => {
-  test("enumerates MCP servers + plugins from config.toml and skills from the skills dir", () => {
+  test("enumerates MCP servers + plugins from config.toml (skills deferred — issue #36)", () => {
     writeRaw(
       join(home, ".codex", "config.toml"),
       [
@@ -133,14 +118,12 @@ describe("scanCodex", () => {
         `[plugins."plug-b@mkt2"]`,
       ].join("\n"),
     );
-    makeSkill(join(home, ".codex", "skills"), "cx-skill");
-    mkdirSync(join(home, ".codex", "skills", ".system"), { recursive: true }); // dotfile → skipped
 
     const items = scanCodex(ctx());
 
     expect(names(items, "codex", "mcp")).toEqual(["srv-x", "srv-y"]); // no `env` sub-table leak
     expect(names(items, "codex", "plugin")).toEqual(["plug-a@mkt", "plug-b@mkt2"]);
-    expect(names(items, "codex", "skill")).toEqual(["cx-skill"]); // .system skipped
+    expect(names(items, "codex", "skill")).toEqual([]); // Codex skill scanning deferred (issue #36)
   });
 
   test("a corrupt config.toml yields no config items instead of throwing", () => {

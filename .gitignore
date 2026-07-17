@@ -25,8 +25,10 @@ build/
 # Local-only; the canonical state is START-HERE.md + DECISIONS.md.
 docs/HANDOFF.local.md
 
-# Optional local reference snapshot at repo ROOT (kept out of git).
-# Leading slash anchors it to the root so it does not also match docs/reference/.
+# Studied reference apps — graphs, teardowns, and the feature catalog. Local-only, NEVER committed.
+# This is the single home for all reference material (consolidated 2026-07-15); see reference/README.md.
+# Decision #22 scrubbed every trace of these templates from the tree AND history at the cost of a
+# fresh repo + a history rewrite. Do not narrow this rule, and never `git add -f` under it.
 /reference/
 
 # OS / editor
@@ -39,6 +41,11 @@ docs/HANDOFF.local.md
 /CLAUDE.md
 /tasks/
 /.claude/
-/docs/reference/
 /docs/FEATURE-SLATE.md
+
+# Deliberate guard, not a leftover: docs/reference/ was emptied on 2026-07-15 (contents moved to
+# /reference/). Kept ignored because DECISIONS.md #22 and #41 still cite this path, so a future
+# session could recreate it from habit — and an un-ignored recreation would re-associate the public
+# repo with the studied templates, the exact thing #22 paid a history rewrite to undo. Cheap insurance.
+/docs/reference/
 *.local.md

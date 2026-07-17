@@ -9,7 +9,8 @@
  * Every reader here fails SOFT — a missing or corrupt config yields an empty result, never a throw —
  * so one unreadable surface degrades only that surface (R9). The whole-runtime backstop (a scanner
  * that throws anyway degrades only its own runtime, never the inventory) is the try/catch in
- * `index.ts#scanAll`. Defense in depth: soft reads first, source-level catch as the last line.
+ * `index.ts#runScanners` (`scanAll` delegates to it). Defense in depth: soft reads first,
+ * source-level catch as the last line.
  */
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";

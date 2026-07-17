@@ -49,11 +49,15 @@ export async function runScanners(
       // `concat`, not `inventory.push(...items)`: a function-call spread of an untrusted-length array
       // RangeErrors in V8/Bun on a pathological config (attacker-owns-HOME), which would nuke the whole scan.
       inventory = inventory.concat(await scan(ctx));
-    } catch (err) {
-      // Log the error CLASS only, never its message/stack: an unexpected throw could carry config content,
-      // and a config legitimately holds secrets (no secret escapes any read path — the same rule `readParsed`
-      // follows). The runtime + class is enough to know which source degraded and roughly why.
-      console.error(`[agent-os] inventory scan: '${runtime}' threw ${(err as Error)?.name ?? "an error"} and was degraded`);
+    } catch {
+      // The caught value is NEVER inspected — not even `.name`. Any read of an unconstrained thrown value
+      // has an angle: its message can quote config content (a config legitimately holds secrets — the same
+      // rule `readParsed` follows), and ANY property access can itself throw (a getter), which would abort
+      // this catch and void the very degrade-one-runtime guarantee it exists to provide. A fixed
+      // runtime-only line is structurally terminal: no data flows from the throw to the log. The runtime is
+      // enough to know which source degraded; the "roughly why" belongs to structured degradation metadata
+      // (issue #37), not stderr.
+      console.error(`[agent-os] inventory scan: '${runtime}' threw and was degraded`);
     }
   }
   return inventory;

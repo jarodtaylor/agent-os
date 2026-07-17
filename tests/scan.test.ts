@@ -332,8 +332,8 @@ describe("scan — review-hardening", () => {
   });
 
   // Codex gate: the source-level backstop must not log a raw error either — an unexpected throw could carry
-  // config content. runScanners logs the error CLASS only, never its message.
-  test("runScanners never logs a thrown error's message (only its class)", async () => {
+  // config content. runScanners logs a FIXED runtime-only line, never anything derived from the throw.
+  test("runScanners never logs a thrown error's message", async () => {
     const SECRET = "sk-secret-inside-a-thrown-error";
     const leaky: SourceScanner = () => {
       throw new Error(`boom ${SECRET}`);
@@ -348,6 +348,48 @@ describe("scan — review-hardening", () => {
     }
     expect(errors.length).toBeGreaterThan(0); // it DID log the degradation...
     for (const e of errors) expect(e).not.toContain(SECRET); // ...but never the error message/secret
+  });
+
+  // Codex gate round 4: `name` is mutable JS data like any other property — a thrown error can carry a
+  // secret there too. The fix is structural (the catch reads NOTHING off the throw), and this test pins it.
+  test("runScanners never logs a thrown error's NAME (a name can carry a secret too)", async () => {
+    const SECRET = "sk-secret-smuggled-via-error-name";
+    const hostileName: SourceScanner = () => {
+      const err = new Error("boom");
+      err.name = SECRET;
+      throw err;
+    };
+    const errors: string[] = [];
+    const original = console.error;
+    console.error = (...args: unknown[]) => void errors.push(args.map(String).join(" "));
+    try {
+      await runScanners(ctx(), [{ runtime: "codex", scan: hostileName }]);
+    } finally {
+      console.error = original;
+    }
+    expect(errors.length).toBeGreaterThan(0); // it DID log the degradation...
+    for (const e of errors) expect(e).not.toContain(SECRET); // ...but nothing derived from the throw
+  });
+
+  // Codex gate round 4: a property GETTER on the thrown value can itself throw. If the catch inspected the
+  // value at all, that second throw would escape the catch and abort the whole sweep — voiding AE4/R9's
+  // degrade-one-runtime guarantee. The zero-inspection catch makes the backstop itself throw-proof.
+  test("runScanners survives a thrown value whose `name` getter throws (backstop never re-throws)", async () => {
+    const boobyTrapped: SourceScanner = () => {
+      throw Object.defineProperty(new Error("boom"), "name", {
+        get(): string {
+          throw new Error("getter bomb");
+        },
+      });
+    };
+    const ok: SourceScanner = (c) => [
+      { runtime: "codex", kind: "mcp", name: "survivor", machineId: c.machineId, source: "agent-os" },
+    ];
+    const out = await runScanners(ctx(), [
+      { runtime: "claude-code", scan: boobyTrapped },
+      { runtime: "codex", scan: ok },
+    ]);
+    expect(out.map((i) => i.name)).toEqual(["survivor"]); // the other runtime completed; nothing escaped
   });
 
   // Codex gate: composing scanner output must not RangeError on a large array — `push(...arr)` (a function-

@@ -1,6 +1,7 @@
 ---
 title: Substrate-first continuity — one machine record, human docs as projections
 date: 2026-07-08
+last_updated: 2026-07-20
 category: docs/solutions/architecture-patterns
 module: brain/handoff continuity
 problem_type: architecture_pattern
@@ -76,3 +77,13 @@ Verifying "exactly one record" behaviorally (the property that makes agreement s
 - `docs/DECISIONS.md` #27 (U7 shipped this pattern) · #8/KTD8 (the handoff is the one continuity record, keyed `(project, sessionId)`).
 - `.claude/skills/handoff/SKILL.md` — the wrap step that implements record-first + projections + staleness fallback (note: `.claude/` is gitignored/local-only).
 - `src/mcp/tools.ts` `write_handoff` (the record's write path) · `src/workstate/response.ts` (`read_work_state` / `GET /work-state`, the read that projections and the SessionStart hook share).
+
+## Update — the record's *home* is substrate-OPTIONAL (2026-07-20, decision #51)
+
+The pattern's **core holds unchanged**: designate exactly ONE continuity record, make everything else a projection, keep a ledger (DECISIONS) distinct from the resume-record, and never let projections silently diverge. What the handoff-hardening side quest (plan `2026-07-20-002`) corrected is the over-specification that the one record must be the **machine substrate, written first, always**:
+
+1. **The record need not be a machine store.** Before U15's always-on server exists, agent-os had **no running substrate** — so the substrate-first skill hit the "unreachable → staleness flag" path on *every* handoff, stamping a "⚠️ substrate NOT updated" apology onto a state that was never actually degraded. That noise confused the primary user (*"I honestly have no clue what that even means"*). The fix: **today the ONE record IS `START-HERE.md` ▶ NEXT** — a human doc that is simultaneously the record and the view (one artifact, so "projections must agree" is trivially satisfied — there is nothing to keep in sync). Once U15 ships, `write_handoff` becomes the machine record written FIRST and START-HERE ▶ NEXT becomes its agreeing projection — the model this doc originally described. Structured machine-readability is what the substrate *adds* then, not a property the markdown record claims today.
+
+2. **"Degrade loudly" is NARROWED, not removed.** The staleness flag (§Guidance step 4) is correct **only** when a substrate that is *supposed* to be running errors mid-write. "There is no substrate yet" is the normal state, not a divergence — flagging it lies about a degradation that isn't there. Crash-safety is now carried separately by a Stop-hook breadcrumb (`.claude/session-breadcrumb.md`) surfaced by a SessionStart resume-check, so the record itself doesn't have to double as the autosave.
+
+**Generalized lesson:** "one record + projections" is the durable invariant; *which artifact holds the record* is an instantiation detail that should track what actually exists (a doc when there's no machine store, the substrate once there is) — don't hard-code the record's home into the pattern, and don't emit a "degraded" apology for the absence of infrastructure that was never required to be present. See [[cross-harness-credential-second-location-race-generator]] for the sibling "don't force one policy on all consumers" move.

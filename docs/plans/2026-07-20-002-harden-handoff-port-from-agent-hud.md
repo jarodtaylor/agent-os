@@ -1,6 +1,6 @@
 # Side quest — harden the handoff (port agent-hud's evolved version into agent-os)
 
-> **Status:** **Phase 1 COMPLETE + verified (2026-07-20)** — breadcrumb + resume-check hooks live in gitignored `.claude/`, `settings.json` wired (JSON re-validated; codex-gate/typecheck preserved), both hooks proven by direct run. **Phase 2 pending Jarod's DC1** (file-record home); DC2/DC3 owned by CTO. `branch-cleanup.sh` deferred (git-mutating, own evaluation). Inserted **before** the U10 plan session at Jarod's call.
+> **Status:** **Phases 1–2 COMPLETE (2026-07-20, decision #51).** Phase 1: breadcrumb + resume-check hooks live in gitignored `.claude/`, verified by direct run. Phase 2: **DC1 = START-HERE ▶ NEXT stays the record** (Jarod's call — no new HANDOFF.md); **DC2 = model-invocable + idempotence guard** (done); **DC3 = #8 amended** (#51). Skill reframed substrate-OPTIONAL; the every-handoff "substrate not written" apology retired; stale live assertions swept (START-HERE body + the substrate-first solution doc reconciled). Dogfooded on this session's own handoff — no apology emitted. `branch-cleanup.sh` and **Phase 3** (promote to `~/.claude`) deferred. Inserted before the U10 plan session at Jarod's call.
 > **Durable checkpoint** written pre-`/compact` so this survives context compaction — everything needed to
 > execute is here; do not re-derive from the (compacted) conversation.
 > **North Star tie:** the handoff is what keeps intent continuous across contexts — attempt #2's whole
@@ -86,7 +86,9 @@ Pure crash-safety + file-based resume. Amends no decision. Do this first even if
 4. **Verify:** trigger a Stop (end a turn) → breadcrumb file appears with correct branch/HEAD/status; open a
    fresh session → resume-check surfaces it. Confirm no interference with codex-gate/typecheck hooks.
 
-## Phase 2 — reframe the /handoff skill (needs Jarod's design go: amends decision #8)
+## Phase 2 — reframe the /handoff skill (needs Jarod's design go: amends decision #8)  ✅ DONE 2026-07-20 (decision #51)
+
+> **Resolved 2026-07-20.** DC1 → **(b): START-HERE ▶ NEXT stays the record; no new HANDOFF.md** (Jarod's call — agent-os already consolidated on START-HERE; a 2nd doc would re-introduce the drift #8 forbids). DC2 → **model-invocable + idempotence guard** (removed `disable-model-invocation`; skip a commit only when the fully-rendered record is byte-identical). DC3 → **decision #8 amended (#51)** with the honest era-invariant framing: one record + docs-agree is invariant, the record's *home* generalizes (START-HERE today → substrate at U15); structured machine-readability is what U15 *adds*, not a claim today's markdown makes. Skill rewritten; the every-handoff "substrate not written" apology retired (staleness flag narrowed to the substrate-running-but-errored case); stale live assertions swept (START-HERE apology + U7 bullet reconciled; the substrate-first solution doc got an Update note). Dogfooded on this session's own handoff.
 
 Adopt agent-hud's substrate-optional structure into agent-os's `/handoff`. Retire the "substrate not
 written ⚠️" language. **Open design calls for Jarod (the reason Phase 2 gates on him):**

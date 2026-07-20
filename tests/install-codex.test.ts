@@ -6,7 +6,8 @@ import { parse as parseToml } from "smol-toml";
 import { installCodex, uninstallCodex } from "../src/install/codex";
 import { existingEntriesWithoutOurs, type UninstallOutcome } from "../src/install/shared";
 import { journalPath } from "../src/configwrite/internal";
-import { codexTokenPath, resolveCodexToken, TOKEN_HEADER } from "../src/paths";
+import { readCodexToken } from "../src/codex-credential";
+import { TOKEN_HEADER } from "../src/paths";
 
 // Fixture-home ONLY — every path is under a temp dir, so these tests never touch the real ~/.codex.
 //
@@ -43,7 +44,9 @@ const readToml = (p: string): any => parseToml(readFileSync(p, "utf8"));
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const readJson = (p: string): any => JSON.parse(readFileSync(p, "utf8"));
 const install = () => installCodex({ home, dataDir, repoRoot: REPO, port: 4319 });
-const token = () => resolveCodexToken(dataDir);
+/** The credential as the GATE would read it — same function `securityGate` calls, so these assertions test
+ *  the property that matters ("what the gate accepts") rather than a test-local re-derivation. */
+const token = () => readCodexToken(configPath());
 /** Flatten a `hooks.SessionStart`-shaped array down to its nested `command` strings — shared by the
  *  uninstall assertions below that check which hook commands survived. */
 const sessionStartCommands = (entries: Array<{ hooks?: Array<{ command: string }> }> | undefined): string[] =>
@@ -160,8 +163,8 @@ describe("installCodex", () => {
     install();
     // The user edits hooks.json after install (adds their own co-located-elsewhere hook) → the byte-exact undo
     // can no longer restore it (identity check refuses the diverged file), so uninstall must TARGETED-remove
-    // just our entry and keep theirs. Revoking codex.token alone would NOT disable a leftover hook (it reads the
-    // per-boot token), so this targeted removal is what actually deactivates Codex consumption on uninstall.
+    // just our entry and keep theirs. Revoking the credential alone would NOT disable a leftover hook (it reads
+    // the per-boot token), so this targeted removal is what actually deactivates Codex consumption on uninstall.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const h: any = readJson(hooksPath());
     h.hooks.SessionStart.push({ matcher: "startup", hooks: [{ type: "command", command: "echo mine", timeout: 5 }] });
@@ -256,58 +259,57 @@ describe("installCodex", () => {
     expect(existsSync(hooksPath())).toBe(false);
   });
 
-  test("a failed install on a fresh machine cleans up the newly-minted codex.token (FIX 2)", () => {
+  // ── Failed-install credential safety (ported from the codex.token era by #24) ───────────────────────────
+  // U8 needed mint-provenance tracking to decide whether a failed install should delete codex.token. With the
+  // credential living ONLY in the config entry, rolling back that entry IS the cleanup — but the properties
+  // those tests protected are unchanged and must still hold, so they are re-proven in config.toml terms.
+
+  test("a failed install on a fresh machine strands NO live credential (the rollback removes the entry that holds it)", () => {
     mkdirSync(codexDir(), { recursive: true });
     // Same trigger as "rolls back the config.toml write when the hooks.json write fails" above: hooks.json is
-    // a symlink, so the U14 engine refuses to write it AFTER config.toml — and, inside that patch, a FRESH
-    // codex.token (no pre-existing token here) — has already committed.
+    // a symlink, so the U14 engine refuses to write it AFTER config.toml (carrying a freshly minted token) has
+    // already committed.
     symlinkSync(join(root, "nonexistent-target.json"), hooksPath());
-    expect(existsSync(codexTokenPath(dataDir))).toBe(false); // nothing minted yet — no pre-existing token
+    expect(readCodexToken(configPath())).toBeNull(); // nothing minted yet — no pre-existing credential
 
     expect(() => install()).toThrow();
 
-    // The token minted during the failed config.toml write was cleaned up, not stranded as a live,
-    // unreferenced credential the gate would still accept.
-    expect(existsSync(codexTokenPath(dataDir))).toBe(false);
+    // Nothing the gate would accept survives the failure — no unreferenced live credential left behind.
+    expect(readCodexToken(configPath())).toBeNull();
   });
 
-  test("a failed install cleans up a token minted over an empty pre-existing token file (empty pre-existing token doesn't count)", () => {
-    // An EMPTY codex.token file is not a valid token — resolveCodexToken (paths.ts) treats it as absent and
-    // mints a fresh one OVER it. Provenance for rollback must be SEMANTIC (readCodexToken: a valid non-empty
-    // token pre-existed), not path-existence (existsSync) — existsSync would see the empty file and wrongly
-    // report "preexisted", so rollback would skip cleanup and strand the token this install minted.
+  test("a failed install strands no credential when it minted OVER an entry whose header was empty", () => {
+    // The analogue of the retired "empty pre-existing codex.token doesn't count as provenance" case: an entry
+    // carrying a BLANK header value is not a usable credential, so install mints fresh over it. The failure
+    // must still leave nothing live — and because provenance is no longer tracked separately, this can't
+    // regress the way an existsSync-based guard once could.
     mkdirSync(codexDir(), { recursive: true });
-    mkdirSync(dataDir, { recursive: true });
-    writeFileSync(codexTokenPath(dataDir), "");
-
-    // Same trigger as "a failed install on a fresh machine cleans up the newly-minted codex.token" above:
-    // hooks.json is a symlink, so the U14 engine refuses to write it AFTER config.toml has already committed
-    // — and, inside that patch, resolveCodexToken has already minted a fresh token over the empty file.
+    writeFileSync(configPath(), `[mcp_servers.agent-os.http_headers]\n"${TOKEN_HEADER}" = ""\n`);
     symlinkSync(join(root, "nonexistent-target.json"), hooksPath());
 
     expect(() => install()).toThrow();
 
-    // The token minted over the empty file was cleaned up — not stranded as a live credential the gate
-    // (which reads codex.token fresh per request) would keep accepting after a failed install.
-    expect(existsSync(codexTokenPath(dataDir))).toBe(false);
+    expect(readCodexToken(configPath())).toBeNull();
   });
 
-  test("a failed install PRESERVES a pre-existing codex.token — a failed reinstall never revokes a prior install's credential (FIX 2)", () => {
-    // Pre-create codex.token directly (not via a prior install()) with a known value.
-    mkdirSync(dataDir, { recursive: true });
-    const tokenPath = codexTokenPath(dataDir);
-    writeFileSync(tokenPath, "pre-existing-known-token");
+  test("a failed install PRESERVES a pre-existing credential — a failed reinstall never revokes a prior install's token", () => {
+    // Establish a real prior install, then capture its credential.
+    mkdirSync(codexDir(), { recursive: true });
+    install();
+    const priorToken = readCodexToken(configPath());
+    expect(priorToken).not.toBeNull();
 
     // Force the THIRD write (AGENTS.md) to fail — the other rollback catch block than the test above — by
     // making the AGENTS.md path a directory, same technique as "rolls back BOTH config.toml and hooks.json
     // when the AGENTS.md write fails" above.
+    rmSync(agentsMdPath(), { force: true });
     mkdirSync(agentsMdPath(), { recursive: true });
 
     expect(() => install()).toThrow();
 
-    // The pre-existing credential must survive untouched — this install didn't mint it, so it must not revoke it.
-    expect(existsSync(tokenPath)).toBe(true);
-    expect(readFileSync(tokenPath, "utf8")).toBe("pre-existing-known-token");
+    // The prior credential must survive untouched: the rollback restores the config that carried it, so a
+    // failed reinstall never cuts off a working Codex session.
+    expect(readCodexToken(configPath())).toBe(priorToken);
   });
 
   test("merge preserves a pre-existing unrelated mcp_servers table in config.toml", () => {
@@ -386,13 +388,21 @@ describe("installCodex", () => {
     expect(res2.agentsMd.changed).toBe(false);
   });
 
-  test("re-install is a no-op at the engine level for all three targets", () => {
+  test("re-install is a no-op at the engine level for all three targets — and REUSES the credential, never rotates it (#24 crux)", () => {
     install();
+    const first = token();
+    expect(first).not.toBeNull();
+
     const res2 = install();
+    // config.noop can ONLY be true if the second install reproduced byte-identical config.toml — which
+    // requires reusing the embedded token. Minting a fresh UUID on re-install (the tempting bug) would
+    // rewrite http_headers, flip noop to false, and cut off a live Codex session mid-flight.
     expect(res2.config.noop).toBe(true);
     expect(res2.hooks.noop).toBe(true);
     expect(res2.agentsMd.changed).toBe(false);
     expect(readJson(hooksPath()).hooks.SessionStart).toHaveLength(1);
+    // Stated directly as well, so the credential-stability property is legible on its own.
+    expect(token()).toBe(first);
   });
 
   test("the two structured files do not cross-contaminate", () => {
@@ -467,56 +477,94 @@ describe("installCodex", () => {
     expect(after.approval).toBe("on-request"); // its post-install additions survive
   });
 
-  test("uninstall revokes the stable Codex credential (codex.token deleted, so a leftover config entry can't authenticate)", () => {
+  test("uninstall revokes the stable Codex credential — removing our entry IS the revocation (#24)", () => {
     install();
-    expect(existsSync(codexTokenPath(dataDir))).toBe(true); // minted during install
+    expect(token()).not.toBeNull(); // minted during install
 
     uninstallCodex({ home, dataDir, repoRoot: REPO });
 
-    expect(existsSync(codexTokenPath(dataDir))).toBe(false);
+    // Asked with the gate's own reader: nothing this file offers would authenticate any more.
+    expect(token()).toBeNull();
   });
 
-  test("uninstall revokes codex.token AND targeted-removes our entry even when config.toml diverged since install", () => {
+  test("uninstall revokes the credential AND targeted-removes our entry even when config.toml diverged since install", () => {
     mkdirSync(codexDir(), { recursive: true });
     writeFileSync(configPath(), `model = "gpt-5.5"\n`);
 
     install();
-    expect(existsSync(codexTokenPath(dataDir))).toBe(true);
+    const minted = token();
+    expect(minted).not.toBeNull();
 
-    // Simulate Codex's own continuous rewrites — the scenario where the old byte-exact config.toml undo was SKIPPED.
-    const c = readToml(configPath());
-    writeFileSync(configPath(), `model = "gpt-6.0"\n\n[mcp_servers.agent-os]\nurl = "${c.mcp_servers["agent-os"].url}"\n`);
+    // Simulate Codex's own continuous rewrites — the scenario where the old byte-exact config.toml undo was
+    // SKIPPED. The rewrite KEEPS our entry (credential and all), exactly as a real Codex rewrite would.
+    writeFileSync(
+      configPath(),
+      `model = "gpt-6.0"\n\n[mcp_servers.agent-os]\nurl = "http://127.0.0.1:4319/mcp"\n\n[mcp_servers.agent-os.http_headers]\n"${TOKEN_HEADER}" = "${minted}"\n`,
+    );
+    expect(token()).toBe(minted); // still live before uninstall — the removal below is what cuts it
 
     const { removed } = uninstallCodex({ home, dataDir, repoRoot: REPO });
 
-    expect(existsSync(codexTokenPath(dataDir))).toBe(false); // credential revoked (defence in depth)
+    expect(token()).toBeNull(); // credential revoked out of the DIVERGED file
     // …and the entry is now ACTUALLY removed, not merely left inert — so config.toml IS reported changed
     // (under whole-file undo this path left the entry behind and did NOT report config.toml).
     expect(readToml(configPath()).mcp_servers?.["agent-os"]).toBeUndefined();
     expect(removed).toContain(configPath());
   });
 
-  test("uninstall THROWS when codex.token cannot be revoked, but still targeted-removes our entries first (FIX 1)", () => {
+  test("uninstall THROWS when the credential-bearing entry cannot be removed, but still strips the other targets first", () => {
+    // The #24 inversion: U8 threw when `codex.token` couldn't be deleted. There is no second file now, so the
+    // loud path is a config.toml strip that FAILS — that leaves a LIVE credential, and must never be reported
+    // as a successful uninstall. Trigger: replace config.toml with a DANGLING SYMLINK, which the U14 engine's
+    // statTarget refuses (it is not a regular file), so the targeted removal fails.
     install();
-    const tokenPath = codexTokenPath(dataDir);
-    expect(existsSync(tokenPath)).toBe(true); // minted during install
-
-    // Replace the minted token FILE with a NON-EMPTY DIRECTORY: rmSync({force:true}) (non-recursive) throws
-    // on a directory, simulating a revocation that fails (e.g. a real-world EPERM/EACCES deleting the file).
-    rmSync(tokenPath, { force: true });
-    mkdirSync(tokenPath, { recursive: true });
-    writeFileSync(join(tokenPath, "blocker.txt"), "x");
+    expect(token()).not.toBeNull();
+    rmSync(configPath(), { force: true });
+    symlinkSync(join(root, "nonexistent-config.toml"), configPath());
 
     expect(() => uninstallCodex({ home, dataDir, repoRoot: REPO })).toThrow(/revoke|remove/i);
 
-    // Revocation failed LOUD — the "credential" (directory standing in for it) is still present, not silently
-    // left in an unknown state while uninstall reports success.
-    expect(existsSync(tokenPath)).toBe(true);
-    // But the (a)/(b)/(c) targeted removals that run BEFORE revocation still completed: our entries are gone.
-    expect(readToml(configPath()).mcp_servers?.["agent-os"]).toBeUndefined();
+    // But the (b)/(c) targeted removals that run BEFORE the verification still completed — the throw must not
+    // abort the independent cleanups, only report that the credential outlived the uninstall.
     const hookCmds = sessionStartCommands(readJson(hooksPath()).hooks.SessionStart);
     expect(hookCmds).not.toContain(START_CMD);
     expect(existsSync(agentsMdPath())).toBe(false); // created fresh by install → strip empties it → deleted
+  });
+
+  test("the revoke-failure throw names the underlying cause but NEVER leaks the credential (corrupt config.toml)", () => {
+    // A failed strip is most often an UNPARSEABLE config.toml — the exact path where a naive parser message
+    // could echo a source frame carrying our (or an adjacent server's) bearer. Embed a KNOWN token, then break
+    // the TOML while KEEPING that token in the bytes, so a leak would actually show. The thrown message must
+    // carry the sanitized cause (location-only, via configwrite's parseLocation) yet not the credential.
+    mkdirSync(codexDir(), { recursive: true });
+    const secret = "leak-canary-do-not-echo-abc123";
+    writeFileSync(
+      configPath(),
+      `[mcp_servers.agent-os.http_headers]\n"${TOKEN_HEADER}" = "${secret}"\n[[[ not valid toml\n`,
+    );
+    let msg = "";
+    try {
+      uninstallCodex({ home, dataDir, repoRoot: REPO });
+    } catch (err) {
+      msg = err instanceof Error ? err.message : String(err);
+    }
+    expect(msg).toMatch(/FAILED to revoke/i); // it threw the loud revocation-failure error…
+    expect(msg).toMatch(/parse|toml/i); // …with the underlying cause interpolated (fix D)…
+    expect(msg).not.toContain(secret); // …but the credential value never appears in it.
+  });
+
+  test("uninstall re-revokes a credential that reappeared after a previous uninstall (a later re-install, then uninstall)", () => {
+    // Uninstall reads the file as it is NOW (cross-process by design), so a config that regained our entry —
+    // a re-install, or Codex restoring a backup — is revoked again on the next uninstall rather than skipped
+    // because some install-time journal says we already cleaned up.
+    install();
+    uninstallCodex({ home, dataDir, repoRoot: REPO });
+    expect(token()).toBeNull();
+
+    install();
+    expect(token()).not.toBeNull();
+    uninstallCodex({ home, dataDir, repoRoot: REPO });
+    expect(token()).toBeNull();
   });
 
   test("co-located hook granularity: re-install preserves a user command living in the SAME hooks.json entry as ours (FIX B)", () => {
@@ -564,16 +612,29 @@ describe("installCodex", () => {
     expect(userEntry?.hooks).toHaveLength(1);
   });
 
-  test("uninstall isolates MULTIPLE failing targets in one call — config.toml + hooks.json both fail, yet AGENTS.md is stripped and codex.token revoked", () => {
+  test("uninstall isolates MULTIPLE failing targets in one call — config.toml + hooks.json both fail, yet AGENTS.md is still stripped before the credential failure throws", () => {
     install();
-    expect(existsSync(codexTokenPath(dataDir))).toBe(true); // minted during install
+    expect(token()).not.toBeNull(); // minted during install
 
     // Corrupt BOTH structured targets so their uninstall writes each throw and are caught independently:
     //   (a) config.toml → removeConfigKeys parses it → invalid TOML throws
     //   (b) hooks.json  → removeHooksIfPresent's mergeConfig parses it → invalid JSON throws
-    // (Corrupt content forces a genuine caught failure on BOTH targets; the dangling-symlink case is now a
-    // reported failure too — see the dedicated dangling-symlink test below.)
     writeFileSync(configPath(), "not = [valid toml");
+    writeFileSync(hooksPath(), "{ not json");
+
+    // Since #24 a failed (a) means the credential-bearing entry is still in the file, so the call FAILS LOUD
+    // rather than reporting the failure and returning — but only AFTER (b) and (c) have each had their turn.
+    expect(() => uninstallCodex({ home, dataDir, repoRoot: REPO })).toThrow(/revoke|remove/i);
+
+    // Per-target isolation still holds: the corrupt (a)/(b) did not stop (c) from running to completion.
+    expect(existsSync(agentsMdPath())).toBe(false); // (c) AGENTS.md block stripped (install created it fresh → deleted)
+  });
+
+  test("uninstall REPORTS (does not throw) when only non-credential targets fail — a corrupt hooks.json alone", () => {
+    // The other side of the escalation: hooks.json holds no credential, so its failure stays a reported
+    // `failed` entry and the caller still gets an outcome. Only the config.toml strip — the revocation —
+    // is severe enough to throw. This keeps the UninstallOutcome contract meaningful for everything else.
+    install();
     writeFileSync(hooksPath(), "{ not json");
 
     let outcome: UninstallOutcome = { removed: [], failed: [], warnings: [] };
@@ -581,18 +642,14 @@ describe("installCodex", () => {
       outcome = uninstallCodex({ home, dataDir, repoRoot: REPO });
     }).not.toThrow();
 
-    // Both failures were isolated — the later steps still ran:
-    expect(existsSync(agentsMdPath())).toBe(false); // (c) AGENTS.md block stripped (install created it fresh → deleted)
-    expect(outcome.removed).toContain(agentsMdPath());
-    expect(existsSync(codexTokenPath(dataDir))).toBe(false); // (d) the credential was still revoked
-    // …and the two failed targets are omitted from `removed`.
-    expect(outcome.removed).not.toContain(configPath());
-    expect(outcome.removed).not.toContain(hooksPath());
-    // FIX B: both failing targets are NAMED in `failed` with non-empty errors — a strictly stronger check than
-    // mere omission from `removed` (which a true no-op on those paths would also satisfy).
-    expect(outcome.failed.map((f) => f.path).sort()).toEqual([configPath(), hooksPath()].sort());
+    expect(token()).toBeNull(); // the credential WAS revoked — that path succeeded
+    // hooks.json is NAMED in `failed` with a non-empty error — strictly stronger than mere omission from
+    // `removed` (which a true no-op on that path would also satisfy).
+    expect(outcome.failed.map((f) => f.path)).toEqual([hooksPath()]);
     expect(outcome.failed.every((f) => f.error.length > 0)).toBe(true);
-    // FIX C: corrupt-parse failures land in `failed`, NEVER `warnings` — the write never committed, so this is a
+    expect(outcome.removed).not.toContain(hooksPath());
+    expect(outcome.removed).toContain(configPath());
+    // A corrupt-parse failure lands in `failed`, NEVER `warnings` — the write never committed, so this is a
     // genuine failure, not the applied-but-unjournaled case a warning denotes.
     expect(outcome.warnings).toEqual([]);
   });
@@ -702,35 +759,26 @@ describe("installCodex", () => {
     const hooksFailure = outcome.failed.find((f) => f.path === hooksPath());
     expect(hooksFailure).toBeDefined();
     expect(hooksFailure!.error.length).toBeGreaterThan(0);
-    // …while the OTHER targets were still processed: our MCP entry removed and the credential revoked.
+    // …while the OTHER targets were still processed: our MCP entry removed and the credential revoked. hooks.json
+    // carries no credential, so its failure does NOT escalate to a throw (contrast the config.toml twin below).
     expect(outcome.removed).toContain(configPath());
-    expect(existsSync(codexTokenPath(dataDir))).toBe(false);
+    expect(token()).toBeNull();
   });
 
-  test("uninstall surfaces a DANGLING config.toml symlink as a failure but still strips AGENTS.md and revokes the token (#30, config.toml twin)", () => {
+  test("uninstall THROWS on a DANGLING config.toml symlink — the credential can't be revoked — but strips AGENTS.md first (#30 twin, #24 escalation)", () => {
     install();
     // The config.toml twin of the dangling hooks.json symlink test above, on the removeConfigKeys path. Replace
     // config.toml with a symlink to a now-missing target: existsSync FOLLOWS it and reports false, but statTarget
-    // lstat-catches it as a symlink and throws the refusal, so removeConfigKeys(a) surfaces it in `failed` — never
-    // swallowed as clean absence — while the AGENTS.md strip (c) and the codex.token revocation (d) still run.
+    // lstat-catches it as a symlink and throws the refusal, so removeConfigKeys(a) fails. Since #24 that means
+    // the credential-bearing entry could not be removed, so the whole call throws — but only after (c) has run.
     rmSync(configPath());
     symlinkSync(join(root, "gone-config-target.toml"), configPath());
     expect(existsSync(configPath())).toBe(false); // dangling: existsSync follows to the missing target
 
-    let outcome: UninstallOutcome = { removed: [], failed: [], warnings: [] };
-    expect(() => {
-      outcome = uninstallCodex({ home, dataDir, repoRoot: REPO });
-    }).not.toThrow();
+    expect(() => uninstallCodex({ home, dataDir, repoRoot: REPO })).toThrow(/revoke|remove/i);
 
-    // config.toml is NAMED in `failed` with a non-empty error — not silently treated as clean absence…
-    const configFailure = outcome.failed.find((f) => f.path === configPath());
-    expect(configFailure).toBeDefined();
-    expect(configFailure!.error.length).toBeGreaterThan(0);
-    // …while the OTHER targets were still processed: AGENTS.md stripped (install created it fresh → deleted) and the
-    // stable credential revoked.
+    // The AGENTS.md strip (c) still ran to completion before the credential-verification throw.
     expect(existsSync(agentsMdPath())).toBe(false);
-    expect(outcome.removed).toContain(agentsMdPath());
-    expect(existsSync(codexTokenPath(dataDir))).toBe(false);
   });
 });
 

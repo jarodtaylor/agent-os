@@ -9,12 +9,15 @@
  *   (a) `~/.codex/config.toml`  — `[mcp_servers.agent-os]`, an object-key merge (deepMerge preserves
  *       every other server — `uidotsh`, `codebase-memory-mcp`, ... — without a read-modify-write). NO
  *       `type` field: Codex's own url-based servers (see the existing `uidotsh` entry) don't carry one.
- *       The STABLE Codex credential (`resolveCodexToken`) IS embedded here (unlike Claude Code's
- *       per-call headersHelper): Codex's HTTP-MCP client can only send a static header, so this is the
- *       one intentional narrowing of "installed config never embeds the token" (U8 decision A; the write
- *       passes the engine's `targetMode: 0o600` so the token-bearing config is PUBLISHED owner-only — the
- *       engine otherwise preserves a pre-existing file's mode). `[hooks.state]` is untouched — our patch never mentions `hooks`, and
- *       Codex owns its own hook-trust hashing there.
+ *       The STABLE Codex credential IS embedded here (unlike Claude Code's per-call headersHelper):
+ *       Codex's HTTP-MCP client can only send a static header, so this is the one intentional narrowing
+ *       of "installed config never embeds the token" (U8 decision A; the write passes the engine's
+ *       `targetMode: 0o600` so the token-bearing config is PUBLISHED owner-only — the engine otherwise
+ *       preserves a pre-existing file's mode). Since issue #24 this entry is the credential's ONLY home:
+ *       the gate reads the token straight back out of this file (`codex-credential.ts`), so there is no
+ *       second copy to keep in sync — the class of lifecycle races that cost U8 five gate passes is gone.
+ *       `[hooks.state]` is untouched — our patch never mentions `hooks`, and Codex owns its own
+ *       hook-trust hashing there.
  *   (b) `~/.codex/hooks.json` — `hooks.SessionStart`, read-modify-write the WHOLE array (deepMerge
  *       REPLACES arrays — patch wins), exactly like the CC installer's settings.json hooks: strip our
  *       own prior entry by command match (idempotent re-install), then append ours, preserving every
@@ -30,20 +33,19 @@
  * realistic failure — one of them is corrupt — is all-or-nothing (mirrors installClaudeCode). If a LATER
  * write then fails for some other reason (symlink, permissions, a journal error), the earlier U14 writes
  * are rolled back via their `undoId` — best-effort, propagating the ORIGINAL error — so a failed install
- * never leaves a partial Codex configuration. The same rollback also revokes `codex.token` when THIS
- * install minted it fresh (never when it pre-existed) — otherwise a failed install would strand a live,
- * unreferenced credential the gate still accepts (see `installCodex`'s `tokenPreexisted` guard).
+ * never leaves a partial Codex configuration. Rolling back the config.toml write now also revokes the
+ * credential FOR FREE, because the credential IS that entry (issue #24): there is no separate token file
+ * left behind to strand, so the whole mint-provenance/revoke-on-failure apparatus U8 needed is deleted.
  */
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { parse as parseToml } from "smol-toml";
+import { CODEX_SERVER_NAME as SERVER_NAME, codexConfigPath, extractCodexToken, readCodexToken } from "../codex-credential";
 import { mergeConfig, undo, type MergeResult } from "../configwrite/index";
-import { codexTokenPath, readCodexToken, resolveCodexToken, resolveDataDir, resolvePort, TOKEN_HEADER } from "../paths";
+import { resolveDataDir, resolvePort, TOKEN_HEADER } from "../paths";
 import { bunCommand, defaultRepoRoot, errorText, existingEntriesWithoutOurs, readJson, removeHooksIfPresent, removeKeysIfPresent, type UninstallOutcome } from "./shared";
-
-/** The brain's MCP server name in `~/.codex/config.toml` (mirrors the Claude Code `mcpServers.agent-os` key). */
-const SERVER_NAME = "agent-os";
 /** Per-hook timeout (seconds) — same ceiling as the Claude Code installer's hooks. */
 const HOOK_TIMEOUT_S = 10;
 /** Marks the AGENTS.md span we own, so re-install replaces it in place instead of duplicating it. */
@@ -57,8 +59,7 @@ export interface InstallOptions {
   /** Absolute repo root the installed hook command AND the AGENTS.md template are read from. Defaults to
    *  this module's own repo. */
   repoRoot?: string;
-  /** Data dir for the engine's backups + undo journal, and the stable Codex token file. Defaults to the
-   *  OS data dir; tests inject a temp dir. */
+  /** Data dir for the engine's backups + undo journal. Defaults to the OS data dir; tests inject a temp dir. */
   dataDir?: string;
   /** Loopback port baked into the MCP `url`. Defaults to `resolvePort()` (what the server binds). */
   port?: number;
@@ -82,7 +83,13 @@ export interface InstallResult {
 }
 
 const codexDir = (home: string): string => join(home, ".codex");
-const configTomlPath = (home: string): string => join(codexDir(home), "config.toml");
+// config.toml's path comes from `codex-credential.ts`, NOT a local copy: it is where the credential lives, so
+// the installer that writes it, the gate that reads it, and the uninstaller that strips it must agree on one
+// definition (a local duplicate is exactly the second-source mistake this issue exists to remove). Wrapped
+// (not aliased directly) so `home` stays REQUIRED like its siblings below — `codexConfigPath`'s param is
+// optional for the server's bare production call, and a bare `configTomlPath()` slip here would silently
+// resolve to the real ~/.codex instead of a test's fixture home.
+const configTomlPath = (home: string): string => codexConfigPath(home);
 const hooksJsonPath = (home: string): string => join(codexDir(home), "hooks.json");
 const agentsMdPath = (home: string): string => join(codexDir(home), "AGENTS.md");
 
@@ -108,19 +115,6 @@ function rollback(results: MergeResult[], dataDir: string): void {
       // Best-effort — the original error is what propagates; log so a swallowed rollback failure isn't invisible.
       console.error(`[agent-os] install: rollback of '${r.targetPath}' failed (leaving it as-is):`, err);
     }
-  }
-}
-
-/** Best-effort delete of `codex.token`, called from installCodex's rollback catches — but ONLY when THIS
- *  install minted the token fresh (callers guard with `!tokenPreexisted`). A failed install must not strand
- *  a live, unreferenced credential the gate still accepts (`config.toml`'s `mcp_servers.agent-os` entry gets
- *  rolled back, but resolveCodexToken already persisted the token file itself independently of that entry).
- *  A failed REINSTALL over a pre-existing token must PRESERVE it — never masks the original install error. */
-function revokeMintedToken(dataDir: string): void {
-  try {
-    rmSync(codexTokenPath(dataDir), { force: true });
-  } catch {
-    // Best-effort — the original install error is what propagates.
   }
 }
 
@@ -158,7 +152,7 @@ function upsertAgentsMdBlock(path: string, repoRoot: string): AgentsMdResult {
   if (existed && after === before) {
     return { path, created: false, changed: false };
   }
-  // Atomic write (mirrors resolveCodexToken/the engine's temp+rename): a mid-write fault must never corrupt
+  // Atomic write (mirrors the engine's temp+rename): a mid-write fault must never corrupt
   // Jarod's LIVE ~/.codex/AGENTS.md — a partial write lands only in the sibling temp, which a crash leaves
   // orphaned but never substitutes for the real file. A rename REPLACES the target's inode wholesale, so an
   // existing file's mode would otherwise be silently reset to the tmp's default — re-apply it first, exactly
@@ -207,15 +201,6 @@ export function installCodex(opts: InstallOptions = {}): InstallResult {
   const repoRoot = opts.repoRoot ?? defaultRepoRoot();
   const dataDir = resolveDataDir(opts.dataDir);
   const port = opts.port ?? resolvePort();
-  // Captured BEFORE any write below can mint one (resolveCodexToken runs INSIDE the config.toml patch built
-  // a few lines down): tells the rollback catches whether THIS install created codex.token, so a failed
-  // install revokes only the credential it minted itself and never revokes a prior install's still-valid one.
-  // SEMANTIC check (readCodexToken — a valid non-empty token pre-existed), not path-existence: an empty or
-  // whitespace-only leftover file passes `existsSync` but `resolveCodexToken` treats it as absent and mints
-  // fresh OVER it, so `existsSync` alone would misreport "preexisted" and rollback would skip cleanup,
-  // stranding the freshly-minted token as a live credential the gate (which reads codex.token fresh per
-  // request) keeps accepting after a failed install.
-  const tokenPreexisted = readCodexToken(codexTokenPath(dataDir)) !== null;
 
   // Ensure ~/.codex exists so the atomic writes below have a home on a fresh machine. mode:0700 applies ONLY
   // when this CREATES it (owner-only, a safe default); an EXISTING ~/.codex is deliberately left alone — it's
@@ -235,15 +220,22 @@ export function installCodex(opts: InstallOptions = {}): InstallResult {
   // the identical gap — tracked with the decision-#16 config-write robustness cluster. The full fix
   // (journal-before-publish, or committed-failure metadata the caller can act on) belongs in the engine
   // itself and is deferred.
-  readToml(configTomlPath(home)); // parsed only to fail fast; mergeConfig re-reads it authoritatively below
+  const existingConfig = readToml(configTomlPath(home)); // fail-fast on corrupt TOML; mergeConfig re-reads authoritatively below
   readJson(hooksJsonPath(home)); // pre-flight fail-fast; the hooks RMW array is built from the engine's OWN read below
+
+  // REUSE the credential already embedded in config.toml; mint only when there isn't one (fresh install, or a
+  // prior entry carrying no/blank header). Minting unconditionally would rotate the token on EVERY re-install —
+  // rewriting the config, breaking the idempotent-no-op contract below, and cutting off a live Codex session
+  // mid-flight. This read is the entire replacement for U8's mint/persist/provenance machinery: the credential's
+  // one location is also the place we check before minting, so "did a token already exist?" has a single answer.
+  const token = extractCodexToken(existingConfig) ?? randomUUID();
 
   // ── (a) MCP server → ~/.codex/config.toml ────────────────────────────────────────────────────────────
   // Object-key merge (mcp_servers.agent-os) — deepMerge preserves every OTHER server, so no read-modify-write
   // is needed here (same reasoning as the CC installer's ~/.claude.json MCP write). `replaceSubtrees` wholesale-
   // replaces the OWNED mcp_servers.agent-os subtree instead of re-merging it, so a stale key on a pre-existing
-  // entry — an old embedded token left in a foreign `http_headers`, say — cannot survive (idempotent: the
-  // stable resolveCodexToken means a re-install reproduces identical bytes ⇒ the engine no-ops).
+  // entry — an old header field we no longer write, say — cannot survive (idempotent: reusing the already-
+  // embedded token, above, means a re-install reproduces identical bytes ⇒ the engine no-ops).
   const config = mergeConfig(
     configTomlPath(home),
     {
@@ -253,7 +245,8 @@ export function installCodex(opts: InstallOptions = {}): InstallResult {
           // The STABLE Codex credential (U8 decision A): Codex's HTTP-MCP client sends only a static
           // header, so — unlike CC's per-call headersHelper — the token IS embedded here, in this config
           // (published owner-only 0600 via the engine's targetMode below), like the existing `uidotsh` bearer.
-          http_headers: { [TOKEN_HEADER]: resolveCodexToken(dataDir) },
+          // This entry is now the credential's SOLE home — the gate reads it back from these very bytes.
+          http_headers: { [TOKEN_HEADER]: token },
         },
       },
     },
@@ -287,9 +280,10 @@ export function installCodex(opts: InstallOptions = {}): InstallResult {
     );
   } catch (err) {
     // config.toml is now LIVE. Roll it back so a failed install never leaves the MCP server registered
-    // without the hook (all-or-nothing across both structured targets).
+    // without the hook (all-or-nothing across both structured targets). Rolling back the entry IS the
+    // credential revocation now — a freshly minted token existed only inside it, so nothing is stranded
+    // and no "did we mint it?" provenance has to be tracked to avoid clobbering a prior install's token.
     rollback([config], dataDir);
-    if (!tokenPreexisted) revokeMintedToken(dataDir);
     throw err;
   }
 
@@ -299,7 +293,6 @@ export function installCodex(opts: InstallOptions = {}): InstallResult {
     agentsMd = upsertAgentsMdBlock(agentsMdPath(home), repoRoot);
   } catch (err) {
     rollback([config, hooks], dataDir);
-    if (!tokenPreexisted) revokeMintedToken(dataDir);
     throw err;
   }
 
@@ -308,28 +301,32 @@ export function installCodex(opts: InstallOptions = {}): InstallResult {
 
 /**
  * Reverse the install by TARGETED removal of only what we added — the correct reversal for the configs Codex
- * co-owns and rewrites continuously — then REVOKE the stable Codex credential (delete `codex.token`).
- * CROSS-PROCESS by design (nothing depends on install-time journal state; it removes our keys from whatever is
- * on disk NOW), mirroring `uninstallClaudeCode`. Per-target try/catch so one diverged/corrupt target never
- * aborts the others — but credential revocation itself is NOT best-effort: it runs LAST, after the cleanups,
- * and THROWS if `codex.token` still exists afterward, so a caller never mistakes a non-revoking uninstall for
- * success. Returns an `UninstallOutcome`: the paths actually changed (the credential revocation is not a file
- * "change" and is deliberately not in that list), plus any per-target failures — so a caller can tell "nothing
- * to remove" from "a target could not be cleaned" (both used to collapse into the same empty list). A
- * revocation failure is NOT reported through `failed`; it THROWS (see above), so the whole call fails loud.
+ * co-owns and rewrites continuously. CROSS-PROCESS by design (nothing depends on install-time journal state; it
+ * removes our keys from whatever is on disk NOW), mirroring `uninstallClaudeCode`. Per-target try/catch so one
+ * diverged/corrupt target never aborts the others. Returns an `UninstallOutcome`: the paths actually changed,
+ * plus any per-target failures — so a caller can tell "nothing to remove" from "a target could not be cleaned".
+ *
+ * **Revocation INVERTED with issue #24 — read this before touching (a) or (d).** U8 revoked by deleting a
+ * separate `codex.token`, which made removal (a) merely cosmetic: a leftover `mcp_servers.agent-os` entry was
+ * already INERT because the gate's credential lived elsewhere. Now the entry *is* the credential, so (a) is the
+ * revocation and there is NO second file backstopping it. Two consequences, both enforced in (d):
+ *   - a config.toml strip that FAILS must fail the whole call LOUDLY — it is a live credential left behind;
+ *   - success is verified against the credential itself, not against the removal mechanism reporting OK.
+ * A (b)/(c) failure still reports through `failed` — a leftover hook or pointer grants no access.
  *
  * Three targeted removals, each tolerant of a target that diverged since install (the whole point — the old
  * whole-file `undo` restore THREW on the near-always-diverged live-state files and left our entries behind):
- *   (a) config.toml — delete only `mcp_servers.agent-os` (removeConfigKeys). This is what the byte-exact undo
- *       couldn't do: config.toml is Codex's live-state file (model/approval settings, trust hashes), so its
- *       identity-checked undo was near-always SKIPPED; removeConfigKeys deletes our key from the live file
- *       whatever else changed. The codex.token revocation below is now DEFENCE IN DEPTH — it still neutralizes
- *       any entry left behind should this removal itself fail (a corrupt/symlinked config).
+ *   (a) config.toml — delete only `mcp_servers.agent-os` (removeConfigKeys), which REVOKES the credential. This
+ *       is what the byte-exact undo couldn't do: config.toml is Codex's live-state file (model/approval
+ *       settings, trust hashes), so its identity-checked undo was near-always SKIPPED; removeConfigKeys deletes
+ *       our key from the live file whatever else changed.
  *   (b) hooks.json — strip only OUR SessionStart entry (a callback array-replace), preserving every other hook.
- *       A leftover hook is NOT neutralized by revoking codex.token (it authenticates with the PER-BOOT token),
- *       so removing it is what actually deactivates Codex consumption. Exact-command match on the current
- *       repoRoot: a repo-MOVED leftover points its command at a now-missing script and already fails open (inert).
+ *       A leftover hook grants nothing (it authenticates with the PER-BOOT token), but removing it is what
+ *       actually deactivates Codex consumption. Exact-command match on the current repoRoot: a repo-MOVED
+ *       leftover points its command at a now-missing script and already fails open (inert).
  *   (c) AGENTS.md — strip our marked block (structural inverse of the upsert; it never went through the journal).
+ *   (d) VERIFY the credential is gone — the security-critical post-condition, run LAST so (a)–(c) all happen
+ *       even when it is about to throw.
  */
 export function uninstallCodex(opts: { home?: string; dataDir?: string; repoRoot?: string } = {}): UninstallOutcome {
   const home = opts.home ?? homedir();
@@ -339,18 +336,18 @@ export function uninstallCodex(opts: { home?: string; dataDir?: string; repoRoot
   const failed: UninstallOutcome["failed"] = [];
   const warnings: UninstallOutcome["warnings"] = [];
 
-  // ── (a) MCP server → ~/.codex/config.toml — delete only mcp_servers.agent-os, preserve Codex's live state ──
+  // ── (a) MCP server → ~/.codex/config.toml — delete only mcp_servers.agent-os. THIS IS THE REVOCATION. ──
   // Shared uninstall-side key stripper (same single-read presence semantics + per-target isolation as the CC
   // installer's claude.json removal). config.toml was PUBLISHED 0600 at install (it embeds the token) and the
   // targeted removeConfigKeys preserves the file's CURRENT mode, so it STAYS 0600 after removal — we deliberately
   // never loosen it back. A secret added to the file while Agent OS held it at 0600 would be exposed by widening
   // the mode on uninstall, so tightening is never autonomously reversed (keeps 0600 by design; full mode-lifecycle
-  // restoration: issue #33). A corrupt/symlinked config.toml that can't be stripped lands in `failed`, but the
-  // codex.token revocation below makes any lingering entry INERT — the `failedSuffix` carries that operator note.
+  // restoration: issue #33). A corrupt/symlinked config.toml that can't be stripped lands in `failed` — and since
+  // #24 that is a LIVE CREDENTIAL left behind, which (d) escalates from a report into a throw.
   const configOutcome = removeKeysIfPresent(configTomlPath(home), [`mcp_servers.${SERVER_NAME}`], {
     dataDir,
     errLabel: SERVER_NAME,
-    failedSuffix: " — any leftover entry is neutralized by the codex.token revocation below; remove it manually",
+    failedSuffix: " — this entry EMBEDS the Codex credential, so it is still live; remove it manually",
   });
   removed.push(...configOutcome.removed);
   failed.push(...configOutcome.failed);
@@ -380,20 +377,37 @@ export function uninstallCodex(opts: { home?: string; dataDir?: string; repoRoot
     failed.push({ path: agentsMd, error: errorText(err) });
   }
 
-  // ── (d) Revoke the stable Codex credential — delete codex.token so the next boot re-mints fresh ──
-  // Revocation is the one security-critical step here — it must not fail silently. rmSync({force}) ignores
-  // ENOENT (already gone = success) but can throw on EPERM/EACCES/EISDIR; verify the file is truly gone and
-  // FAIL LOUD if not, so a caller never treats a non-revoking uninstall as complete. This runs LAST, on
-  // purpose — the (a)/(b)/(c) removals above are independent best-effort cleanups and must still happen even
-  // when revocation is about to throw.
-  try {
-    rmSync(codexTokenPath(dataDir), { force: true });
-  } catch (err) {
-    console.error(`[agent-os] uninstall: error deleting '${codexTokenPath(dataDir)}':`, err);
-  }
-  if (existsSync(codexTokenPath(dataDir))) {
+  // ── (d) VERIFY revocation — the security-critical post-condition, checked two ways ──
+  // Runs LAST on purpose: (a)/(b)/(c) are independent cleanups that must all happen even when this throws.
+  //
+  // 1. Did the strip itself fail? Then our entry — which EMBEDS the credential — is still in the file. We must
+  //    not return normally: unlike U8, no `rm codex.token` follows to neutralize it. Note this case is NOT
+  //    covered by check 2: a strip usually fails because the file is unparseable, and an unparseable config
+  //    reads back as "no token" — inert TODAY, but live again the moment the operator repairs the syntax. So
+  //    the mechanism failing is its own escalation, independent of what the credential reads as right now.
+  if (configOutcome.failed.length > 0) {
+    // Surface the underlying cause(s) the strip already computed — a bare "could not remove" strands a
+    // programmatic caller (the realistic consumer of a thrown exception, vs. a human watching the stderr
+    // `console.error` one frame up) with no idea WHY. Safe to interpolate: `failed[].error` is `errorText`
+    // of the engine's own error, whose corrupt-TOML message carries only a LOCATION (`parseLocation` uses the
+    // parser's numeric line/column, never its source-frame message — see configwrite/engine.ts), so it can't
+    // leak an adjacent MCP server's bearer token from the same file. A test asserts the message stays
+    // token-free.
+    const causes = configOutcome.failed.map((f) => f.error).join("; ");
     throw new Error(
-      `[agent-os] uninstall: FAILED to revoke the Codex credential — '${codexTokenPath(dataDir)}' could not be removed, so the stable token remains LIVE against the gate. Remove it manually, then re-run uninstall.`,
+      `[agent-os] uninstall: FAILED to revoke the Codex credential — could not remove 'mcp_servers.${SERVER_NAME}' from '${configTomlPath(home)}', which embeds the stable token (${causes}). Remove that entry manually, then re-run uninstall.`,
+    );
+  }
+  // 2. Is a usable credential still readable? Asked with `readCodexToken` — the SAME reader the security gate
+  //    consults — so success is verified against the property that actually matters ("the gate will accept
+  //    nothing from this file") instead of trusting the removal to have done what it reported.
+  //    HONEST NOTE: given check 1, no currently reachable path satisfies this — a strip that reports success
+  //    really has removed the key. It is kept as a cheap post-condition on a security-critical operation: it
+  //    costs one read, and it is the assertion that would catch a future engine change whose "removed" no
+  //    longer means what it means today. Deliberately unreached, not dead.
+  if (readCodexToken(configTomlPath(home)) !== null) {
+    throw new Error(
+      `[agent-os] uninstall: FAILED to revoke the Codex credential — a token is STILL readable from '${configTomlPath(home)}' after removal, so it remains LIVE against the gate. Remove 'mcp_servers.${SERVER_NAME}' manually, then re-run uninstall.`,
     );
   }
 

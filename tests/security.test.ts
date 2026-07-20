@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Context } from "hono";
@@ -44,7 +44,7 @@ function buildApp(overrides: Partial<SecurityGateOptions> = {}) {
   const token = overrides.token ?? generateToken();
   const gate = securityGate({
     token,
-    stableTokenPath: overrides.stableTokenPath,
+    codexConfigPath: overrides.codexConfigPath,
     port: overrides.port ?? PORT,
     getConn: overrides.getConn ?? fakeConn("127.0.0.1"),
   });
@@ -231,61 +231,135 @@ describe("timing-safe token compare", () => {
   });
 });
 
-// ── Stable Codex credential: read per-request from codex.token for LIVE revocation (U8 decision A) ──
+// ── Stable Codex credential: read per-request from ~/.codex/config.toml for LIVE revocation (U8 decision A) ──
 
-describe("stable Codex credential — read per-request for LIVE revocation (U8 decision A)", () => {
-  const stablePath = (): string => join(root, "codex.token");
-  const writeStable = (value: string): string => {
-    writeFileSync(stablePath(), value, { mode: 0o600 });
-    return stablePath();
+// Ported from the `codex.token` form when issue #24 single-sourced the credential into Codex's own config:
+// every property below held before and must still hold, now read out of `config.toml`'s `http_headers`.
+// The last three cases are NEW failure modes that only exist because the source is now a structured file.
+describe("stable Codex credential — read per-request from ~/.codex/config.toml for LIVE revocation (U8 decision A, single-sourced by #24)", () => {
+  const configPath = (): string => join(root, "config.toml");
+  /** Write a config.toml carrying our MCP entry with `value` as the embedded credential — the exact shape
+   *  `installCodex` produces, so the gate is tested against what the installer really writes. */
+  const writeConfig = (value: string): string => {
+    writeFileSync(
+      configPath(),
+      `[mcp_servers.agent-os]\nurl = "http://127.0.0.1:${PORT}/mcp"\n\n[mcp_servers.agent-os.http_headers]\n"x-agent-os-token" = "${value}"\n`,
+      { mode: 0o600 },
+    );
+    return configPath();
   };
 
-  test("BOTH the per-boot token and the stable token in codex.token are accepted", async () => {
+  test("BOTH the per-boot token and the stable token embedded in config.toml are accepted", async () => {
     const token = generateToken();
     const codexToken = generateToken();
-    const { app } = buildApp({ token, stableTokenPath: writeStable(codexToken) });
+    const { app } = buildApp({ token, codexConfigPath: writeConfig(codexToken) });
 
     expect((await app.request("/status", { headers: { host: GOOD_HOST, "x-agent-os-token": token } })).status).toBe(200);
     expect((await app.request("/status", { headers: { host: GOOD_HOST, "x-agent-os-token": codexToken } })).status).toBe(200);
   });
 
   test("a token matching NEITHER the per-boot nor the stable token is rejected", async () => {
-    const { app } = buildApp({ token: generateToken(), stableTokenPath: writeStable(generateToken()) });
+    const { app } = buildApp({ token: generateToken(), codexConfigPath: writeConfig(generateToken()) });
     const res = await app.request("/status", { headers: { host: GOOD_HOST, "x-agent-os-token": generateToken() } });
     expect(res.status).toBe(403);
   });
 
-  test("a whitespace-only codex.token yields no stable credential — the whitespace value itself is rejected", async () => {
-    // The whitespace file must not become an accepted stable buffer. Send the whitespace value AS the token: a
-    // 403 proves it was NOT accepted (a MISSING header would 403 regardless, so it couldn't prove the property).
-    const { app } = buildApp({ token: generateToken(), stableTokenPath: writeStable("   ") });
+  test("a whitespace-only embedded token yields no stable credential — the whitespace value itself is rejected", async () => {
+    // The whitespace value must not become an accepted stable buffer. Send it AS the token: a 403 proves it was
+    // NOT accepted (a MISSING header would 403 regardless, so it couldn't prove the property).
+    const { app } = buildApp({ token: generateToken(), codexConfigPath: writeConfig("   ") });
     const res = await app.request("/status", { headers: { host: GOOD_HOST, "x-agent-os-token": "   " } });
     expect(res.status).toBe(403);
   });
 
-  test("LIVE revocation: deleting codex.token rejects the stable token on the NEXT request, no restart (the gate finding)", async () => {
+  test("LIVE revocation: removing the entry rejects the stable token on the NEXT request, no restart (the gate finding)", async () => {
     const token = generateToken();
     const codexToken = generateToken();
-    const { app } = buildApp({ token, stableTokenPath: writeStable(codexToken) });
+    const { app } = buildApp({ token, codexConfigPath: writeConfig(codexToken) });
 
-    // Accepted while the file exists…
+    // Accepted while the entry is present…
     expect((await app.request("/status", { headers: { host: GOOD_HOST, "x-agent-os-token": codexToken } })).status).toBe(200);
-    // …then delete codex.token (an uninstall's revoke) and hit the SAME running gate — now rejected, with no
-    // gate reconstruction / process restart. The per-boot token still works, proving only the stable one was cut.
-    rmSync(stablePath(), { force: true });
+    // …then strip our entry (what uninstall does) and hit the SAME running gate — now rejected, with no gate
+    // reconstruction / process restart. The per-boot token still works, proving only the stable one was cut.
+    writeFileSync(configPath(), `model = "gpt-5.4"\n`, { mode: 0o600 });
     expect((await app.request("/status", { headers: { host: GOOD_HOST, "x-agent-os-token": codexToken } })).status).toBe(403);
     expect((await app.request("/status", { headers: { host: GOOD_HOST, "x-agent-os-token": token } })).status).toBe(200);
   });
 
-  test("LIVE install pickup: writing codex.token after boot is honored on the NEXT request, no restart", async () => {
+  test("LIVE revocation also survives the whole config file being deleted", async () => {
+    const codexToken = generateToken();
+    const { app } = buildApp({ token: generateToken(), codexConfigPath: writeConfig(codexToken) });
+    expect((await app.request("/status", { headers: { host: GOOD_HOST, "x-agent-os-token": codexToken } })).status).toBe(200);
+    rmSync(configPath(), { force: true });
+    expect((await app.request("/status", { headers: { host: GOOD_HOST, "x-agent-os-token": codexToken } })).status).toBe(403);
+  });
+
+  test("revocation is observed even when the file's mtime does NOT advance (guards against an mtime-cached gate — #24 VECTOR #1)", async () => {
+    // U8 revoked by DELETING codex.token (a stat failure, mtime-immune); #24 revokes by REWRITING config.toml
+    // in place. An mtime-keyed cache would miss a strip that lands in the same mtime tick — reachable on a
+    // coarse-mtime filesystem once the substrate is remote. Simulate it: accept the token, strip our entry,
+    // then FORCE mtime back to its pre-strip value. A fresh-read gate MUST still reject; a re-introduced
+    // mtime cache would serve the revoked token and fail this test.
+    const codexToken = generateToken();
+    const path = writeConfig(codexToken);
+    const { app } = buildApp({ token: generateToken(), codexConfigPath: path });
+    expect((await app.request("/status", { headers: { host: GOOD_HOST, "x-agent-os-token": codexToken } })).status).toBe(200);
+
+    const before = statSync(path);
+    writeFileSync(path, `model = "gpt-5.4"\n`, { mode: 0o600 }); // strip our entry (revoke)
+    utimesSync(path, before.atime, before.mtime); // pin mtime to its pre-revocation value
+    expect((await app.request("/status", { headers: { host: GOOD_HOST, "x-agent-os-token": codexToken } })).status).toBe(403);
+  });
+
+  test("LIVE install pickup: writing the entry after boot is honored on the NEXT request, no restart", async () => {
     const token = generateToken();
     const codexToken = generateToken();
     // Gate built with the path but the file ABSENT (Codex not yet installed) → the stable token is rejected…
-    const { app } = buildApp({ token, stableTokenPath: stablePath() });
+    const { app } = buildApp({ token, codexConfigPath: configPath() });
     expect((await app.request("/status", { headers: { host: GOOD_HOST, "x-agent-os-token": codexToken } })).status).toBe(403);
-    // …then the installer writes codex.token; the running gate picks it up on the next request (mtime changed).
-    writeStable(codexToken);
+    // …then the installer writes the entry; the running gate picks it up on the next request (mtime changed).
+    writeConfig(codexToken);
     expect((await app.request("/status", { headers: { host: GOOD_HOST, "x-agent-os-token": codexToken } })).status).toBe(200);
+  });
+
+  test("rotation is picked up live — the OLD embedded token stops working, the new one starts", async () => {
+    const oldToken = generateToken();
+    const newToken = generateToken();
+    const { app } = buildApp({ token: generateToken(), codexConfigPath: writeConfig(oldToken) });
+    expect((await app.request("/status", { headers: { host: GOOD_HOST, "x-agent-os-token": oldToken } })).status).toBe(200);
+    writeConfig(newToken);
+    expect((await app.request("/status", { headers: { host: GOOD_HOST, "x-agent-os-token": oldToken } })).status).toBe(403);
+    expect((await app.request("/status", { headers: { host: GOOD_HOST, "x-agent-os-token": newToken } })).status).toBe(200);
+  });
+
+  // ── NEW failure modes: the source is a structured file Codex owns, so it can be malformed in ways a
+  //    single-value token file never could. Each must FAIL CLOSED — no credential, and never a 500. ──
+
+  test("CORRUPT TOML fails closed — no stable credential, and the gate returns 403 not 500", async () => {
+    const codexToken = generateToken();
+    const { app } = buildApp({ token: generateToken(), codexConfigPath: writeConfig(codexToken) });
+    expect((await app.request("/status", { headers: { host: GOOD_HOST, "x-agent-os-token": codexToken } })).status).toBe(200);
+    // Codex (or an editor) leaves the file unparseable — a parse throw inside the auth path must not escape.
+    writeFileSync(configPath(), `[mcp_servers.agent-os\nurl = "oops`, { mode: 0o600 });
+    const res = await app.request("/status", { headers: { host: GOOD_HOST, "x-agent-os-token": codexToken } });
+    expect(res.status).toBe(403);
+  });
+
+  test("a valid config with NO agent-os entry grants nothing (an uninstalled but otherwise healthy Codex)", async () => {
+    writeFileSync(configPath(), `model = "gpt-5.4"\n\n[mcp_servers.uidotsh]\nurl = "http://example.invalid"\n`, { mode: 0o600 });
+    const { app } = buildApp({ token: generateToken(), codexConfigPath: configPath() });
+    const res = await app.request("/status", { headers: { host: GOOD_HOST, "x-agent-os-token": generateToken() } });
+    expect(res.status).toBe(403);
+  });
+
+  test("a NON-STRING embedded token grants nothing (hand-edited config, wrong type)", async () => {
+    writeFileSync(
+      configPath(),
+      `[mcp_servers.agent-os.http_headers]\n"x-agent-os-token" = 12345\n`,
+      { mode: 0o600 },
+    );
+    const { app } = buildApp({ token: generateToken(), codexConfigPath: configPath() });
+    expect((await app.request("/status", { headers: { host: GOOD_HOST, "x-agent-os-token": "12345" } })).status).toBe(403);
   });
 });
 

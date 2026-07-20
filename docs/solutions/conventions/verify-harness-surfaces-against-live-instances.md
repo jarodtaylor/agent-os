@@ -27,7 +27,8 @@ For any scanner or installer that reads a harness's config, treat the config sch
 1. **Inspect the live config structure first** (keys/shape, never secret values). Do not code the surface from memory or from `ls`. Use `jq 'keys'`, `grep '^\['` on TOML tables, etc., against a real config on the machine.
 2. **Present is not active — look for a state flag on every enumerated entry.** A config that lists an entry may also carry `enabled: false` / a disabled marker; emitting a disabled entry as active violates R8 ("reflect the *actual* active stack, not everything ever installed"). Default to include unless *explicitly* disabled — a missing flag is not "off".
 3. **Verify discovery ROOTS against a live instance + current docs, not an assumed path.** A skills/config dir you *expect* may be empty or a decoy; the real one may be a shared cross-tool convention (`~/.agents/...`) that blurs per-runtime attribution. A reviewer's *alternative* root is also just a guess until you verify it.
-4. **Ship the verified core; defer what you can't verify — with a detailed issue.** A plausible-but-wrong scanner (false absences, disabled-shown-as-active) is worse than a documented gap. Each defer gets an issue naming *what*, *why*, and the *build trigger*.
+4. **A shallow live probe yields false ABSENCES as readily as false presences — never encode "does not exist" from one.** An empty dir + a `--help` with no matching subcommand is not evidence a surface doesn't exist; verify a surface's *existence* against the harness's authoritative docs before writing an absence finding. And for *control* surfaces (CLI flags, key sequences, pane protocols), reading `--help` is not verification at all — **drive the surface live** before encoding it.
+5. **Ship the verified core; defer what you can't verify — with a detailed issue.** A plausible-but-wrong scanner (false absences, disabled-shown-as-active) is worse than a documented gap. Each defer gets an issue naming *what*, *why*, and the *build trigger*.
 
 ## Why This Matters
 
@@ -39,7 +40,7 @@ Every harness-surface scanner or installer — the whole future roster (Hermes, 
 
 ## Examples
 
-The three live-config surprises from U9, each caught only by reality:
+The three live-config surprises from U9 plus the dogfood scaffold's false-absence, each caught only by reality:
 
 **1. Claude Code `enabledPlugins` has `false` entries.** `~/.claude/settings.json .enabledPlugins` is `{ "<name>@<mkt>": boolean }`; 1 of 24 was `false`. A cursory "enumerate the keys" emits a disabled plugin as active. Fix: filter `=== true`.
 
@@ -54,6 +55,8 @@ enabled = true
 ```
 
 **3. Codex skills are not in `~/.codex/skills`.** That dir held only a `.system` entry (0 real skills); the real discovery root is a shared `~/.agents/skills` convention (13 `SKILL.md` files there) + repo `.agents/skills` + `[[skills.config]]` disables — and the same shared root leaves the Claude Code skill scan only *plausible*, not verified. The naive `~/.codex/skills` scan was verified-**wrong** against the live machine. Response: ship the confirmed `config.toml` surfaces (MCP + plugins) and **defer** Codex skill discovery + holistic skill-root verification to an issue, rather than switch to the reviewer's own unverified alternative.
+
+**4. The false-absence mirror image (agent-cost-tracker dogfood scaffold, 2026-07-16→18).** The provisioning pass declared `.codex/agents/*.toml` "does not exist" from an empty `~/.codex/agents/` + a top-level `codex --help` with no `agents` subcommand, treating the authoritative docs as "optional confirmation" — **the spec was right; the finding was wrong** (Codex custom subagents are real, project-scoped TOML; verified live by delegating to a provisioned `executor.toml`). Same run, same spine on a *control* surface: the Herdr orchestration was authored against `--help` and was wrong in three ways (submit primitive, output source, spawn pattern) — each caught only by driving a live pane. Full record: `~/Code/personal/agent-cost-tracker/FRICTION.md` + `PROVISIONING.md` §Corrections.
 
 **Companion pattern — a fail-soft-everywhere composition's error backstop is invisible to real inputs.** `scanAll` wraps each scanner in try/catch (R9: one source's throw degrades only its runtime). But every helper is fail-soft (returns `null`/`[]`), so no *real* scanner ever throws — the backstop had zero coverage and could be deleted with the suite still green ("green-while-red", flagged by three reviewers). To test a defense-in-depth handler whose real inputs never trigger it, expose a seam that **injects a failure**: factor the loop into `runScanners(ctx, scanners)` and pass a deliberately-throwing scanner.
 

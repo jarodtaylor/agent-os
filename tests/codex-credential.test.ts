@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CODEX_SERVER_NAME, codexConfigPath, extractCodexToken, readCodexToken } from "../src/codex-credential";
@@ -93,6 +93,18 @@ describe("readCodexToken — fail-closed file reader (the gate's + uninstall's s
 
   test("entry present but no http_headers ⇒ null", () => {
     writeFileSync(configPath(), `[mcp_servers.${CODEX_SERVER_NAME}]\nurl = "http://127.0.0.1:4319/mcp"\n`);
+    expect(readCodexToken(configPath())).toBeNull();
+  });
+
+  // Bounded-read discipline (mirrors scan/internal.ts) — the gate calls this per request, so it must refuse a
+  // non-regular or oversized target WITHOUT reading, or a FIFO would hang the daemon.
+  test("a NON-REGULAR target (directory — a FIFO's safe proxy) ⇒ null, refused without reading", () => {
+    mkdirSync(configPath()); // stat.isFile() === false — same guard branch a FIFO/device hits, but can't hang
+    expect(readCodexToken(configPath())).toBeNull();
+  });
+
+  test("an OVERSIZED config (> 16 MiB) ⇒ null, refused without reading", () => {
+    writeFileSync(configPath(), Buffer.alloc(16 * 1024 * 1024 + 1, 0x61)); // one byte past the cap
     expect(readCodexToken(configPath())).toBeNull();
   });
 });

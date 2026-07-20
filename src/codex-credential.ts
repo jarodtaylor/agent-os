@@ -26,8 +26,14 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { parse as parseToml } from "smol-toml";
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { TOKEN_HEADER } from "./paths";
+
+/** Bound the per-request credential read the same way the inventory scanners bound theirs
+ *  (`src/scan/internal.ts`). Codex's config is small (KB), so this never rejects a legitimate file; it caps
+ *  the OOM surface of a pathological oversized one. Same 16 MiB ceiling, deliberately, so the two read
+ *  boundaries stay identically disciplined. */
+const MAX_CONFIG_BYTES = 16 * 1024 * 1024; // 16 MiB, matching src/scan/internal.ts
 
 /** The brain's MCP server name in `~/.codex/config.toml` (mirrors Claude Code's `mcpServers.agent-os`).
  *  Lives here because it is half of the credential's ADDRESS — the gate, the installer's write, and the
@@ -73,9 +79,17 @@ export function extractCodexToken(config: unknown): string | null {
 export function readCodexToken(configPath: string): string | null {
   let raw: string;
   try {
+    // Stat-before-read, mirroring scan/internal.ts's bounded-read discipline — load-bearing on the auth hot
+    // path, NOT cosmetic. The security gate calls this on EVERY request, and `readFileSync` on a FIFO or
+    // character-device at config.toml BLOCKS INDEFINITELY (no writer ever comes), past the catch below,
+    // stalling the Bun event loop and hanging the WHOLE daemon. A non-regular or oversized target is refused
+    // WITHOUT reading. Silent (no warn, unlike the scanner's debug surface): this is the per-request gate path,
+    // fail-closed to `null` is the whole signal, and a per-request warn on a persistently-odd config would spam.
+    const stat = statSync(configPath);
+    if (!stat.isFile() || stat.size > MAX_CONFIG_BYTES) return null;
     raw = readFileSync(configPath, "utf8");
   } catch {
-    return null;
+    return null; // absent (ENOENT) / unreadable ⇒ no credential
   }
   try {
     return extractCodexToken(parseToml(raw));

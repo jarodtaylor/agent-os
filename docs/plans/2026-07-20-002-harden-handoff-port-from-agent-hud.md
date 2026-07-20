@@ -1,6 +1,6 @@
 # Side quest — harden the handoff (port agent-hud's evolved version into agent-os)
 
-> **Status:** planned, not started (2026-07-20). Inserted **before** the U10 plan session at Jarod's call.
+> **Status:** **Phase 1 COMPLETE + verified (2026-07-20)** — breadcrumb + resume-check hooks live in gitignored `.claude/`, `settings.json` wired (JSON re-validated; codex-gate/typecheck preserved), both hooks proven by direct run. **Phase 2 pending Jarod's DC1** (file-record home); DC2/DC3 owned by CTO. `branch-cleanup.sh` deferred (git-mutating, own evaluation). Inserted **before** the U10 plan session at Jarod's call.
 > **Durable checkpoint** written pre-`/compact` so this survives context compaction — everything needed to
 > execute is here; do not re-derive from the (compacted) conversation.
 > **North Star tie:** the handoff is what keeps intent continuous across contexts — attempt #2's whole
@@ -51,9 +51,20 @@ branches), so this is *adopt + reconcile*, not *invent*.
   coexist: file-based resume works always; the server hook adds auto-injection once installed + running.
 - DECISIONS.md — the #8/U7/KTD8 amendment (Phase 2).
 
-## Phase 1 — additive hooks (SAFE, do first; touches nothing existing)
+## Phase 1 — additive hooks (SAFE, do first; touches nothing existing)  ✅ DONE 2026-07-20
 
 Pure crash-safety + file-based resume. Amends no decision. Do this first even if Phase 2 waits.
+
+> **Completed 2026-07-20.** `session-breadcrumb.sh` copied verbatim; `session-resume-check.sh` copied with
+> its 5 `HANDOFF.md` references adapted to agent-os's real resume doc `docs/START-HERE.md` (not a Phase-2 leak —
+> pointing a hook at a doc that exists is what makes Phase 1 correct standalone; START-HERE already uses the
+> `▶ NEXT` convention the hook names). `settings.json` merged (Stop + SessionStart[startup,resume]); JSON
+> re-validated so the existing codex-gate/typecheck hooks stay intact. Both hooks verified by direct run
+> (breadcrumb written with correct branch/HEAD/clean-tree; resume-check surfaced it with adapted wording),
+> since a Stop hook can't be cleanly observed firing from inside its own session. `branch-cleanup.sh`
+> **deferred** — it switches HEAD / deletes branches on startup (git-state mutation), a different risk class
+> from the write-and-read-only continuity hooks, and interacts with `/unit-loop`'s "already on this branch →
+> continue" resume-safety; it gets its own evaluation, not a free ride on the "safe/additive" phase.
 
 1. Copy `session-breadcrumb.sh` + `session-resume-check.sh` (and optionally `branch-cleanup.sh`) from
    agent-hud `.claude/hooks/` into agent-os `.claude/hooks/`. Read each first (they're agent-hud-generic —

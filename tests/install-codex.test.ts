@@ -553,6 +553,21 @@ describe("installCodex", () => {
     expect(msg).not.toContain(secret); // …but the credential value never appears in it.
   });
 
+  test("uninstall removes a legacy pre-#24 codex.token orphaned by the upgrade (a still-running old gate would honor it)", () => {
+    // #24 deleted the code that WRITES codex.token, but an uninstall run after upgrading from U8 must still
+    // CLEAN UP a leftover — a pre-#24 gate reads that file live per request, so leaving it behind means a
+    // "successful" uninstall that hasn't actually revoked against the old process (codex adversarial gate).
+    install(); // #24 install: writes config.toml, never codex.token
+    const legacy = join(dataDir, "codex.token");
+    mkdirSync(dataDir, { recursive: true });
+    writeFileSync(legacy, "stale-u8-credential", { mode: 0o600 }); // simulate the pre-#24 leftover
+
+    const { removed } = uninstallCodex({ home, dataDir, repoRoot: REPO });
+
+    expect(existsSync(legacy)).toBe(false); // deleted → a pre-#24 gate reading it live stops accepting it
+    expect(removed).toContain(legacy);
+  });
+
   test("uninstall re-revokes a credential that reappeared after a previous uninstall (a later re-install, then uninstall)", () => {
     // Uninstall reads the file as it is NOW (cross-process by design), so a config that regained our entry —
     // a re-install, or Codex restoring a backup — is revoked again on the next uninstall rather than skipped

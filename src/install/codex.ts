@@ -325,7 +325,9 @@ export function installCodex(opts: InstallOptions = {}): InstallResult {
  *       actually deactivates Codex consumption. Exact-command match on the current repoRoot: a repo-MOVED
  *       leftover points its command at a now-missing script and already fails open (inert).
  *   (c) AGENTS.md — strip our marked block (structural inverse of the upsert; it never went through the journal).
- *   (d) VERIFY the credential is gone — the security-critical post-condition, run LAST so (a)–(c) all happen
+ *   (c2) legacy `codex.token` — delete any pre-#24 credential file this unit orphaned, so uninstalling after an
+ *        upgrade from U8 fully revokes even against a still-running pre-#24 gate that reads it live.
+ *   (d) VERIFY the credential is gone — the security-critical post-condition, run LAST so (a)–(c2) all happen
  *       even when it is about to throw.
  */
 export function uninstallCodex(opts: { home?: string; dataDir?: string; repoRoot?: string } = {}): UninstallOutcome {
@@ -377,8 +379,28 @@ export function uninstallCodex(opts: { home?: string; dataDir?: string; repoRoot
     failed.push({ path: agentsMd, error: errorText(err) });
   }
 
-  // ── (d) VERIFY revocation — the security-critical post-condition, checked two ways ──
-  // Runs LAST on purpose: (a)/(b)/(c) are independent cleanups that must all happen even when this throws.
+  // ── (c2) Legacy migration — remove any pre-#24 `codex.token` this unit orphaned ──
+  // U8 kept a SECOND copy of the credential in `dataDir/codex.token`, read DIRECTLY by the gate. #24 deleted
+  // that path, so a fresh install never writes it again — but uninstalling AFTER upgrading from a pre-#24
+  // install would otherwise leave the old file on disk, where a STILL-RUNNING pre-#24 gate (which reads it
+  // live per request) keeps honoring the "revoked" credential until restart. Remove it so the upgrade path
+  // fully revokes. A survivor is escalated to the loud (d) throw below — it is a credential file a stale gate
+  // reads, and "revocation must fail loud" is the #24 inversion. Path inlined (not via a helper) precisely
+  // because this file is legacy: nothing in the #24 world should reference it as a live credential source.
+  const legacyTokenPath = join(dataDir, "codex.token");
+  let legacyTokenSurvives = false;
+  if (existsSync(legacyTokenPath)) {
+    try {
+      rmSync(legacyTokenPath, { force: true });
+    } catch (err) {
+      console.error(`[agent-os] uninstall: error deleting legacy '${legacyTokenPath}':`, err);
+    }
+    if (existsSync(legacyTokenPath)) legacyTokenSurvives = true;
+    else removed.push(legacyTokenPath);
+  }
+
+  // ── (d) VERIFY revocation — the security-critical post-condition, checked at every credential surface ──
+  // Runs LAST on purpose: (a)/(b)/(c)/(c2) are independent cleanups that must all happen even when this throws.
   //
   // 1. Did the strip itself fail? Then our entry — which EMBEDS the credential — is still in the file. We must
   //    not return normally: unlike U8, no `rm codex.token` follows to neutralize it. Note this case is NOT
@@ -396,6 +418,14 @@ export function uninstallCodex(opts: { home?: string; dataDir?: string; repoRoot
     const causes = configOutcome.failed.map((f) => f.error).join("; ");
     throw new Error(
       `[agent-os] uninstall: FAILED to revoke the Codex credential — could not remove 'mcp_servers.${SERVER_NAME}' from '${configTomlPath(home)}', which embeds the stable token (${causes}). Remove that entry manually, then re-run uninstall.`,
+    );
+  }
+  // 1b. Did a legacy pre-#24 `codex.token` survive cleanup (c2)? A still-running pre-#24 gate reads that file
+  //     live, so a survivor is an un-revoked credential on the upgrade path — fail loud, same class as a failed
+  //     config strip. The common case (no such file — every #24 install) skips (c2) entirely and never reaches this.
+  if (legacyTokenSurvives) {
+    throw new Error(
+      `[agent-os] uninstall: FAILED to revoke the Codex credential — the legacy '${legacyTokenPath}' could not be removed, so a pre-#24 gate would keep honoring it. Remove it manually, then re-run uninstall.`,
     );
   }
   // 2. Is a usable credential still readable? Asked with `readCodexToken` — the SAME reader the security gate

@@ -94,7 +94,7 @@ A shared task board across harnesses *and* instances, plus Hermes as the always-
 | **Substrate** | The v0.1 plumbing: local server + database + typed schema + agent-callable tools. The floor everything else stands on. |
 | **The Brain** | The 4-layer memory system (designed, not built). Today's substrate is its brainstem — working memory + reflexes; the knowledge layers come next. |
 | **MCP** | "USB-C for agents" — the standard plug harnesses use to call tools. Build the brain as an MCP server once → every harness can use it. |
-| **Handoff / cursor** | The single machine-readable "where we left off" record per project. |
+| **Handoff / cursor** | The single "where we left off" record per project — today `START-HERE.md` ▶ NEXT; becomes a machine record (the substrate) at U15 (decision #51). |
 | **Breadcrumbs (raw lane)** | The automatic trail of what each session actually did. Survives crashes; future Brain-L3 fuel. |
 | **Redaction gate** | The one choke-point every read passes through; masks secrets before anyone — agent or human — sees them. |
 | **Parity** | "Skill X exists in harness A but not B" → detect it, fix it in one click, undo-able. |

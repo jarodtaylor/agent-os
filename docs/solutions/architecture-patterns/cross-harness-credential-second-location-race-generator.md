@@ -1,6 +1,7 @@
 ---
 title: Cross-harness credential integration — a second token location is a lifecycle-race generator
 date: 2026-07-09
+last_updated: 2026-07-20
 category: docs/solutions/architecture-patterns
 module: install/server security (multi-harness credential)
 problem_type: architecture_pattern
@@ -39,7 +40,7 @@ Four patches bought soundness for the single-process path; the fifth edge was th
 
 - **When an adversarial gate finds a *new* lifecycle edge every pass, the MODEL is the cost — not any single bug.** Re-finding the same bug means "not fixed yet." Finding a *different* edge each pass means the surface itself is too large. Stop treating passes as a checklist to burn down.
 - **Set a reconsider trigger at first adoption, then COUNT the recurrence.** When you adopt a model you are not sure of, record the fallback in the decision itself: *"if this proves recurrently costly, revisit the model — here are the named alternatives."* Then the Nth pass is a *measured* signal against a recorded rationale, not a rediscovery. (Here: DECISIONS #28 set it; #29 fired it at pass 5.)
-- **When the trigger fires, the resolution is usually SUBTRACTIVE, not patch N+1.** The fix for a two-location race is not a better sync — it is **one location**. Make the gate read the token straight from the config the harness already owns; delete the second file and its whole mint/provenance/revoke apparatus. The finding class dissolves because there is nothing left to keep in sync (tracked: issue #24, single-source Codex credential).
+- **When the trigger fires, the resolution is usually SUBTRACTIVE, not patch N+1.** The fix for a two-location race is not a better sync — it is **one location**. Make the gate read the token straight from the config the harness already owns; delete the second file and its whole mint/provenance/revoke apparatus. The finding class dissolves because there is nothing left to keep in sync (**shipped: PR #41 / issue #24, single-source Codex credential** — see the Update below).
 
 ## Why This Matters
 
@@ -86,4 +87,8 @@ Clean targeted revocation wants the U14 key-removal primitive (issue #21); the i
 
 - `docs/solutions/design-patterns/building-installers-on-the-config-write-engine.md` — the config-write **mechanics** (backup/atomic/undo, cross-file transactionality) this credential model sits on top of; this doc is the credential-**model** complement.
 - DECISIONS #28 (the two-location model + the reconsider trigger), #29 (the trigger firing + the ruling: ship the immaterial edge deferred, resolve the root via single-source).
-- Issue #24 (single-source Codex credential — the subtractive resolution), issue #21 (the U14 key-removal primitive it depends on for pristine revocation).
+- Issue #24 (single-source Codex credential — the subtractive resolution, **SHIPPED + MERGED PR #41, 2026-07-20**), issue #21 (the U14 key-removal primitive it depends on for pristine revocation).
+
+## Update — resolution shipped (2026-07-20, PR #41 / decision #49)
+
+The subtractive fix this doc predicted **landed**. The gate now reads the credential straight from `~/.codex/config.toml` via `src/codex-credential.ts` (a pure/total `extractCodexToken` + a fail-closed `readCodexToken` shared by the gate *and* uninstall's revocation check); `codex.token` and the whole mint/provenance/revoke apparatus (`resolveCodexToken`, `revokeMintedToken`, `tokenPreexisted`) are **deleted**. The diagnosis above stands as written — a second credential location IS a lifecycle-race generator; the sections narrating "two places" are the *problem being taught*, not current state. Two lifecycle edges that only exist under concurrent invocation of the manual CLI were deferred as out-of-scope (issues #39, #40), consistent with this doc's "the residual is deferred as immaterial" note. The design move that made single-sourcing clean — one pure extractor, failure policy per caller — is captured in [[one-pure-extractor-per-caller-failure-policy]].

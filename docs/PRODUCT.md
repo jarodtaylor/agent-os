@@ -3,7 +3,7 @@
 > **For humans.** Plain language, outcomes first, short on purpose. The deep/agent-grade state lives in [`START-HERE.md`](START-HERE.md) + [`DECISIONS.md`](DECISIONS.md); this page is their product-level projection.
 > **Freshness rule:** `/handoff` updates this page whenever something ships. If this page and reality ever disagree, that's a bug — flag it.
 
-_Last updated: 2026-07-20 (partial — cursor + "still to build" refreshed for U24; the release-map body still needs a full reconciliation pass for U9 + the dogfood block) · Status: **v0.1 "Continuity" in progress — 11 of 15 units shipped**; latest: **U24** single-source Codex credential merged (PR #41). Next: the **U10 plan session**. · Roadmap postures locked by the 2026-07-10 interview (decisions #32–#41)_
+_Last updated: 2026-07-20 · Status: **v0.1 "Continuity" in progress — 11 of 15 units shipped**; latest: **U24** single-source Codex credential merged (PR #41). Next: the **U10 plan session**. · Roadmap postures locked by the 2026-07-10 interview (decisions #32–#41)_
 
 ## TL;DR
 
@@ -32,19 +32,20 @@ _Last updated: 2026-07-20 (partial — cursor + "still to build" refreshed for U
 - ✅ **Crash-safe breadcrumbs** — every session automatically leaves a trail of what it did; a spike proved a cold agent can resume real mid-flight work from the trail alone.
 - ✅ **Marked secrets can't leak out** — every read path (agent tools, HTTP, the future UI) passes one redaction gate that masks anything marked secret. Security-reviewed; clean bill on outbound leak paths. (Scope honesty, per decision #25: the gate makes reads *non-leaky* — what's marked is what's masked.)
 - ✅ **Config safety** — Agent OS edits harness configs (hooks, MCP entries) with backup → atomic write → undo journal. It has run against the real `~/.claude` and restored it byte-perfect.
+- ✅ **See what every harness has installed** — a typed inventory of skills / MCP servers / plugins across Claude Code + Codex (the Observe half; further harnesses join as one-line registry rows as they enter rotation). *Shipped U9, PR #38.*
 - ✅ **Locked to this machine** — the server answers only local callers holding a per-boot token; single-instance enforced at the OS level.
 
 ## Release map
 
 > _Naming map: this page's **v0.1** = "slice 1" / "v1" in the engineering docs; their "**v1.1**" = the **Memory** phase below._
 
-### v0.1 — "Continuity" *(now · 10 of 15 units shipped · **committed** — unit-backed)*
+### v0.1 — "Continuity" *(now · 11 of 15 units shipped · **committed** — unit-backed)*
 
 **Problem it solves:** resuming work = archaeology (which CLI touched this last? what was in flight?), and re-explaining context to every agent. That overhead made multi-agent work not worth it.
 
 **The demo when it ships:** *either wired harness (Claude Code or Codex), any project — open it and it knows where you left off, even after a crash. Plus one screen: every project's state + the full skills/MCP inventory across harnesses, with one-click propagation. (The rest of the roster joins after the U12 spike maps their surfaces.)*
 
-**Shipped since this doc was last fully reconciled (2026-07-10):** **#21** config-engine targeted removal (PR #34) · **U9** inventory scanners (PR #38 — read what every harness has installed) · **dogfood run 1** (the multi-harness SDLC loop proven on a real project, `agent-cost-tracker`) · **#24** single-source Codex credential (PR #41 — retired the duplicate token file). *(This release map is mid-reconciliation — see START-HERE for the live state.)*
+**Recently shipped:** **U9** inventory scanners (PR #38 — the Observe half) · **#21** config-engine targeted removal (PR #34) · **#24** single-source Codex credential (PR #41 — retired the duplicate token file). *(#21/#24 are follow-up issues, not among the 15 plan units.)* Also **dogfood run 1** (below) — a validation exercise, not a v0.1 unit.
 
 **Still to build:**
 - **U10 (next up) — parity actions:** "X exists in Claude Code but not Codex → make it so," reversibly. *(Gets a dedicated `ce-plan` session first, grounded in the dogfood run's `PROVISIONING.md`.)*
@@ -71,6 +72,7 @@ CTO view: **L4, the write path, is the real product.** Status: vision sketch + o
 A shared task board across harnesses *and* instances, plus Hermes as the always-on chief-of-staff: it plans, dispatches to the right harness (e.g. Claude as architect, Codex as execution, another for docs/QA), and tracks it all on the board. Braindump items to fold in when this gets scoped: the Hermes chief-of-staff pattern and evaluating **Herdr**. (The braindump's *observability* items — per-harness auth/online status + one-click re-login, token usage, context-hog skill detection — belong to **Observe + Control** scoping instead.) Status: track-level only — scoping happens at its own `ce-brainstorm`.
 **Proof when it ships:** one real multi-harness workflow — research or content counts, not just coding — planned, dispatched, and tracked end-to-end.
 **Gate:** the Observe + Control slice ships first; dispatch isn't trustworthy until Agent OS can see what's installed/online and act reversibly.
+**Early proof (2026-07-20, decision #48):** a manual "dogfood" run drove one real multi-harness coding workflow end-to-end on a live project (`agent-cost-tracker`) — Claude plan → Codex execute → Claude review → Cursor QA gate → PR → merge. n=1 and mechanical (didn't test output quality or multi-run continuity), but it proved the loop runs and produced the friction log that grounds the U10 provisioner's spec.
 
 ### Later — **vision** (directional, not yet scoped)
 
@@ -113,7 +115,7 @@ A shared task board across harnesses *and* instances, plus Hermes as the always-
 | U6 | CC consumption | A fresh CC session auto-loads "where was I" + marks clean endings | ✅ *lived 7/8* |
 | U7 | `/handoff` rewire | One authoritative continuity record; docs render it | ✅ |
 | U8 | Codex integration | Second harness on the shared brain (capture + read + installer) | ✅ *live check pending* |
-| U9 | Inventory scanners | See every skill/MCP server/plugin across harnesses (the set firms up after U12) | ⏳ |
+| U9 | Inventory scanners | See every skill/MCP server/plugin across harnesses — CC + Codex now; others join as one-line registry rows as they enter rotation | ✅ *PR #38* |
 | U10 | Parity actions | One-click propagate with undo | ⏳ |
 | U11 | Thin human view | The first screen | ⏳ |
 | U12 | Roster lane spike | What's possible for Hermes / Cursor / Antigravity / OpenCode | ⏳ |

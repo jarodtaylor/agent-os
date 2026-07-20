@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse as parseToml } from "smol-toml";
@@ -565,6 +565,22 @@ describe("installCodex", () => {
     const { removed } = uninstallCodex({ home, dataDir, repoRoot: REPO });
 
     expect(existsSync(legacy)).toBe(false); // deleted → a pre-#24 gate reading it live stops accepting it
+    expect(removed).toContain(legacy);
+  });
+
+  test("uninstall removes a legacy codex.token that is a DANGLING symlink — existsSync would skip it (#24 gate round 2)", () => {
+    // The gate caught that an existsSync guard FOLLOWS symlinks, so a dangling codex.token symlink reads as
+    // absent and would be silently skipped — yet it is a real entry a restored target could revive. lstat-based
+    // detection must see the link itself and unlink it (or fail loud), never report a false clean.
+    install();
+    mkdirSync(dataDir, { recursive: true });
+    const legacy = join(dataDir, "codex.token");
+    symlinkSync(join(dataDir, "nonexistent-legacy-target"), legacy); // dangling: target does not exist
+    expect(existsSync(legacy)).toBe(false); // the trap: existsSync follows the link → reports it absent
+
+    const { removed } = uninstallCodex({ home, dataDir, repoRoot: REPO });
+
+    expect(() => lstatSync(legacy)).toThrow(); // the symlink ENTRY itself is unlinked, not silently skipped
     expect(removed).toContain(legacy);
   });
 

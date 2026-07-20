@@ -37,7 +37,7 @@
  * credential FOR FREE, because the credential IS that entry (issue #24): there is no separate token file
  * left behind to strand, so the whole mint-provenance/revoke-on-failure apparatus U8 needed is deleted.
  */
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -115,6 +115,20 @@ function rollback(results: MergeResult[], dataDir: string): void {
       // Best-effort — the original error is what propagates; log so a swallowed rollback failure isn't invisible.
       console.error(`[agent-os] install: rollback of '${r.targetPath}' failed (leaving it as-is):`, err);
     }
+  }
+}
+
+/** lstat-based presence for the legacy `codex.token` cleanup: an ENTRY exists (regular file OR a symlink,
+ *  dangling or not). Only a clean ENOENT counts as absent; any other lookup error (EACCES, ENOTDIR, …) is
+ *  treated as present so an indeterminate lookup fails CLOSED into uninstall's loud revocation throw rather
+ *  than masquerading as a successful cleanup. Uses lstat, NOT existsSync, which follows symlinks and would
+ *  call a dangling `codex.token` symlink absent (mirrors the engine's `statTarget` symlink discipline). */
+function legacyEntryPresent(path: string): boolean {
+  try {
+    lstatSync(path);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code !== "ENOENT";
   }
 }
 
@@ -385,17 +399,23 @@ export function uninstallCodex(opts: { home?: string; dataDir?: string; repoRoot
   // install would otherwise leave the old file on disk, where a STILL-RUNNING pre-#24 gate (which reads it
   // live per request) keeps honoring the "revoked" credential until restart. Remove it so the upgrade path
   // fully revokes. A survivor is escalated to the loud (d) throw below — it is a credential file a stale gate
-  // reads, and "revocation must fail loud" is the #24 inversion. Path inlined (not via a helper) precisely
-  // because this file is legacy: nothing in the #24 world should reference it as a live credential source.
+  // reads, and "revocation must fail loud" is the #24 inversion.
+  //
+  // Presence is checked with `legacyEntryPresent` (lstat, ENOENT-only-is-absent), NOT `existsSync`: existsSync
+  // FOLLOWS symlinks, so a DANGLING `codex.token` symlink reads as absent and would be silently skipped —
+  // yet it is still a directory entry a restored target could turn back into a live credential. lstat sees the
+  // link itself, and any non-ENOENT lookup error fails CLOSED (treated as present → the loud throw), matching
+  // the lstat/`statTarget` symlink discipline the config.toml + hooks.json strips already use (issue #30).
   const legacyTokenPath = join(dataDir, "codex.token");
   let legacyTokenSurvives = false;
-  if (existsSync(legacyTokenPath)) {
+  if (legacyEntryPresent(legacyTokenPath)) {
     try {
+      // force:true ignores ENOENT and unlinks the ENTRY itself (a dangling symlink is removed, its target untouched).
       rmSync(legacyTokenPath, { force: true });
     } catch (err) {
       console.error(`[agent-os] uninstall: error deleting legacy '${legacyTokenPath}':`, err);
     }
-    if (existsSync(legacyTokenPath)) legacyTokenSurvives = true;
+    if (legacyEntryPresent(legacyTokenPath)) legacyTokenSurvives = true;
     else removed.push(legacyTokenPath);
   }
 

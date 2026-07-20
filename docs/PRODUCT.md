@@ -3,7 +3,7 @@
 > **For humans.** Plain language, outcomes first, short on purpose. The deep/agent-grade state lives in [`START-HERE.md`](START-HERE.md) + [`DECISIONS.md`](DECISIONS.md); this page is their product-level projection.
 > **Freshness rule:** `/handoff` updates this page whenever something ships. If this page and reality ever disagree, that's a bug — flag it.
 
-_Last updated: 2026-07-10 · Status: **v0.1 "Continuity" in progress — 10 of 15 units shipped** · Roadmap postures locked by the 2026-07-10 interview (decisions #32–#41)_
+_Last updated: 2026-07-20 (partial — cursor + "still to build" refreshed for U24; the release-map body still needs a full reconciliation pass for U9 + the dogfood block) · Status: **v0.1 "Continuity" in progress — 11 of 15 units shipped**; latest: **U24** single-source Codex credential merged (PR #41). Next: the **U10 plan session**. · Roadmap postures locked by the 2026-07-10 interview (decisions #32–#41)_
 
 ## TL;DR
 
@@ -44,10 +44,10 @@ _Last updated: 2026-07-10 · Status: **v0.1 "Continuity" in progress — 10 of 1
 
 **The demo when it ships:** *either wired harness (Claude Code or Codex), any project — open it and it knows where you left off, even after a crash. Plus one screen: every project's state + the full skills/MCP inventory across harnesses, with one-click propagation. (The rest of the roster joins after the U12 spike maps their surfaces.)*
 
+**Shipped since this doc was last fully reconciled (2026-07-10):** **#21** config-engine targeted removal (PR #34) · **U9** inventory scanners (PR #38 — read what every harness has installed) · **dogfood run 1** (the multi-harness SDLC loop proven on a real project, `agent-cost-tracker`) · **#24** single-source Codex credential (PR #41 — retired the duplicate token file). *(This release map is mid-reconciliation — see START-HERE for the live state.)*
+
 **Still to build:**
-- **#21 (next up)** — config-engine "targeted removal": makes uninstall surgical; unblocks the single-source Codex credential (#24). *(A follow-up issue inserted ahead of the five remaining plan units — not one of the 15.)*
-- **U9 — inventory scanners:** read what every harness has installed (skills, MCP servers, plugins).
-- **U10 — parity actions:** "X exists in Claude Code but not Codex → make it so," reversibly.
+- **U10 (next up) — parity actions:** "X exists in Claude Code but not Codex → make it so," reversibly. *(Gets a dedicated `ce-plan` session first, grounded in the dogfood run's `PROVISIONING.md`.)*
 - **U11 — the first screen:** projects + where-they-left-off + the inventory grid + provision buttons.
 - **U12 — roster spike:** find the read/write surfaces for Hermes / Cursor / Antigravity / OpenCode (decides their lanes).
 - **U15 — always-on:** server survives reboots/crashes (launchd); hooks re-install for keeps; the pending live Codex check runs then.

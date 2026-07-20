@@ -172,8 +172,8 @@ export function removeHooksIfPresent(
  * `keyPaths` — is a true no-op that CREATES nothing and never reformats a foreign-formatted file; a symlink or
  * other non-regular target makes the engine's `statTarget` throw, caught here as a `failed` entry. `errLabel` is
  * the entity being removed (e.g. the server name), woven into the log text as `'<errLabel>'`. `failedSuffix` is
- * appended to the FAILED-branch log line only — a caller-specific tail (Codex adds "… neutralized by the
- * codex.token revocation below; remove it manually"); it defaults to empty for callers with nothing to add.
+ * appended to the FAILED-branch log line only — a caller-specific tail (Codex notes that the un-stripped entry
+ * still embeds a live credential); it defaults to empty for callers with nothing to add.
  */
 export function removeKeysIfPresent(
   targetPath: string,

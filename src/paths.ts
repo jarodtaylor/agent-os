@@ -53,18 +53,6 @@ export function tokenPath(dataDir: string): string {
 }
 
 /**
- * Path to the STABLE Codex credential (`codex.token`), written mode `0600` — distinct from the per-boot
- * `tokenPath`. Codex's HTTP-MCP client can only send a STATIC header (no per-connection headers-helper like
- * Claude Code's), so it authenticates with a stable token the gate honors ALONGSIDE the per-boot one (U8
- * decision A). Honest KTD6 narrowing: "installed config never embeds the token" holds for Claude Code
- * (headersHelper reads the file at call time); Codex's stable token is embedded in its own `0600` config,
- * exactly as it already stores every other MCP server's bearer.
- */
-export function codexTokenPath(dataDir: string): string {
-  return join(dataDir, "codex.token");
-}
-
-/**
  * The HTTP header the per-boot token travels in — the gate reads it (`server/security.ts`) and every local
  * caller sends it (the U6 hooks + the MCP headers helper). Defined here in the dependency-free shared module
  * so a hook can import it WITHOUT pulling the whole server (hono etc.). ONE definition so the sender and the
@@ -114,68 +102,6 @@ function readMachineId(path: string): string | null {
     return null;
   }
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(raw) ? raw : null;
-}
-
-/**
- * The STABLE Codex credential — minted ONCE and persisted (unlike the per-boot token). The `agent-os`
- * installer is the SOLE resolver: it mints `codex.token` and embeds the same value in `~/.codex/config.toml`.
- * The server no longer mints at boot — its security gate reads `codex.token` FRESH per request
- * (`server/security.ts#makeStableTokenReader`), so it always reflects the CURRENT file: a fresh install is
- * picked up live and an uninstall's `rm codex.token` revokes access live, with no restart and no
- * server-vs-installer mint race to reconcile (U8 decision A hardening — see docs/DECISIONS.md #28).
- *
- * EXCLUSIVE-CREATE mint (`flag: "wx"`), NOT resolveMachineId's plain temp+rename: kept as cheap defense
- * against a rare CONCURRENT double-install (two `agent-os install` runs) racing the first mint — `wx`
- * (O_CREAT|O_EXCL) lets exactly one creator win; the loser catches EEXIST and re-reads/overwrites so both
- * converge on the persisted value.
- */
-export function resolveCodexToken(dataDir: string): string {
-  const path = codexTokenPath(dataDir);
-  const existing = readCodexToken(path);
-  if (existing) return existing;
-
-  ensureDataDir(dataDir);
-  const token = randomUUID();
-  try {
-    // Fast path — the file is truly ABSENT: exclusive-create (O_CREAT|O_EXCL) so a concurrent first-mint has
-    // exactly one winner; the loser catches EEXIST below and adopts the winner's value. A single short
-    // writeFileSync lands the whole token, so a concurrent reader sees either no file or the complete value.
-    writeFileSync(path, token, { mode: 0o600, flag: "wx" });
-    return token;
-  } catch (err) {
-    // ONLY EEXIST is the concurrent-create race handled below; any OTHER write failure (EACCES, ENOSPC, EROFS,
-    // …) is a real error to surface — never mask it as "someone else created it" and silently read/overwrite.
-    if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
-    // The file EXISTS (EEXIST) — two sub-cases. If a concurrent creator won with a VALID token, adopt theirs
-    // (keeps the two resolvers convergent). Otherwise it's a present-but-EMPTY/corrupt leftover the read above
-    // already rejected: overwrite it atomically (temp+rename adopts 0600 and never leaves a partial token),
-    // exactly as resolveMachineId re-mints over a malformed machine-id.
-    const won = readCodexToken(path);
-    if (won) return won;
-    // Present-but-empty/corrupt leftover -> atomic overwrite. UNIQUE tmp per process (server boot + installer can
-    // both reach this branch over the same empty file, no lock), then RE-READ so both converge on whichever rename
-    // won rather than each returning its own un-persisted mint.
-    const tmp = `${path}.${process.pid}.tmp`;
-    rmSync(tmp, { force: true });
-    writeFileSync(tmp, token, { mode: 0o600 });
-    renameSync(tmp, path);
-    return readCodexToken(path) ?? token;
-  }
-}
-
-/** Read the stable Codex token — a non-empty trimmed string, else `null`. Deliberately does NOT validate a
- *  UUID shape the way `readMachineId` does: the token is opaque, and re-minting a present-but-odd value would
- *  invalidate the copy already written into `~/.codex/config.toml`. Only absence/emptiness triggers a mint.
- *  Exported: `installCodex`'s `tokenPreexisted` guard uses this (not `existsSync`) so provenance is SEMANTIC
- *  — a valid non-empty token pre-existed — not path-existence, which an empty/whitespace leftover would
- *  satisfy despite `resolveCodexToken` minting fresh over it. */
-export function readCodexToken(path: string): string | null {
-  try {
-    const raw = readFileSync(path, "utf8").trim();
-    return raw.length > 0 ? raw : null;
-  } catch {
-    return null;
-  }
 }
 
 /**

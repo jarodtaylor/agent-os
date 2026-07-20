@@ -19,15 +19,18 @@
  * token — never embedded in a browser-reachable page — is the actual backstop against a same-origin
  * browser script, not a reflected Origin header.
  *
- * The token is generated fresh on every server start (`generateToken`) and is the ONLY thing
- * `securityGate` trusts. `writeTokenFile` puts a copy on disk purely so a same-machine CLI caller
- * can read the CURRENT token; a prior boot's token is never honored (scenario 4).
+ * The per-boot token is generated fresh on every server start (`generateToken`) and is the PRIMARY
+ * credential `securityGate` trusts; the stable Codex credential, read fresh from `codexConfigPath` per
+ * request, is the other one it accepts (U8 decision A). `writeTokenFile` puts a copy of the per-boot token
+ * on disk purely so a same-machine CLI caller can read the CURRENT token; a prior boot's token is never
+ * honored (scenario 4).
  */
 import { randomUUID, timingSafeEqual } from "node:crypto";
-import { readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { renameSync, rmSync, writeFileSync } from "node:fs";
 import type { Context, MiddlewareHandler } from "hono";
 import { getConnInfo } from "hono/bun";
 import type { ConnInfo } from "hono/conninfo";
+import { readCodexToken } from "../codex-credential";
 import { TOKEN_HEADER, ensureDataDir, tokenPath } from "../paths";
 
 /** Socket-peer addresses this process accepts as "local". `::ffff:127.0.0.1` is the IPv4-mapped
@@ -37,12 +40,14 @@ const LOOPBACK_ADDRESSES = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
 export interface SecurityGateOptions {
   /** The current boot's token — always accepted (the primary credential). */
   token: string;
-  /** Path to a STABLE credential file (Codex's `codex.token` — U8 decision A) the gate ALSO accepts, read
-   *  FRESH per request (mtime-cached), NOT snapshotted. A harness whose MCP client can only send a static
-   *  header (Codex) can't ride the per-boot token, so it authenticates with this stable token. Reading it live
-   *  is what makes revocation LIVE: a deleted/rotated `codex.token` takes effect on the NEXT request, no
-   *  restart — and a fresh install is likewise picked up live. Omitted ⇒ per-boot token only. */
-  stableTokenPath?: string;
+  /** Path to Codex's `config.toml`, which EMBEDS the stable credential the gate ALSO accepts (U8 decision A;
+   *  single-sourced by issue #24). Read FRESH per request (no cache), NOT snapshotted. A harness whose MCP
+   *  client can only send a static header (Codex) can't ride the per-boot token, so it authenticates with the
+   *  token embedded in its own config. Reading that file live is what makes revocation LIVE: uninstall's
+   *  removal of the `mcp_servers.agent-os` entry takes effect on the NEXT request, no restart — and a fresh
+   *  install is likewise picked up live. Reading the SAME bytes Codex sends from is the point: there is no
+   *  second copy to fall out of sync. Omitted ⇒ per-boot token only. */
+  codexConfigPath?: string;
   /** The port this server is bound to, for the Host allowlist's `host:port` form. */
   port: number;
   /** Peer-address getter, injectable for tests. Defaults to Hono's real Bun socket-peer reader;
@@ -60,16 +65,17 @@ export function securityGate(opts: SecurityGateOptions): MiddlewareHandler {
   const allowedHosts = buildAllowedHosts(opts.port);
   // The per-boot token is constant for the process, so encode it ONCE (empty-string-guarded so a stray "" can't
   // become a zero-length buffer a missing header would match). The stable Codex token, by contrast, is read
-  // from its file per request (mtime-cached) so its lifecycle is observed LIVE — see makeStableTokenReader.
+  // from Codex's own config fresh per request (no cache) so its lifecycle is observed LIVE — see makeStableTokenReader.
   const perBootBuf = opts.token.length > 0 ? Buffer.from(opts.token, "utf8") : null;
-  const readStableToken = makeStableTokenReader(opts.stableTokenPath);
+  const readStableToken = makeStableTokenReader(opts.codexConfigPath);
 
   return async (c, next) => {
     const address = getConn(c).remote.address;
     if (!isLoopbackAddress(address)) return forbidden(c, "non-loopback source");
     if (!allowedHosts.has((c.req.header("host") ?? "").toLowerCase())) return forbidden(c, "disallowed host");
     // Assemble the accepted set per request: the constant per-boot token + the CURRENT stable token (null when
-    // codex.token is absent/empty — i.e. revoked). Timing-safety is a property of the compare, not the build.
+    // ~/.codex/config.toml has no usable agent-os credential — i.e. revoked). Timing-safety is a property of
+    // the compare, not the build.
     const accepted: Buffer[] = [];
     if (perBootBuf) accepted.push(perBootBuf);
     const stableBuf = readStableToken();
@@ -80,38 +86,30 @@ export function securityGate(opts: SecurityGateOptions): MiddlewareHandler {
 }
 
 /**
- * A reader for the stable credential file that re-reads ONLY when the file's mtime changes — so the common
- * case (an unchanged token) costs a single `stat`, not a full read+decode, on every request, while a rotate or
- * delete is observed on the NEXT request (LIVE revocation). Absent / unreadable / empty ⇒ `null` (no stable
- * token accepted): that is exactly how uninstall's `rm codex.token` revokes Codex access with no restart, and
- * how a fresh install is picked up live (the file appears → its mtime differs from the NaN seed → it's read).
- * The atomic temp+rename the writers use changes `mtimeMs`, so a rewrite is never missed. An undefined `path`
- * (a per-boot-only gate) short-circuits to a constant `null` with no per-request syscall.
+ * A reader for the credential embedded in Codex's `config.toml`, read FRESH on every request. Absent /
+ * unreadable / corrupt / no embedded token ⇒ `null` (no stable token accepted): that is exactly how
+ * uninstall's removal of the `mcp_servers.agent-os` entry revokes Codex access with no restart, and how a
+ * fresh install is picked up live.
+ *
+ * NO mtime cache, deliberately (issue #24 review). The gate MUST observe the credential's CURRENT state, and
+ * an mtime cache made that observation only as reliable as the filesystem's mtime resolution: U8 revoked by
+ * DELETING `codex.token` (a `stat` failure — mtime-immune), but here revocation is an in-place REWRITE of a
+ * file Codex also owns, so a strip landing in the same mtime tick as a cached read would keep serving a
+ * REVOKED token on a coarse-mtime filesystem (NFS/SMB/HFS+ — reachable once the substrate is remote per the
+ * north star). Reading fresh ELIMINATES that fail-open window rather than narrowing it. The cost is one local
+ * read + TOML parse of a small file per gated request — negligible at loopback single-user scale (the
+ * efficiency review confirmed this), and correctness on an auth-revocation path outweighs it.
+ *
+ * `readCodexToken` is the SHARED reader `uninstallCodex` also uses to verify revocation, so "what the gate
+ * accepts" and "what uninstall proved is gone" are settled by one implementation. It is fail-closed by
+ * construction, hence no try/catch here. An undefined `path` (a per-boot-only gate) short-circuits to a
+ * constant `null` with no syscall.
  */
 function makeStableTokenReader(path: string | undefined): () => Buffer | null {
   if (path === undefined) return () => null;
-  let cachedMtimeMs = Number.NaN; // NaN !== anything → the first call always reads
-  let cachedBuf: Buffer | null = null;
   return () => {
-    let mtimeMs: number;
-    try {
-      mtimeMs = statSync(path).mtimeMs;
-    } catch {
-      // Absent/unreadable → revoked. Reset the cache so a later re-create is re-read (its mtime !== NaN).
-      cachedMtimeMs = Number.NaN;
-      cachedBuf = null;
-      return null;
-    }
-    if (mtimeMs !== cachedMtimeMs) {
-      cachedMtimeMs = mtimeMs;
-      try {
-        const raw = readFileSync(path, "utf8").trim();
-        cachedBuf = raw.length > 0 ? Buffer.from(raw, "utf8") : null;
-      } catch {
-        cachedBuf = null;
-      }
-    }
-    return cachedBuf;
+    const token = readCodexToken(path);
+    return token === null ? null : Buffer.from(token, "utf8");
   };
 }
 

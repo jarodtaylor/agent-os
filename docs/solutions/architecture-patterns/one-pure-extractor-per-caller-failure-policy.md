@@ -86,10 +86,10 @@ is why the guidance generalizes rather than being credential-specific:
 - **Fail-LOUD** install readers: `src/install/codex.ts:98` `readToml` and `src/install/shared.ts`'s
   `readJson` throw on a corrupt config to gate a merge *into* it.
 
-#24's contribution was to add the **shared pure extractor** underneath a fail-closed reader, so a *third*
-policy (the gate's) could join without forcing any of the three onto the others:
+Issue #24's contribution was to add the **shared pure extractor** underneath a fail-closed reader, so a
+*third* policy (the gate's) could join without forcing any of the three onto the others:
 
-```
+```text
                     extractCodexToken(parsed)  ← pure, total, never throws (the shared core)
                      /                    \
    readCodexToken (fail-closed)      installer readToml (fail-loud)

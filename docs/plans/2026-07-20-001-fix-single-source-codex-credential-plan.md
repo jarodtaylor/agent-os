@@ -28,8 +28,9 @@ the class exists**, rather than patching the sixth edge. Mostly subtractive.
 ## Scope
 
 **Gate** (`src/server/security.ts#makeStableTokenReader`) — read + parse `~/.codex/config.toml` per
-request (keep the mtime-cache), extracting `mcp_servers.agent-os.http_headers.<TOKEN_HEADER>`. The
-option moves from a data-dir path to a home-relative config path; keep it injectable for tests.
+request (~~keep the mtime-cache~~ — **superseded during review**: the mtime cache was dropped entirely;
+see the revocation-liveness note under Acceptance), extracting `mcp_servers.agent-os.http_headers.<TOKEN_HEADER>`.
+The option moves from a data-dir path to a home-relative config path; keep it injectable for tests.
 
 **Installer** (`src/install/codex.ts`) — mint a UUID inline; **reuse the value already embedded in
 config.toml** when present. Delete `resolveCodexToken`, `readCodexToken`, `codexTokenPath`,
@@ -79,8 +80,9 @@ uninstaller's `removeKeysIfPresent` call). No separate file to delete.
 
 - Gate accepts the token embedded in `config.toml`; rejects when the entry is absent, empty,
   non-string, or the file is corrupt/unreadable — each fail-closed 403, no 500.
-- Rotation/revocation observed **live** (next request, no restart), preserving today's mtime-cache
-  behaviour.
+- Rotation/revocation observed **live** (next request, no restart). *(Superseded during review: the
+  planned mtime-cache was dropped — the gate reads fresh per request — because an in-place rewrite could
+  land in the same mtime tick as a cached read on a coarse-mtime FS and keep serving a revoked token.)*
 - Re-install is a true no-op: the embedded token is reused, config.toml bytes unchanged.
 - Uninstall removes `mcp_servers.agent-os`; a strip failure **throws** rather than reporting success.
 - A failed install leaves no live credential behind.

@@ -41,7 +41,7 @@ export interface SecurityGateOptions {
   /** The current boot's token — always accepted (the primary credential). */
   token: string;
   /** Path to Codex's `config.toml`, which EMBEDS the stable credential the gate ALSO accepts (U8 decision A;
-   *  single-sourced by issue #24). Read FRESH per request (mtime-cached), NOT snapshotted. A harness whose MCP
+   *  single-sourced by issue #24). Read FRESH per request (no cache), NOT snapshotted. A harness whose MCP
    *  client can only send a static header (Codex) can't ride the per-boot token, so it authenticates with the
    *  token embedded in its own config. Reading that file live is what makes revocation LIVE: uninstall's
    *  removal of the `mcp_servers.agent-os` entry takes effect on the NEXT request, no restart — and a fresh
@@ -65,7 +65,7 @@ export function securityGate(opts: SecurityGateOptions): MiddlewareHandler {
   const allowedHosts = buildAllowedHosts(opts.port);
   // The per-boot token is constant for the process, so encode it ONCE (empty-string-guarded so a stray "" can't
   // become a zero-length buffer a missing header would match). The stable Codex token, by contrast, is read
-  // from Codex's own config per request (mtime-cached) so its lifecycle is observed LIVE — see makeStableTokenReader.
+  // from Codex's own config fresh per request (no cache) so its lifecycle is observed LIVE — see makeStableTokenReader.
   const perBootBuf = opts.token.length > 0 ? Buffer.from(opts.token, "utf8") : null;
   const readStableToken = makeStableTokenReader(opts.codexConfigPath);
 

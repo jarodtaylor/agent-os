@@ -3,7 +3,7 @@
 > **For humans.** Plain language, outcomes first, short on purpose. The deep/agent-grade state lives in [`START-HERE.md`](START-HERE.md) + [`DECISIONS.md`](DECISIONS.md); this page is their product-level projection.
 > **Freshness rule:** `/handoff` updates this page whenever something ships. If this page and reality ever disagree, that's a bug — flag it.
 
-_Last updated: 2026-07-20 · Status: **v0.1 "Continuity" in progress — 11 of 15 units shipped**; latest: **U10 planned** — the provisioning engine's build plan is ready and review-hardened (decision #52; 7 final review notes pending). Next: fold those notes, then **build U10**. · Roadmap postures locked by the 2026-07-10 interview (decisions #32–#41)_
+_Last updated: 2026-07-20 · Status: **v0.1 "Continuity" in progress — 11 of 15 units shipped**; latest: **U10 planned** — the provisioning engine's build plan is ready and review-hardened, all review findings folded (decision #52). Next: **build U10**. · Roadmap postures locked by the 2026-07-10 interview (decisions #32–#41)_
 
 ## TL;DR
 

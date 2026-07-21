@@ -3,7 +3,7 @@
 > **For humans.** Plain language, outcomes first, short on purpose. The deep/agent-grade state lives in [`START-HERE.md`](START-HERE.md) + [`DECISIONS.md`](DECISIONS.md); this page is their product-level projection.
 > **Freshness rule:** `/handoff` updates this page whenever something ships. If this page and reality ever disagree, that's a bug — flag it.
 
-_Last updated: 2026-07-20 · Status: **v0.1 "Continuity" in progress — 11 of 15 units shipped**; latest: **U24** single-source Codex credential merged (PR #41). Next: the **U10 plan session**. · Roadmap postures locked by the 2026-07-10 interview (decisions #32–#41)_
+_Last updated: 2026-07-20 · Status: **v0.1 "Continuity" in progress — 11 of 15 units shipped**; latest: **U10 planned** — the provisioning engine's build plan is ready and review-hardened (decision #52; 7 final review notes pending). Next: fold those notes, then **build U10**. · Roadmap postures locked by the 2026-07-10 interview (decisions #32–#41)_
 
 ## TL;DR
 
@@ -48,7 +48,7 @@ _Last updated: 2026-07-20 · Status: **v0.1 "Continuity" in progress — 11 of 1
 **Recently shipped:** **U9** inventory scanners (PR #38 — the Observe half) · **#21** config-engine targeted removal (PR #34) · **#24** single-source Codex credential (PR #41 — retired the duplicate token file). *(#21/#24 are follow-up issues, not among the 15 plan units.)* Also **dogfood run 1** (below) — a validation exercise, not a v0.1 unit.
 
 **Still to build:**
-- **U10 (next up) — parity actions:** "X exists in Claude Code but not Codex → make it so," reversibly. *(Gets a dedicated `ce-plan` session first, grounded in the dogfood run's `PROVISIONING.md`.)*
+- **U10 (next up, plan ready) — project provisioning:** a project carries one versioned "blueprint" (which roles run in which harness, on which model, with which files), and agent-os pushes it into Claude Code, Codex, and Cursor natively — reversibly, with a dry-run preview and a drift report. Rescoped from the earlier "parity actions" framing by lived dogfood evidence (decision #52).
 - **U11 — the first screen:** projects + where-they-left-off + the inventory grid + provision buttons.
 - **U12 — roster spike:** find the read/write surfaces for Hermes / Cursor / Antigravity / OpenCode (decides their lanes).
 - **U15 — always-on:** server survives reboots/crashes (launchd); hooks re-install for keeps; the pending live Codex check runs then.
@@ -116,7 +116,7 @@ A shared task board across harnesses *and* instances, plus Hermes as the always-
 | U7 | `/handoff` rewire | One authoritative continuity record; docs render it | ✅ |
 | U8 | Codex integration | Second harness on the shared brain (capture + read + installer) | ✅ *live check pending* |
 | U9 | Inventory scanners | See every skill/MCP server/plugin across harnesses — CC + Codex now; others join as one-line registry rows as they enter rotation | ✅ *PR #38* |
-| U10 | Parity actions | One-click propagate with undo | ⏳ |
+| U10 | Provisioning engine | Blueprint → native harness setup (roles/models/files), with undo | ⏳ plan ready |
 | U11 | Thin human view | The first screen | ⏳ |
 | U12 | Roster lane spike | What's possible for Hermes / Cursor / Antigravity / OpenCode | ⏳ |
 | U15 | Always-on (launchd) | Server survives reboots; hooks installed for keeps; live Codex check | ⏳ |

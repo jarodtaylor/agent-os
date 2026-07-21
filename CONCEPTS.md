@@ -37,3 +37,26 @@ The state of a surface or runtime whose read failed during a scan: it contribute
 
 ### Harness
 An external AI agent runtime (a coding CLI or app, such as Claude Code or Codex) that agent-os observes and provisions. agent-os is not itself a harness — it works on harnesses from outside, and they keep working with or without it.
+
+## Provisioning (the Act half)
+
+### Blueprint
+A project's versioned single source of truth for its agent setup: a plain directory plus a manifest, living in the project repo. agent-os renders it into each harness's native surfaces; it carries no secrets and no machine-specific paths.
+
+### Role bundle
+One manifest entry mapping a role (Architect, Executor, QA, …) to its target harness, an optional model pin, and its files with transform types. Metadata is machine-readable but descriptive only — it drives file operations, never workflow sequencing.
+
+### Provision
+The render → diff → apply push of a blueprint into native harness surfaces, reversibly and project-scoped. The same rendering powers the dry-run plan, the apply, and the drift report. Provision-down only — pulling harness-local changes back into a blueprint (adopt-up) is a separate, deferred concept.
+
+### Seed template
+The starter blueprint that ships with agent-os and is copied into a project by `init`, then hand-tuned. Template content is evidence-based but always tunable; only the mechanism is fixed.
+
+### Drift
+Divergence between a blueprint's rendered output and the live provisioned surface, detected read-only by the same diff machinery. Reported, never auto-reconciled.
+
+### Run state
+`RUN_STATE.md` — the cross-harness run file each role reads and rewrites as a workflow passes between harnesses (named `HANDOFF.md` in dogfood run 1). Runtime state, never a provisioned target; `init` scaffolds it once. Distinct from a Handoff (session-to-session continuity record) and from WorkState (the substrate's derived record). *Avoid:* calling this a handoff.
+
+### Provision run
+One `apply` batch: the ordered set of writes it made, recorded durably so `undo` can reverse the most recent run as a unit. Only the latest run is undoable; older runs' entries are refused as superseded.

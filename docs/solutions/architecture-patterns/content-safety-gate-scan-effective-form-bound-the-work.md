@@ -8,7 +8,7 @@ component: tooling
 severity: high
 applies_when:
   - Building a gate that reads content and CERTIFIES a property over it ("no secret escapes", "no PII", "safe to publish") before a downstream step acts on it
-  - The content is a serialized format that gets PARSED/DECODED downstream (JSON, TOML, YAML, base64, URL-encoding) — the bytes you scan are not the bytes that get used
+  - The content is a serialized format that gets PARSED/DECODED downstream (JSON, TOML, YAML, base64, URL-encoding) — the bytes you scan are not the bytes that are used
   - Reusing a shared scanner/classifier/validator in a NEW caller that feeds it larger inputs than its original caller ever did
   - A gate's docstring or a plan says it "certifies X" or "never hangs" — and you have not written down exactly what X covers and what it defers
 tags: [content-safety-gate, secret-scanning, redaction, normalization-vs-raw, encoding-escape, redos, cardinality, safeparse, bounded-work, no-hang, shared-primitive, scope-honesty, adversarial-review]
@@ -27,12 +27,14 @@ A gate that scans content and certifies a property is only as strong as three th
 
 ### 1. Scan the EFFECTIVE form, not just the raw bytes — but keep the raw scan too
 
-If the content is a format that gets parsed/decoded before use, the bytes you scan are not the bytes that get used. A secret hidden behind an encoding escape reads clean as raw bytes and *decodes* into the certified result.
+If the content is a format that gets parsed/decoded before use, the bytes you scan are not the bytes that are used. A secret hidden behind an encoding escape reads clean as raw bytes and *decodes* into the certified result.
 
 ```jsonc
-// raw manifest bytes — the classifier sees "sk-ant-api03-…", the sk- regex breaks at the backslash → no match
-{ "model": "sk-ant-api03-ABCDEFGHIJKLMNOP1234" }
-// JSON.parse decodes it → loaded.manifest.model === "sk-ant-api03-…" (the live secret), certified clean
+// raw manifest bytes — a secret with ONE character JSON-unicode-escaped (its "a" written as a unicode
+// escape): the raw bytes never contain a contiguous "sk-ant-api03-…", so the sk- regex reports clean...
+{ "model": "sk-ant-<one JSON-escaped char>pi03-ABCDEFGHIJKLMNOP1234" }
+// ...but JSON.parse decodes the escape, so loaded.manifest.model === "sk-ant-api03-…" (the live secret) —
+// certified clean. That is why the gate must scan the PARSED form too, not just the raw bytes.
 ```
 
 The fix is to scan **both** the raw bytes **and** the parsed-then-reserialized (normalized) form — and you need both, because each catches what the other misses:
@@ -65,12 +67,12 @@ The gate's whole value is the certification. Each axis is a way the certificatio
 - **Unbounded work** → the gate (and every verb built on it) hangs or OOMs on a bounded-size input, breaking the very no-hang property the read cap was supposed to provide.
 - **Silent scope** → the next unit inherits an invariant it doesn't know it owns, and the gap surfaces at the worst time.
 
-There is a fourth, protective lesson: **a written threat model is what keeps the fix proportionate.** The adversarial gate (Codex) reasons from unconditional invariants and will keep escalating — "cap cumulative bytes, thread a byte budget into every read, cap every absolute path form." Decision #45 (this is a *local single-user tool operating on the user's own files*; in-scope = no-secret-escape + no-hang; out = adversary-injected code, attacker-owns-HOME) is what distinguishes the genuine folds (a cheap cardinality cap; a quantifier bound) from over-engineering a fortress against the tool's own author. See [an-unwritten-threat-model-is-why-the-adversarial-gate-loops](../conventions/an-unwritten-threat-model-is-why-the-adversarial-gate-loops.md). Without the written scope, this fold would have tripled in size and still "failed" the gate.
+There is a fourth, protective lesson: **a written threat model is what keeps the fix proportionate.** The adversarial gate (Codex) reasons from unconditional invariants and will keep escalating — "cap cumulative bytes, thread a byte budget into every read, cap every absolute path form." Decision #45 (this is a *local single-user tool operating on the user's own files*; in-scope = no-secret-escape + no-hang; out = adversary-injected code, attacker-owns-HOME) is what distinguishes the genuine folds (a cheap cardinality cap; schema-level path containment) from over-engineering a fortress against the tool's own author. See [an-unwritten-threat-model-is-why-the-adversarial-gate-loops](../conventions/an-unwritten-threat-model-is-why-the-adversarial-gate-loops.md). Without the written scope, this fold would have tripled in size and still "failed" the gate.
 
 ## When to Apply
 
 - Before shipping any read→classify→certify gate (secret scan, PII scan, publish-safety, redaction choke-point).
-- Whenever a gate's input is a serialized/encoded format — ask "what does this become after parse/decode, and am I scanning that?"
+- When a gate's input is a serialized/encoded format — ask "what does this become after parse/decode, and am I scanning that?"
 - Whenever you reuse a shared scanner/classifier/parser in a new caller — re-check its complexity profile against the new caller's input scale, because the shared primitive was tuned for the *old* caller's inputs.
 - Whenever you write "certifies X" or "never hangs" in a docstring or plan — write the exact scope next to it, and defer the remainder to a named, tested owner.
 

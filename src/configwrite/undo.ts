@@ -30,6 +30,12 @@ export const UndoEntry = z.object({
   // restored backup), so undoing an old entry can't silently clobber a LATER write to the same file.
   postHash: z.string().min(1),
   ts: z.number().int().nonnegative(),
+  // Batch identity for a U10 provision run (KTD2): a batch is simply the entries sharing one opaque `batchId`,
+  // so batch undo (U5) falls out of the already-hardened journal instead of a second record file. `.optional()`
+  // — NOT `.nullable()` — so the keys are absent entirely on unbatched installer writes (U6/U8) and on every
+  // pre-U10 journal, which keep validating on read. `projectRoot` scopes a batch to its project.
+  batchId: z.string().min(1).optional(),
+  projectRoot: z.string().min(1).optional(),
 });
 export type UndoEntry = z.infer<typeof UndoEntry>;
 

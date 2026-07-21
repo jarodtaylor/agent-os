@@ -17,7 +17,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse as parseToml } from "smol-toml";
 import { parse as parseYaml } from "yaml";
-import { AppliedButUnjournaledError, deepMerge, listUndo, MERGE_NOOP, mergeConfig, removeConfigKeys, undo } from "../src/configwrite/index";
+import { AppliedButUnjournaledError, deepMerge, listUndo, MERGE_NOOP, mergeConfig, removeConfigKeys, undo, writeTextFile } from "../src/configwrite/index";
 import { backupsDir, journalPath } from "../src/configwrite/internal";
 
 // Each test gets an isolated workspace: `configs/` holds the target files a caller mutates, `data/`
@@ -1132,5 +1132,160 @@ describe("mergeConfig replaceSubtrees is guarded on aliased YAML, but a plain me
     // The aliased data survives intact on BOTH paths — the plain merge neither dropped nor corrupted it.
     expect(parsed.a).toEqual({ owned: 1, keep: 2 });
     expect(parsed.b).toEqual({ owned: 1, keep: 2 });
+  });
+});
+
+// ── whole-file `text` format (U10 U2 / KTD1): full-content writes on the same backup/atomic/undo discipline ──
+
+describe("writeTextFile publishes whole-file surfaces with full backup/undo discipline (KTD1)", () => {
+  test("create a text file → journaled, undo deletes it", () => {
+    const target = join(configsDir, "CLAUDE.md"); // no create via seed(): writeTextFile creates it
+    const res = writeTextFile(target, "# Role\n\nbody\n", { dataDir });
+
+    expect(res.created).toBe(true);
+    expect(res.noop).toBe(false);
+    expect(res.backupPath).toBeNull(); // nothing to back up on a create
+    expect(read(target)).toBe("# Role\n\nbody\n");
+    expect(listUndo(dataDir)).toHaveLength(1);
+    expect(listUndo(dataDir)[0]!.format).toBe("text");
+
+    undo(res.undoId!, dataDir);
+    expect(existsSync(target)).toBe(false); // undo of a created file deletes it
+  });
+
+  test("overwrite a pre-existing text file → byte backup, undo restores exact bytes AND mode", () => {
+    const target = seed("AGENTS.md", "old content\n");
+    chmodSync(target, 0o640); // a distinctive non-default mode to prove mode restoration
+    const res = writeTextFile(target, "new content\n", { dataDir });
+
+    expect(res.created).toBe(false);
+    expect(res.backupPath).not.toBeNull();
+    expect(read(target)).toBe("new content\n");
+    expect(bakCount()).toBe(1);
+
+    undo(res.undoId!, dataDir);
+    expect(read(target)).toBe("old content\n"); // exact prior bytes
+    expect(statSync(target).mode & 0o777).toBe(0o640); // exact prior mode
+  });
+
+  test("byte-identical rewrite is a TRUE no-op (no backup, no journal entry)", () => {
+    const target = seed("role.md", "same\n");
+    const res = writeTextFile(target, "same\n", { dataDir });
+
+    expect(res.noop).toBe(true);
+    expect(res.undoId).toBeNull();
+    expect(res.backupPath).toBeNull();
+    expect(bakCount()).toBe(0);
+    expect(listUndo(dataDir)).toEqual([]); // nothing journaled
+  });
+
+  test("mode is preserved on a real overwrite (not reset to a default)", () => {
+    const target = seed("role", "a\n"); // extension-less on purpose (see next test)
+    chmodSync(target, 0o600);
+    writeTextFile(target, "b\n", { dataDir });
+    expect(statSync(target).mode & 0o777).toBe(0o600);
+  });
+
+  test("extension-less path works — writeTextFile forces format:text, where mergeConfig would throw", () => {
+    // The real targets (CLAUDE.md/AGENTS.md/role files) have no format-bearing extension. writeTextFile forces
+    // `text` unconditionally, so no caller-supplied format is needed; mergeConfig on the same path can't infer.
+    const target = join(configsDir, "EXECUTOR"); // no extension at all
+    const res = writeTextFile(target, "role brief\n", { dataDir });
+    expect(res.created).toBe(true);
+    expect(read(target)).toBe("role brief\n");
+
+    // Contrast: the structured-format entry points cannot infer a format for this path.
+    expect(() => mergeConfig(join(configsDir, "OTHER"), { a: 1 }, { dataDir })).toThrow(/cannot infer format/);
+  });
+
+  test("content is written VERBATIM — abnormal trailing newlines round-trip byte-for-byte (canonicalization bypassed)", () => {
+    // The load-bearing early return in serializeConfig: a structured format canonicalizes to exactly one
+    // trailing newline; `text` must NOT, or a copy stops being byte-identical to its source (R6/R7).
+    for (const [name, content] of [
+      ["none", "no trailing newline"],
+      ["two", "two trailing newlines\n\n"],
+      ["many", "trailing\n\n\n\n"],
+      ["empty", ""],
+    ] as const) {
+      const target = join(configsDir, `verbatim-${name}.md`);
+      writeTextFile(target, content, { dataDir });
+      expect(read(target)).toBe(content); // exact bytes, no added/stripped newline
+    }
+  });
+
+  test("re-applying identical verbatim content (abnormal newlines) is a no-op — the byte-compare sees a match", () => {
+    const target = join(configsDir, "compose.md");
+    writeTextFile(target, "body\n\n", { dataDir }); // create with two trailing newlines
+    const again = writeTextFile(target, "body\n\n", { dataDir });
+    expect(again.noop).toBe(true); // verbatim serialize means the re-render byte-matches disk
+    expect(bakCount()).toBe(0);
+  });
+});
+
+describe("writeTextFile batch identity (KTD2) — recorded only when supplied", () => {
+  test("supplied batchId + projectRoot are recorded in the journal entry", () => {
+    const target = join(configsDir, "ROLE.md");
+    const res = writeTextFile(target, "x\n", { dataDir, batchId: "run-abc", projectRoot: "/proj/root" });
+
+    const entry = listUndo(dataDir).find((e) => e.id === res.undoId);
+    expect(entry?.batchId).toBe("run-abc");
+    expect(entry?.projectRoot).toBe("/proj/root");
+    // The raw line carries them (proves they persist, not just parse-time defaults).
+    expect(readFileSync(journalPath(dataDir), "utf8")).toContain("run-abc");
+  });
+
+  test("an UNBATCHED write omits the keys entirely — old installer journals stay readable", () => {
+    // A plain mergeConfig (the installer path) writes no batch fields; the entry still validates on read, and
+    // the keys are absent from the raw line (JSON.stringify drops undefined) — backward compatibility.
+    const target = seed("settings.json", JSON.stringify({ a: 1 }, null, 2) + "\n");
+    const res = mergeConfig(target, { b: 2 }, { dataDir });
+
+    const raw = readFileSync(journalPath(dataDir), "utf8");
+    expect(raw).not.toContain("batchId"); // key absent, not "batchId":null
+    expect(raw).not.toContain("projectRoot");
+
+    const entry = listUndo(dataDir).find((e) => e.id === res.undoId);
+    expect(entry).toBeDefined(); // validates fine without the optional fields
+    expect(entry?.batchId).toBeUndefined();
+  });
+
+  test("mergeConfig also stamps supplied batch fields — the plumbing lives in the shared publish(), not writeTextFile", () => {
+    // The batch fields sit on the shared MergeOptions and are recorded inside publish(), so every entry point
+    // stamps them. Proving it via mergeConfig locks the contract U5's batch-undo needs across all three verbs,
+    // not just whole-file writes.
+    const target = seed("settings.json", JSON.stringify({ a: 1 }, null, 2) + "\n");
+    const res = mergeConfig(target, { b: 2 }, { dataDir, batchId: "run-xyz", projectRoot: "/p" });
+
+    const entry = listUndo(dataDir).find((e) => e.id === res.undoId);
+    expect(entry?.batchId).toBe("run-xyz");
+    expect(entry?.projectRoot).toBe("/p");
+  });
+});
+
+describe("the merge/removal entry points reject the whole-file `text` format loudly (KTD1)", () => {
+  test("removeConfigKeys on a text target throws and changes nothing", () => {
+    const target = seed("role.md", "keep me\n");
+    expect(() => removeConfigKeys(target, ["anything"], { dataDir, format: "text" })).toThrow(/writeTextFile/);
+    expect(read(target)).toBe("keep me\n"); // untouched
+    expect(bakCount()).toBe(0);
+    expect(listUndo(dataDir)).toEqual([]);
+  });
+
+  test("mergeConfig with an explicit format:text throws before any file work", () => {
+    const target = seed("role.md", "keep me\n");
+    expect(() => mergeConfig(target, { a: 1 }, { dataDir, format: "text" })).toThrow(/writeTextFile/);
+    expect(read(target)).toBe("keep me\n");
+    expect(bakCount()).toBe(0);
+  });
+});
+
+describe("writeTextFile undo is safe against a later foreign write (postHash guard holds for `text`)", () => {
+  test("undo refuses to clobber a file a foreign process rewrote after our write", () => {
+    const target = seed("CLAUDE.md", "original\n");
+    const res = writeTextFile(target, "ours\n", { dataDir }); // backup=original, postHash=hash(ours)
+
+    writeFileSync(target, "foreign rewrite\n"); // a foreign owner diverges the file
+    expect(() => undo(res.undoId!, dataDir)).toThrow(/refusing to clobber a later write/);
+    expect(read(target)).toBe("foreign rewrite\n"); // left intact, never clobbered
   });
 });

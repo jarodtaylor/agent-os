@@ -15,8 +15,13 @@ import * as z from "zod";
  *  the OS-data-dir resolution itself moved to `../paths` (U3), since the server needs it too. */
 export { resolveDataDir } from "../paths";
 
-/** The config file formats the engine can merge. JSON is native; TOML/YAML go through their libs. */
-export const ConfigFormat = z.enum(["json", "toml", "yaml"]);
+/** The formats the engine can write. JSON is native; TOML/YAML go through their libs; `text` is the
+ *  opaque whole-file format (KTD1) — its content is treated as one opaque string (no structured parse or
+ *  merge, no trailing-newline canonicalization), so a markdown role file or an extension-less config gets the
+ *  same backup/atomic-write/undo discipline as a structured config. Byte-identity is enforced separately, by
+ *  the byte-exact no-op comparison in `publish` (not by parse/serialize, which round-trip the decoded string).
+ *  `text` is never inferred from an extension; a caller (writeTextFile) forces it. */
+export const ConfigFormat = z.enum(["json", "toml", "yaml", "text"]);
 export type ConfigFormat = z.infer<typeof ConfigFormat>;
 
 /** Directory holding byte-exact backups of pre-mutation config files. */

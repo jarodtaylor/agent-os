@@ -3,12 +3,20 @@
  * parity action (U10) is built on. R11 / KTD6: no config write anywhere in Agent OS bypasses this,
  * because Jarod's *live* `~/.claude`, `~/.claude.json`, and `~/.codex` configs are the write targets.
  *
- * Two public primitives share one discipline: `mergeConfig` (add/replace keys — merge-don't-clobber) and
+ * Three public primitives share one discipline: `mergeConfig` (add/replace keys — merge-don't-clobber),
  * `removeConfigKeys` (delete keys/array-elements — targeted removal, the correct reversal for a config a
- * foreign process also owns and rewrites). Both run through the shared `publish` core, in order:
+ * foreign process also owns and rewrites), and `writeTextFile` (publish a whole file verbatim — the opaque
+ * `text` format, for markdown role files and extension-less configs, KTD1). All run through the shared
+ * `publish` core, in order:
  *   parse (fail CLOSED on a corrupt config) → transform (merge or remove) → serialize
  *   → short-circuit if the result already matches disk → byte-exact backup → atomic temp-write+rename
  *   → journal the undo entry.
+ * The `text` format is the one exception to two of those steps: it treats the file as one opaque string — its
+ * parse and serialize are IDENTITY (no fail-closed parsing to trip, no trailing-newline canonicalization) — so
+ * a copy of valid-UTF-8 content round-trips byte-for-byte; the backup / atomic-rename / journal / undo half is
+ * shared unchanged. Byte-identity of the idempotence check is enforced separately, by the byte-exact no-op
+ * comparison below (a string compare would be lossy on invalid UTF-8). It has no merge/removal semantics, so
+ * `mergeConfig`/`removeConfigKeys` refuse it (see `publish`).
  *
  * Two invariants make this safe to point at a live setup:
  *   1. The ORIGINAL FILE IS UNTOUCHED until the final atomic rename. A throw at any earlier step —
@@ -55,6 +63,13 @@ export interface MergeOptions {
    *  entry — an embedded-token `headers`/`http_headers` a caller no longer writes — cannot survive the merge.
    *  Still idempotent: a re-merge that reproduces the same bytes no-ops like any other write. */
   replaceSubtrees?: string[];
+  /** Batch identity for a U10 provision run (KTD2): stamped onto this write's undo entry so a later `undo`
+   *  can reverse a whole batch — the journal entries sharing `batchId`. `batchId` is an opaque run id;
+   *  `projectRoot` is the run's project root. Both omitted ⇒ an unbatched write (every installer today, and
+   *  all pre-U10 journals, which stay readable). The batch-undo consumer lands in U5; here the fields are only
+   *  recorded. */
+  batchId?: string;
+  projectRoot?: string;
 }
 
 export interface MergeResult {
@@ -189,6 +204,29 @@ export function removeConfigKeys(
 }
 
 /**
+ * Publish a whole-file surface — a markdown role file, an extension-less config — through the SAME discipline
+ * as `mergeConfig` (byte-exact backup → atomic temp-write+rename → journaled undo), but the patch is the FULL
+ * rendered `content`, not a partial merge. This is the whole-file counterpart U10 provisioning needs for its
+ * copy/compose transforms; `mergeConfig` can't serve it because it structurally rejects a non-object (string)
+ * patch (KTD1).
+ *
+ * Forces the opaque `text` format unconditionally — never inferred from the extension, since the real targets
+ * (`CLAUDE.md`, `AGENTS.md`, extension-less role files) would make `detectFormat` throw. `content` is written
+ * VERBATIM: byte-identical to its source even with zero or multiple trailing newlines (the canonicalization
+ * `serializeConfig` applies to structured formats is bypassed for `text`), so a copy stays byte-exact and a
+ * re-write of identical bytes is a true no-op (no backup, no journal). Undo restores the exact prior bytes +
+ * mode, or deletes the file when this write created it. `opts.format`/`replaceSubtrees` are omitted — the
+ * format is always `text` and the merge-only `replaceSubtrees` doesn't apply.
+ */
+export function writeTextFile(
+  targetPath: string,
+  content: string,
+  opts: Omit<MergeOptions, "format" | "replaceSubtrees"> = {},
+): MergeResult {
+  return publish(targetPath, { ...opts, format: "text" }, () => content, { allowText: true });
+}
+
+/**
  * The shared write discipline behind `mergeConfig` and `removeConfigKeys`: parse the current config (fail
  * CLOSED on corruption), apply `transform` to compute the next value, and — only when the serialized result
  * differs from disk — back up byte-exact, publish atomically, and journal the undo entry. Extracting it keeps
@@ -207,9 +245,36 @@ function publish(
   targetPath: string,
   opts: MergeOptions,
   transform: (base: unknown) => unknown,
-  { createIfAbsent = true, guardsRemoval = false }: { createIfAbsent?: boolean; guardsRemoval?: boolean } = {},
+  {
+    createIfAbsent = true,
+    guardsRemoval = false,
+    allowText = false,
+  }: { createIfAbsent?: boolean; guardsRemoval?: boolean; allowText?: boolean } = {},
 ): MergeResult {
   const format = detectFormat(targetPath, opts.format);
+  // The opaque whole-file `text` format has no merge/removal semantics — its patch is the FULL content, not a
+  // partial config — so `mergeConfig`/`removeConfigKeys` must never operate on it. `writeTextFile` is the one
+  // caller that sets `allowText`; every other entry point reaches here with it false, so an explicit
+  // `format: "text"` passed to merge/remove fails loudly here instead of silently misbehaving (KTD1).
+  if (format === "text" && !allowText) {
+    throw new Error(
+      `configwrite: '${targetPath}' resolves to the whole-file 'text' format, which mergeConfig/removeConfigKeys cannot handle — use writeTextFile`,
+    );
+  }
+  // Batch identity (KTD2) is both-or-neither and NON-EMPTY STRINGS. `publish` stamps opts.batchId/projectRoot
+  // straight into the UndoEntry, whose read schema (undo.ts) requires non-empty strings — so ANY value that
+  // schema would reject (undefined, "", or a truthy NON-STRING like a number/object slipped past the TS types)
+  // must be refused HERE, or the write appends a journal row that `listUndo` silently drops, leaving the
+  // mutation applied-but-un-undoable (a success return + undoId that resolves to nothing). Fail CLOSED before
+  // any file work, matching the engine's parse-fail-closed discipline — the invariant holds at the write
+  // boundary even though the only batch producer (U5) will always pass a well-formed UUID + project root.
+  const isBatchKey = (v: unknown): boolean => typeof v === "string" && v.length > 0;
+  const hasBatch = opts.batchId !== undefined || opts.projectRoot !== undefined;
+  if (hasBatch && (!isBatchKey(opts.batchId) || !isBatchKey(opts.projectRoot))) {
+    throw new Error(
+      "configwrite: a batched write requires both batchId and projectRoot to be non-empty strings (both-or-neither)",
+    );
+  }
   const dataDir = resolveDataDir(opts.dataDir);
 
   // ONE presence decision for both merge and removal (see `statTarget`): a regular file is "present", a genuine
@@ -255,7 +320,14 @@ function publish(
   // No-op short-circuit: if the computed bytes already match disk, do nothing — no backup, no write, no
   // journal entry. This is what makes the engine idempotent in PRACTICE: an installer re-run (every
   // session, say) neither rewrites the file nor accumulates backups/journal noise.
-  if (existed && nextText === currentText) {
+  //
+  // For the opaque `text` format the compare must be BYTE-exact, not string-exact: `currentText` was decoded
+  // as utf8, which is LOSSY for invalid byte sequences (they collapse to U+FFFD), so a string compare could
+  // falsely no-op on a target whose raw bytes differ but decode-equal — skipping the write and leaving
+  // divergent bytes on disk, which breaks text's byte-identity contract. Compare rendered bytes to the raw
+  // file bytes for `text`; structured formats keep the (canonicalized) string compare, unchanged.
+  const isNoop = existed && (format === "text" ? Buffer.from(nextText).equals(readFileSync(targetPath)) : nextText === currentText);
+  if (isNoop) {
     return { targetPath, noop: true, created: false, undoId: null, backupPath: null };
   }
 
@@ -272,6 +344,10 @@ function publish(
     format,
     postHash: hashContent(nextText),
     ts: Date.now(),
+    // Batch identity (KTD2) — recorded only when a caller (a U10 provision run) supplies it; `undefined`
+    // otherwise, so JSON.stringify omits the keys and unbatched installer journals stay unchanged.
+    batchId: opts.batchId,
+    projectRoot: opts.projectRoot,
   };
 
   // `committed` splits the two failure regimes. Before the rename the target is untouched — roll our
@@ -510,6 +586,8 @@ function parseConfig(format: ConfigFormat, text: string, path: string): unknown 
         return parseToml(text);
       case "yaml":
         return parseYaml(text);
+      case "text":
+        return text; // opaque whole-file: no structured parse — the decoded content passes through as-is (identity, never throws)
       default:
         return assertNever(format);
     }
@@ -524,6 +602,13 @@ function parseConfig(format: ConfigFormat, text: string, path: string): unknown 
 }
 
 function serializeConfig(format: ConfigFormat, value: unknown): string {
+  // Whole-file `text` (KTD1): the value IS the full rendered content string — return it VERBATIM, before the
+  // structured-format switch and its trailing-newline canonicalization below. Load-bearing: verbatim output
+  // preserves the caller's string exactly (even with zero or multiple trailing newlines), so a copy of valid-
+  // UTF-8 content stays byte-identical and a re-apply is a true no-op via publish's byte-compare. writeTextFile
+  // is the only producer, and its transform
+  // returns a string, so `value` is always a string here.
+  if (format === "text") return value as string;
   let text: string;
   switch (format) {
     case "json":

@@ -23,6 +23,10 @@ export {
   WorkState,
   InventoryItem,
   RuntimeTarget,
+  // Provisioning blueprint manifest (U10)
+  FileEntry,
+  RoleBundle,
+  Manifest,
   // JSON Schema outputs for MCP tool registration
   jsonSchemas,
 } from "./schema";

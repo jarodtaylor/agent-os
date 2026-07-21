@@ -46,6 +46,11 @@ A project's versioned single source of truth for its agent setup: a plain direct
 ### Role bundle
 One manifest entry mapping a role (Architect, Executor, QA, …) to its target harness, an optional model pin, and its files with transform types. Metadata is machine-readable but descriptive only — it drives file operations, never workflow sequencing.
 
+### Front-gate
+The shared validation every provisioning verb (plan, apply, status, propose) runs first: it checks the blueprint's manifest is a compatible version, then scans the blueprint's contents for secrets and machine-specific absolute paths, returning one typed result the verb branches on.
+
+Its guarantee is scoped and its failures are content-free: a failure names the offending file, never its content. It fully certifies the manifest and whole-file sources; for a config-format source, a secret hidden behind an encoding escape surfaces only once the file is parsed, so that effective-form scan is deferred to where the parse happens (render for merges, apply for verbatim copies) — the front-gate's own pass over those is best-effort. A blueprint it passes is loadable and free of the leaked secrets and non-portable paths it does check for.
+
 ### Provision
 The render → diff → apply push of a blueprint into native harness surfaces, reversibly and project-scoped. The same rendering powers the dry-run plan, the apply, and the drift report. Provision-down only — pulling harness-local changes back into a blueprint (adopt-up) is a separate, deferred concept.
 

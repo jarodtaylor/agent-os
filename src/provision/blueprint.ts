@@ -44,6 +44,7 @@ export type InvalidProblem =
   | "malformed-json" // the manifest is not parseable as JSON
   | "bad-schema-version" // schemaVersion is absent, the root is not an object, or it is not a positive integer
   | "schema" // failed the `Manifest` schema (unknown keys, wrong types, …)
+  | "too-large" // declares more roles/entries/compose-sources than the cardinality budget allows (no-hang guard)
   | "unreadable-source" // a referenced source is present but ungateable (bytes we could not classify)
   | "absolute-path"; // a blueprint file carries a machine-specific absolute path (R4)
 
@@ -92,6 +93,11 @@ export function loadBlueprint(blueprintRoot: string, io: BlueprintIo = realBluep
   //     an upgrade instruction, never strictObject's unrecognized-keys error.
   const versionResult = checkSchemaVersion(peekSchemaVersion(json));
   if (versionResult) return versionResult;
+
+  // (2.5) Cardinality budget BEFORE safeParse (no-hang guard; decision #45's own-file pathological case): a
+  //       bounded-SIZE (16 MiB) manifest can still declare millions of members, and `safeParse` materializes
+  //       an issue PER invalid member — so cap the array dimensions it (and the source-read loop) will iterate.
+  if (!withinCardinalityBudget(json)) return { kind: "invalid", problem: "too-large", file: MANIFEST_FILENAME };
 
   // (3) Strict schema. `safeParse` keeps the loader total (never throws on a bad shape).
   const parsed = Manifest.safeParse(json);
@@ -142,12 +148,54 @@ export function checkSchemaVersion(
   return null;
 }
 
+/** Manifest cardinality budget — a no-hang guard for the decision-#45 own-file pathological case (a
+ *  bounded-SIZE 16 MiB manifest can still declare millions of members). Caps the array dimensions that BOTH
+ *  `Manifest.safeParse` iterates (it materializes an issue per invalid member) AND the front-gate's source-read
+ *  loop walks (one bounded read per source). Generous vs any real blueprint (run-1: 3 roles, ~12 entries) — it
+ *  exists only to reject the pathological. Reads loosely-typed STRUCTURE, never a manifest VALUE (content-free),
+ *  and aborts on the first breach, so the check is itself bounded. */
+const MAX_ROLES = 2_000;
+const MAX_FILE_ENTRIES = 5_000;
+const MAX_COMPOSE_SOURCES = 5_000;
+function withinCardinalityBudget(json: unknown): boolean {
+  if (typeof json !== "object" || json === null) return true; // not our shape; safeParse rejects it in O(1)
+  const roles = (json as Record<string, unknown>).roles;
+  if (!Array.isArray(roles)) return true; // safeParse yields a single issue, fast
+  if (roles.length > MAX_ROLES) return false;
+  let entries = 0;
+  let sources = 0;
+  for (const role of roles) {
+    if (typeof role !== "object" || role === null) continue;
+    const files = (role as Record<string, unknown>).files;
+    if (!Array.isArray(files)) continue;
+    entries += files.length;
+    if (entries > MAX_FILE_ENTRIES) return false; // fires BEFORE the inner walk, so it stays bounded
+    for (const entry of files) {
+      if (typeof entry !== "object" || entry === null) continue;
+      const composeSources = (entry as Record<string, unknown>).sources;
+      if (Array.isArray(composeSources)) {
+        sources += composeSources.length;
+        if (sources > MAX_COMPOSE_SOURCES) return false;
+      }
+    }
+  }
+  return true;
+}
+
 /**
  * The secret + machine-absolute-path scan over every blueprint file's contents (R4/KTD5). Returns a
  * `secret-hit` or absolute-path `invalid` naming the FIRST offending file, an `unreadable-source` `invalid`
  * for a present-but-ungateable source (fail-closed — bytes we can't classify are never certified secret-free),
  * or the final `loaded` result. Scans the manifest itself first, then each referenced source once, in
  * manifest order (deterministic first-hit reporting).
+ *
+ * SCOPE of what a `loaded` result certifies (honest boundary): the manifest in BOTH raw and parsed-normalized
+ * form, and every referenced source as RAW BYTES. Whole-file (`text`) sources are written verbatim, so raw
+ * bytes ARE their provisioned content. Config-format sources (config-merge — JSON/TOML/YAML) are scanned here
+ * only as raw bytes, so a secret hidden behind an encoding escape (e.g. JSON `\uXXXX`) that decodes at parse
+ * time is NOT caught at load — that effective-form scan belongs where the parse happens, U3's render, which
+ * re-runs this gate on the parsed forms (KTD7). U3 owns it as an explicit, tested requirement: deferred by
+ * construction, not silently punted (Codex gate round 1; decision-#45 disposition).
  */
 function gateContents(root: string, manifest: Manifest, manifestRaw: string, io: BlueprintIo): BlueprintLoad {
   // Scan BOTH the raw manifest bytes AND the parsed-then-reserialized form. The raw scan catches a secret

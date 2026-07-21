@@ -6,9 +6,12 @@
  * summary that default-threshold redaction never masks. One classifier, one place to harden.
  *
  * Non-obvious shapes (expanded per the U5 security review):
- *  - The keyword-assignment rule uses an IDENTIFIER boundary (`[^A-Za-z0-9]` + `[A-Za-z0-9_]*`), NOT `\b`:
+ *  - The keyword-assignment rule uses an IDENTIFIER boundary (`[^A-Za-z0-9]` + `[A-Za-z0-9_]{0,64}`), NOT `\b`:
  *    `_` is a regex word char, so a `\b`-gated `password` can't match inside `DATABASE_PASSWORD=` — the
  *    dominant real-world shape. The identifier form catches prefixed/suffixed names (`STRIPE_SECRET_KEY=`).
+ *    The prefix/suffix runs are BOUNDED (`{0,64}`, not `*`): real secret-key identifiers are far shorter, and
+ *    unbounded greedy runs made this pattern O(n^2) on keyword-dense input — a ReDoS-class stall once a caller
+ *    (U10's blueprint front-gate) runs it over whole files up to the 16 MiB read cap.
  *  - The `sk-…` rule allows INTERNAL dashes (`sk-proj-…`, `sk-ant-api03-…`, `sk-svcacct-…`) — a bare
  *    `sk-[alnum]` form missed real dashed provider keys. It requires the body to start alphanumeric and run
  *    16+ chars, so a stray "sk-" in prose won't match; a coincidental long "sk-…" hit is over-classification.
@@ -32,7 +35,7 @@ const SECRET_PATTERNS: readonly RegExp[] = [
   /:\/\/[^\s:@\/]+:[^\s@\/]+@/, // connection string with inline credentials (scheme://user:pass@host)
   /-----BEGIN [A-Z ]*PRIVATE KEY-----/, // PEM private-key header
   /\bAuthorization:\s*(?:Bearer|Basic)\s+[A-Za-z0-9._~+\/=-]+/i, // HTTP Authorization header
-  /(?:^|[^A-Za-z0-9])[A-Za-z0-9_]*(?:api[_-]?key|secret|token|password|passwd|pwd|credential)[A-Za-z0-9_]*\s*[:=]/i, // key=value / prefixed-identifier secret assignment
+  /(?:^|[^A-Za-z0-9])[A-Za-z0-9_]{0,64}(?:api[_-]?key|secret|token|password|passwd|pwd|credential)[A-Za-z0-9_]{0,64}\s*[:=]/i, // key=value / prefixed-identifier secret assignment. The {0,64} bounds (not `*`) cap the identifier prefix/suffix — real secret keys run well under 64 chars, and unbounded greedy runs made this pattern O(n^2) on keyword-dense input (a ReDoS-class stall when run over large files, e.g. U10's blueprint gate).
 ];
 
 /** `secret` if any secret pattern matches `text`, else the caller's `floor`. */

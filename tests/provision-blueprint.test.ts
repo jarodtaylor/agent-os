@@ -560,6 +560,40 @@ describe("loadBlueprint — totality (never throws; always a discriminated varia
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+describe("loadBlueprint — cardinality budget (no-hang guard; decision #45 own-file pathological case)", () => {
+  test("pathologically many roles → invalid(too-large), rejected BEFORE a giant safeParse", () => {
+    // 50k null roles: the preflight rejects on roles.length before safeParse would materialize 50k issues.
+    writeManifest({ schemaVersion: 1, roles: new Array(50_000).fill(null) });
+    const result = loadBlueprint(root);
+    assertKind(result, "invalid");
+    expect(result.problem).toBe("too-large");
+  });
+
+  test("pathologically many file entries in one role → invalid(too-large)", () => {
+    const files = new Array(20_000).fill({ transform: "copy", source: "x.md", destination: "y.md" });
+    writeManifest({ schemaVersion: 1, roles: [{ name: "X", harness: "codex", files }] });
+    const result = loadBlueprint(root);
+    assertKind(result, "invalid");
+    expect(result.problem).toBe("too-large");
+  });
+
+  test("pathologically many compose sources in one entry → invalid(too-large) (bounds the read loop too)", () => {
+    const sources = new Array(20_000).fill("s.md");
+    writeManifest({ schemaVersion: 1, roles: [{ name: "X", harness: "claude-code", files: [{ transform: "compose", sources, destination: "CLAUDE.md" }] }] });
+    const result = loadBlueprint(root);
+    assertKind(result, "invalid");
+    expect(result.problem).toBe("too-large");
+  });
+
+  test("a normal-sized blueprint is well within budget — the guard rejects only the pathological", () => {
+    const m = run1Manifest();
+    writeManifest(m);
+    writeAllSources(m);
+    assertKind(loadBlueprint(root), "loaded"); // run-1: 3 roles, ~12 entries — nowhere near the caps
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 describe("contract — Manifest JSON schema export (KTD10; verify toJSONSchema didn't silently surprise)", () => {
   test("jsonSchemas.Manifest emits and serializes the discriminated union", () => {
     expect(jsonSchemas.Manifest).toBeDefined();
@@ -592,5 +626,17 @@ describe("content heuristics (unit)", () => {
     expect(containsSecret("API_KEY=abcdef")).toBe(true);
     expect(containsSecret('model = "gpt-5-codex"')).toBe(false);
     expect(containsSecret("# just some portable role prose\n")).toBe(false);
+  });
+
+  test("containsSecret runs in linear time on keyword-dense input (ReDoS guard — the gate runs it over whole files)", () => {
+    // The keyword-assignment pattern was O(n^2) on keyword-dense input via unbounded greedy identifier runs;
+    // bounded to {0,64}. A ~1 MB file of the repeated keyword must classify far under budget — the front-gate
+    // runs this over every blueprint source up to the 16 MiB read cap. Unbounded, 500 KB did not finish in 30s.
+    const keywordDense = "token ".repeat(180_000); // ~1.1 MB, no [:=] → not a secret assignment
+    const start = performance.now();
+    const hit = containsSecret(keywordDense);
+    const elapsedMs = performance.now() - start;
+    expect(hit).toBe(false);
+    expect(elapsedMs).toBeLessThan(2000); // ~7ms in practice; 2s cleanly separates linear from the >30s quadratic
   });
 });

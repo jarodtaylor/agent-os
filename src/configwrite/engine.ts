@@ -259,6 +259,18 @@ function publish(
       `configwrite: '${targetPath}' resolves to the whole-file 'text' format, which mergeConfig/removeConfigKeys cannot handle — use writeTextFile`,
     );
   }
+  // Batch identity (KTD2) is both-or-neither and non-empty. `publish` stamps opts.batchId/projectRoot straight
+  // into the UndoEntry, whose read schema (undo.ts) requires NON-EMPTY strings — so a partial or empty-string
+  // batch value would append a journal row that `listUndo` then silently rejects, leaving the mutation
+  // applied-but-un-undoable (a success return + undoId that resolves to nothing). Fail CLOSED here, before any
+  // file work, matching the engine's parse-fail-closed discipline — the invariant holds at the write boundary
+  // even though the only batch producer (U5) will always pass well-formed UUID + project root.
+  const hasBatch = opts.batchId !== undefined || opts.projectRoot !== undefined;
+  if (hasBatch && (!opts.batchId || !opts.projectRoot)) {
+    throw new Error(
+      "configwrite: a batched write requires both batchId and projectRoot to be non-empty strings (both-or-neither)",
+    );
+  }
   const dataDir = resolveDataDir(opts.dataDir);
 
   // ONE presence decision for both merge and removal (see `statTarget`): a regular file is "present", a genuine
@@ -304,7 +316,14 @@ function publish(
   // No-op short-circuit: if the computed bytes already match disk, do nothing — no backup, no write, no
   // journal entry. This is what makes the engine idempotent in PRACTICE: an installer re-run (every
   // session, say) neither rewrites the file nor accumulates backups/journal noise.
-  if (existed && nextText === currentText) {
+  //
+  // For the opaque `text` format the compare must be BYTE-exact, not string-exact: `currentText` was decoded
+  // as utf8, which is LOSSY for invalid byte sequences (they collapse to U+FFFD), so a string compare could
+  // falsely no-op on a target whose raw bytes differ but decode-equal — skipping the write and leaving
+  // divergent bytes on disk, which breaks text's byte-identity contract. Compare rendered bytes to the raw
+  // file bytes for `text`; structured formats keep the (canonicalized) string compare, unchanged.
+  const isNoop = existed && (format === "text" ? Buffer.from(nextText).equals(readFileSync(targetPath)) : nextText === currentText);
+  if (isNoop) {
     return { targetPath, noop: true, created: false, undoId: null, backupPath: null };
   }
 

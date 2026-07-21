@@ -1260,6 +1260,51 @@ describe("writeTextFile batch identity (KTD2) — recorded only when supplied", 
     expect(entry?.batchId).toBe("run-xyz");
     expect(entry?.projectRoot).toBe("/p");
   });
+
+  // ── both-or-neither, non-empty (adversarial gate high finding): a partial/empty batch value would append a
+  //    journal row that listUndo's non-empty schema rejects, making the mutation applied-but-un-undoable. The
+  //    write boundary fails CLOSED before touching the file, so no such row is ever written. ──
+  test("an empty-string batchId is refused BEFORE any file work — target untouched, no journal row", () => {
+    const target = seed("ROLE.md", "keep\n");
+    expect(() => writeTextFile(target, "new\n", { dataDir, batchId: "", projectRoot: "/p" })).toThrow(/both-or-neither/);
+    expect(read(target)).toBe("keep\n"); // never written
+    expect(bakCount()).toBe(0);
+    expect(listUndo(dataDir)).toEqual([]); // no un-undoable row appended
+  });
+
+  test("a partial batch identity (only one of the pair) is refused", () => {
+    const target = join(configsDir, "ROLE.md");
+    expect(() => writeTextFile(target, "x\n", { dataDir, batchId: "run-1" })).toThrow(/both-or-neither/);
+    expect(() => writeTextFile(target, "x\n", { dataDir, projectRoot: "/p" })).toThrow(/both-or-neither/);
+    expect(existsSync(target)).toBe(false); // never created
+  });
+
+  test("mergeConfig enforces the same both-or-neither rule (shared publish guard)", () => {
+    const target = seed("settings.json", JSON.stringify({ a: 1 }, null, 2) + "\n");
+    expect(() => mergeConfig(target, { b: 2 }, { dataDir, batchId: "", projectRoot: "/p" })).toThrow(/both-or-neither/);
+    expect(JSON.parse(read(target))).toEqual({ a: 1 }); // untouched
+    expect(listUndo(dataDir)).toEqual([]);
+  });
+});
+
+describe("writeTextFile no-op is BYTE-exact, not lossy-utf8 (adversarial gate medium finding)", () => {
+  test("a target whose invalid on-disk bytes decode-equal to the content is still OVERWRITTEN, not falsely no-op'd", () => {
+    // On-disk 0x80 is invalid UTF-8 and decodes to U+FFFD; the content is a literal U+FFFD. A utf8-string
+    // compare would see them equal and skip the write, leaving the wrong bytes. The byte-exact compare writes.
+    const target = join(configsDir, "role.md");
+    writeFileSync(target, Buffer.from([0x80])); // invalid UTF-8, decodes to U+FFFD
+    const res = writeTextFile(target, "�", { dataDir });
+
+    expect(res.noop).toBe(false); // NOT a false no-op — the bytes genuinely differ
+    expect(readFileSync(target)).toEqual(Buffer.from("�", "utf8")); // real content now on disk (EF BF BD)
+  });
+
+  test("a genuinely byte-identical rewrite is still a true no-op (the common case is unaffected)", () => {
+    const target = seed("role.md", "identical\n");
+    const res = writeTextFile(target, "identical\n", { dataDir });
+    expect(res.noop).toBe(true);
+    expect(bakCount()).toBe(0);
+  });
 });
 
 describe("the merge/removal entry points reject the whole-file `text` format loudly (KTD1)", () => {

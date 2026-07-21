@@ -5,7 +5,7 @@
  * (Hermes/Cursor/Antigravity/OpenCode/Grok Build, as each enters real rotation — decisions #40/#44) is a
  * one-line change: write a `src/scan/<runtime>.ts` returning `InventoryItem[]`, add its `Runtime` to the
  * contract's enum, and add ONE row to `SCANNERS`. No spine rework — that is the property the unit exists to
- * protect. Slice-1 roster (Jarod's call, anchored to the shipped contract): Claude Code + Codex only.
+ * protect. Cursor joined the live roster in U10/U4 after its decision-#45 promotion trigger fired.
  *
  * Crash-safety is layered: each scanner's helpers fail soft per surface (`internal.ts`), and `scanAll`
  * wraps every source so a scanner that throws anyway degrades ONLY its own runtime to empty — the rest of
@@ -19,16 +19,19 @@
 import type { InventoryItem, Runtime } from "../contract/index";
 import { scanClaudeCode } from "./claude-code";
 import { scanCodex } from "./codex";
+import { scanCursor } from "./cursor";
 import type { ScanContext, SourceScanner } from "./internal";
 
 export type { ScanContext, SourceScanner } from "./internal";
 export { scanClaudeCode } from "./claude-code";
 export { scanCodex } from "./codex";
+export { scanCursor } from "./cursor";
 
-/** One scanner per source. Slice-1 roster only; append a row per harness as it enters real rotation. */
+/** One scanner per source; append one row per harness as it enters real rotation. */
 const SCANNERS: ReadonlyArray<{ runtime: Runtime; scan: SourceScanner }> = [
   { runtime: "claude-code", scan: scanClaudeCode },
   { runtime: "codex", scan: scanCodex },
+  { runtime: "cursor", scan: scanCursor },
 ];
 
 /**

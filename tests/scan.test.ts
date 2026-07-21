@@ -3,7 +3,15 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { InventoryItem, type ItemKind, type Runtime } from "../src/contract/index";
-import { runScanners, scanAll, scanClaudeCode, scanCodex, type ScanContext, type SourceScanner } from "../src/scan/index";
+import {
+  runScanners,
+  scanAll,
+  scanClaudeCode,
+  scanCodex,
+  scanCursor,
+  type ScanContext,
+  type SourceScanner,
+} from "../src/scan/index";
 
 // Fixture-HOME pattern (like tests/capture-*.test.ts): a temp dir per test standing in for `~`, torn down
 // after. Scanners are pure disk reads, so no db/repo is needed — the disk IS the state under test.
@@ -137,12 +145,63 @@ describe("scanCodex", () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+describe("scanCursor", () => {
+  test("enumerates user-scoped custom agents, skills, and MCP servers from ~/.cursor", () => {
+    writeRaw(join(home, ".cursor", "agents", "qa-smoke.md"), "---\nname: qa-smoke\n---\n");
+    writeRaw(join(home, ".cursor", "agents", "qa-browser-e2e.md"), "---\nname: qa-browser-e2e\n---\n");
+    writeRaw(join(home, ".cursor", "agents", "README.txt"), "not an agent");
+    makeSkill(join(home, ".cursor", "skills"), "qa-gate");
+    writeJson(join(home, ".cursor", "mcp.json"), {
+      mcpServers: { playwright: { command: "npx", args: ["@playwright/mcp"] } },
+    });
+
+    const items = scanCursor(ctx());
+
+    // InventoryItem has no agent kind; Cursor custom agents occupy the existing extension/plugin slot.
+    expect(names(items, "cursor", "plugin")).toEqual(["qa-browser-e2e", "qa-smoke"]);
+    expect(names(items, "cursor", "skill")).toEqual(["qa-gate"]);
+    expect(names(items, "cursor", "mcp")).toEqual(["playwright"]);
+  });
+
+  test("a malformed mcp.json degrades that surface without hiding valid agents and skills", () => {
+    writeRaw(join(home, ".cursor", "agents", "qa.md"), "# QA\n");
+    makeSkill(join(home, ".cursor", "skills"), "qa-gate");
+    writeRaw(join(home, ".cursor", "mcp.json"), "{ definitely not json");
+
+    const items = scanCursor(ctx());
+
+    expect(names(items, "cursor", "mcp")).toEqual([]);
+    expect(names(items, "cursor", "plugin")).toEqual(["qa"]);
+    expect(names(items, "cursor", "skill")).toEqual(["qa-gate"]);
+  });
+
+  test("follows a valid agent symlink and skips a broken agent symlink", () => {
+    const agentsRoot = join(home, ".cursor", "agents");
+    const realAgent = join(home, "external", "linked-agent.md");
+    writeRaw(realAgent, "# Linked agent\n");
+    mkdirSync(agentsRoot, { recursive: true });
+    symlinkSync(realAgent, join(agentsRoot, "linked-agent.md"));
+    symlinkSync(join(home, "nowhere.md"), join(agentsRoot, "broken-agent.md"));
+
+    const agents = names(scanCursor(ctx()), "cursor", "plugin");
+
+    expect(agents).toContain("linked-agent");
+    expect(agents).not.toContain("broken-agent");
+  });
+
+  test("an absent ~/.cursor yields an empty inventory, not a throw", () => {
+    expect(scanCursor(ctx())).toEqual([]);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 describe("scanAll — composition, crash-safety, contract conformance", () => {
   function richFixture(): void {
     writeJson(join(home, ".claude.json"), { mcpServers: { "cc-mcp": {} } });
     makeSkill(join(home, ".claude", "skills"), "cc-skill");
     writeJson(join(home, ".claude", "settings.json"), { enabledPlugins: { "cc-plug@mkt": true } });
     writeRaw(join(home, ".codex", "config.toml"), `[mcp_servers.cx-mcp]\nurl = "http://z"\n`);
+    writeJson(join(home, ".cursor", "mcp.json"), { mcpServers: { "cursor-mcp": {} } });
   }
 
   test("AE4: a corrupt runtime degrades ONLY itself — the other stays complete, scan succeeds", async () => {
@@ -157,6 +216,17 @@ describe("scanAll — composition, crash-safety, contract conformance", () => {
     expect(names(all, "claude-code", "plugin")).toEqual(["cc-plug@mkt"]);
     // ...and Codex degraded to empty, without aborting the sweep.
     expect(all.filter((i) => i.runtime === "codex")).toEqual([]);
+  });
+
+  test("a corrupt Cursor config degrades only Cursor while Claude Code and Codex remain complete", async () => {
+    richFixture();
+    writeRaw(join(home, ".cursor", "mcp.json"), "{ broken cursor json");
+
+    const all = await scanAll(ctx());
+
+    expect(names(all, "claude-code", "mcp")).toEqual(["cc-mcp"]);
+    expect(names(all, "codex", "mcp")).toEqual(["cx-mcp"]);
+    expect(all.filter((item) => item.runtime === "cursor")).toEqual([]);
   });
 
   test("AE5: a rescan reflects disk both ways — new items appear, removed items vanish (no phantoms)", async () => {
@@ -185,10 +255,10 @@ describe("scanAll — composition, crash-safety, contract conformance", () => {
     }
   });
 
-  test("only roster runtimes are emitted (claude-code, codex) — no off-roster sources", async () => {
+  test("only roster runtimes are emitted (claude-code, codex, cursor) — no off-roster sources", async () => {
     richFixture();
     const runtimes = new Set((await scanAll(ctx())).map((i) => i.runtime));
-    expect([...runtimes].sort()).toEqual(["claude-code", "codex"]);
+    expect([...runtimes].sort()).toEqual(["claude-code", "codex", "cursor"]);
   });
 
   test("an empty HOME yields an empty inventory, not a throw", async () => {

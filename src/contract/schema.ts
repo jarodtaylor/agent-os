@@ -281,6 +281,77 @@ export const RuntimeTarget = z.strictObject({
 export type RuntimeTarget = z.infer<typeof RuntimeTarget>;
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Provisioning blueprint manifest (U10 — KTD10). Modeled on `RuntimeTarget`'s strictObject-record shape.
+// The manifest is organized BY ROLE (R2); the engine executes ONLY the file operations — the role/harness/
+// model metadata is descriptive (machine-readable for the future view + drift reporting) and encodes no
+// workflow or sequencing. `schemaVersion` is new contract convention: an integer at the manifest root whose
+// COMPATIBILITY the loader owns (newer ⇒ "upgrade agent-os", older ⇒ migrate — never an opaque schema error,
+// R1). The loader lives in `src/provision/blueprint.ts`; this is only the typed shape.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * One provisioning file operation, discriminated on `transform` (KTD3). A `discriminatedUnion` makes illegal
+ * states unrepresentable (a `copy` can't carry `sources`; a `scaffold` can't be drift-tracked) and gives the
+ * downstream render switch (U3) a compile-time `assertNever` exhaustiveness guard.
+ *
+ *   - `copy`         1 source → 1 destination, byte-identical.
+ *   - `compose`      N ORDERED sources → 1 destination (deterministic assembly, KTD6).
+ *   - `scaffold`     create-only, drift-EXCLUDED by construction (KTD3/KTD8) — `source` is OPTIONAL (a marker
+ *                    README has one; a bare placeholder doesn't), so it carries no `driftTracked` field.
+ *   - `config-merge` a patch merged through the U14 config-write engine, foreign keys preserved (KTD3).
+ *
+ * A 5th taxonomy member `"transform"` (strip/inject framing) is a DEFERRED extension point (R6) — documented
+ * here, not implemented; it joins as a new variant when an SSOT file first carries framing its native copy
+ * shouldn't. `driftTracked` is optional on the drift-eligible transforms; its DEFAULT resolution is U3's
+ * (diff) job — U1 only carries the field so the diff can read it.
+ */
+export const FileEntry = z.discriminatedUnion("transform", [
+  z.strictObject({
+    transform: z.literal("copy"),
+    source: z.string().min(1),
+    destination: z.string().min(1),
+    driftTracked: z.boolean().optional(),
+  }),
+  z.strictObject({
+    transform: z.literal("compose"),
+    sources: z.array(z.string().min(1)).min(1),
+    destination: z.string().min(1),
+    driftTracked: z.boolean().optional(),
+  }),
+  z.strictObject({
+    transform: z.literal("scaffold"),
+    source: z.string().min(1).optional(),
+    destination: z.string().min(1),
+  }),
+  z.strictObject({
+    transform: z.literal("config-merge"),
+    source: z.string().min(1),
+    destination: z.string().min(1),
+    driftTracked: z.boolean().optional(),
+  }),
+]);
+export type FileEntry = z.infer<typeof FileEntry>;
+
+/** A role bundle (R2): one role's target harness, an optional DESCRIPTIVE model pin (never used to drive
+ *  file ops — per-agent pins live in the copied file CONTENT), and its file entries. An empty `files` array
+ *  is legal (a declared role not yet carrying surfaces). */
+export const RoleBundle = z.strictObject({
+  name: z.string().min(1),
+  harness: Runtime,
+  model: z.string().min(1).optional(),
+  files: z.array(FileEntry),
+});
+export type RoleBundle = z.infer<typeof RoleBundle>;
+
+/** A project's provisioning blueprint manifest (R1/R2). Root `schemaVersion` + role bundles; an empty
+ *  `roles` array is legal. Unknown keys are rejected (strictObject). */
+export const Manifest = z.strictObject({
+  schemaVersion: z.number().int().min(1),
+  roles: z.array(RoleBundle),
+});
+export type Manifest = z.infer<typeof Manifest>;
+
+// ─────────────────────────────────────────────────────────────────────────────
 // JSON Schema exports (for MCP tool registration) — zod v4 native, no zod-to-json-schema
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -290,4 +361,5 @@ export const jsonSchemas = {
   Breadcrumb: z.toJSONSchema(Breadcrumb),
   InventoryItem: z.toJSONSchema(InventoryItem),
   RuntimeTarget: z.toJSONSchema(RuntimeTarget),
+  Manifest: z.toJSONSchema(Manifest),
 } as const;

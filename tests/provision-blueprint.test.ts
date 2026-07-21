@@ -265,6 +265,37 @@ describe("loadBlueprint — schema edges", () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+describe("loadBlueprint — path containment (R1/R9: source/destination are portable & contained)", () => {
+  test("a `../` traversal source is rejected by the schema → invalid(schema)", () => {
+    writeManifest({ schemaVersion: 1, roles: [{ name: "X", harness: "codex", files: [{ transform: "copy", source: "../outside.md", destination: "AGENTS.md" }] }] });
+    const result = loadBlueprint(root);
+    assertKind(result, "invalid");
+    expect(result.problem).toBe("schema"); // rejected at the contract, so join(root, source) can never escape
+  });
+
+  test("a normalized-escape source (`a/../../x`) is rejected → invalid(schema)", () => {
+    writeManifest({ schemaVersion: 1, roles: [{ name: "X", harness: "codex", files: [{ transform: "copy", source: "a/../../x.md", destination: "AGENTS.md" }] }] });
+    assertKind(loadBlueprint(root), "invalid");
+  });
+
+  test("a POSIX-absolute destination escaping project scope is rejected → invalid(schema)", () => {
+    writeManifest({ schemaVersion: 1, roles: [{ name: "X", harness: "codex", files: [{ transform: "copy", source: "role.md", destination: "/etc/important.txt" }] }] });
+    assertKind(loadBlueprint(root), "invalid");
+  });
+
+  test("a compose source with a `..` segment is rejected (every sources[] entry is checked)", () => {
+    writeManifest({ schemaVersion: 1, roles: [{ name: "X", harness: "claude-code", files: [{ transform: "compose", sources: ["a.md", "../b.md"], destination: "CLAUDE.md" }] }] });
+    assertKind(loadBlueprint(root), "invalid");
+  });
+
+  test("a valid nested relative path passes (containment rejects only escapes)", () => {
+    writeManifest({ schemaVersion: 1, roles: [{ name: "X", harness: "cursor", files: [{ transform: "copy", source: "roles/variants/cursor/agents/x.md", destination: ".cursor/agents/x.md" }] }] });
+    writeFile("roles/variants/cursor/agents/x.md", "# clean portable role\n");
+    assertKind(loadBlueprint(root), "loaded");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 describe("loadBlueprint — schemaVersion compatibility (R1)", () => {
   test("newer than supported → explicit 'upgrade agent-os' instruction", () => {
     writeManifest({ schemaVersion: SUPPORTED_SCHEMA_VERSION + 1, roles: [] });

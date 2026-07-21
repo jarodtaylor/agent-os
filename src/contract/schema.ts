@@ -305,28 +305,47 @@ export type RuntimeTarget = z.infer<typeof RuntimeTarget>;
  * shouldn't. `driftTracked` is optional on the drift-eligible transforms; its DEFAULT resolution is U3's
  * (diff) job — U1 only carries the field so the diff can read it.
  */
+/**
+ * A blueprint-relative file path (R1/R9): non-empty, POSIX-RELATIVE, and CONTAINED — no absolute root, no
+ * `..` segment, no NUL, not the bare `.`. Because the schema rejects every escaping shape, the loader's
+ * `join(blueprintRoot, path)` can never read or write outside the blueprint directory — containment BY
+ * CONSTRUCTION, so no redundant runtime check is needed. Encodes "the blueprint lives in the project repo"
+ * (R1) + "project scope" (R9) at the type level, so a traversal path never reaches the loader. POSIX-only,
+ * matching the machine-abspath heuristic (Windows drive/UNC paths are a documented future extension).
+ */
+function isPortableRelPath(p: string): boolean {
+  if (p === ".") return false; // the bare current-dir is not a file target
+  if (p.startsWith("/")) return false; // POSIX-absolute root
+  if (p.includes("\0")) return false; // NUL
+  return !p.split("/").includes(".."); // any `..` segment ⇒ could escape join(root, p)
+}
+const PortableRelPath = z
+  .string()
+  .min(1)
+  .refine(isPortableRelPath, { message: "must be a portable, contained relative path (no absolute root, no `..` segment, no NUL)" });
+
 export const FileEntry = z.discriminatedUnion("transform", [
   z.strictObject({
     transform: z.literal("copy"),
-    source: z.string().min(1),
-    destination: z.string().min(1),
+    source: PortableRelPath,
+    destination: PortableRelPath,
     driftTracked: z.boolean().optional(),
   }),
   z.strictObject({
     transform: z.literal("compose"),
-    sources: z.array(z.string().min(1)).min(1),
-    destination: z.string().min(1),
+    sources: z.array(PortableRelPath).min(1),
+    destination: PortableRelPath,
     driftTracked: z.boolean().optional(),
   }),
   z.strictObject({
     transform: z.literal("scaffold"),
-    source: z.string().min(1).optional(),
-    destination: z.string().min(1),
+    source: PortableRelPath.optional(),
+    destination: PortableRelPath,
   }),
   z.strictObject({
     transform: z.literal("config-merge"),
-    source: z.string().min(1),
-    destination: z.string().min(1),
+    source: PortableRelPath,
+    destination: PortableRelPath,
     driftTracked: z.boolean().optional(),
   }),
 ]);

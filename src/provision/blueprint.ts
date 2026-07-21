@@ -191,11 +191,16 @@ function withinCardinalityBudget(json: unknown): boolean {
  *
  * SCOPE of what a `loaded` result certifies (honest boundary): the manifest in BOTH raw and parsed-normalized
  * form, and every referenced source as RAW BYTES. Whole-file (`text`) sources are written verbatim, so raw
- * bytes ARE their provisioned content. Config-format sources (config-merge — JSON/TOML/YAML) are scanned here
- * only as raw bytes, so a secret hidden behind an encoding escape (e.g. JSON `\uXXXX`) that decodes at parse
- * time is NOT caught at load — that effective-form scan belongs where the parse happens, U3's render, which
- * re-runs this gate on the parsed forms (KTD7). U3 owns it as an explicit, tested requirement: deferred by
- * construction, not silently punted (Codex gate round 1; decision-#45 disposition).
+ * bytes ARE their provisioned content — fully certified. For PARSER-CONSUMED formats (JSON/TOML/YAML) the raw
+ * bytes are NOT the effective content — a secret behind an encoding escape (e.g. JSON `\uXXXX`) reads clean
+ * here but decodes downstream — and that effective-form scan is DEFERRED, landing before apply writes (#43):
+ *   - config-merge sources: U3's render parses+merges them and re-runs this gate on the parsed forms (KTD7);
+ *   - copy sources of a parser-consumed format (e.g. a copied `.toml`): written verbatim and decoded only by
+ *     the HARNESS, so U3 never parses them — a KNOWN best-effort gap here, closed at apply per #43.
+ * Secret detection over sources is otherwise the shared classifier's BEST-EFFORT heuristics (R4 = "run the
+ * existing heuristics"; KTD2's documented residual — obfuscated / keyword-less / quoted-key secrets may pass;
+ * see #42). Decision-#45 disposition: U1 (contract + loader) writes nothing, so no secret escapes HERE;
+ * completeness has a home and a deadline at U5/apply.
  */
 function gateContents(root: string, manifest: Manifest, manifestRaw: string, io: BlueprintIo): BlueprintLoad {
   // Scan BOTH the raw manifest bytes AND the parsed-then-reserialized form. The raw scan catches a secret

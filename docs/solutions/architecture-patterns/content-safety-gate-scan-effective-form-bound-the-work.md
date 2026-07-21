@@ -55,7 +55,7 @@ A byte cap on the input (here: a 16 MiB read cap, mirrored from `src/scan/intern
 
 ### 3. Say what "certified" actually covers — defer the rest by construction, not by silence
 
-A gate that punts part of its own invariant to a future caller ("U3 will re-scan the parsed config sources") is fragile *if the punt is implicit*. Make the deferral explicit, documented at the boundary, and enforced by a test in the unit that owns it. The `gateContents` docstring now states exactly what a `loaded` result certifies (manifest in both forms; whole-file sources as raw bytes) and what it defers (config-format *sources'* effective form → U3's render, which re-runs the gate on parsed forms per KTD7). Deferred by construction, with U3 owning it as a tested requirement — not a silent gap a future reader has to rediscover.
+A gate that punts part of its own invariant to a future caller is fragile *if the punt is implicit* — but it is *dangerous* if the punt is explicit **and wrong**. State exactly what a `loaded` result certifies (manifest in both forms; whole-file sources as raw bytes) and what it defers — then verify the deferral against *every* path. A first version of this gate's docstring claimed config-source effective-form scanning was covered "at U3's render (KTD7)"; adversarial review then proved that **false for copy sources** of parser-consumed formats — U3 never parses a byte-copy, so nothing covered them. The fix was to correct the *claim* (config-merge → U3's re-gate; copy-of-parser-consumed-format → a known best-effort gap closed at apply, tracked to an issue), not the code. A confident coverage claim in a security-boundary docstring that you have not checked against every path is a lie waiting to be believed — the same failure mode as claiming an unapplied fix (Axis 2).
 
 ## Why This Matters
 
@@ -88,9 +88,9 @@ Axis 2 (work):   safeParse(16 MiB of [null,null,…])        → millions of iss
                  quantifier bound {0,64}                    → false-negative + whack-a-mole (WRONG FIX)
                  single-pass linear scanner                 → the only real fix (DEFERRED, own unit)
 
-Axis 3 (scope):  docstring: "scans blueprint contents"      → reader assumes ALL forms   (BUG)
-                 docstring: "manifest raw+normalized, sources as bytes; config-source
-                 effective form scanned at U3 render (KTD7), a tested requirement"       (FIX)
+Axis 3 (scope):  docstring: "config sources covered at U3 render"  → FALSE for byte-copies (BUG)
+                 docstring: "manifest raw+normalized; text sources = bytes; config-merge
+                 → U3 re-gate (KTD7); copy-of-parser-format → known gap, closed at apply"  (FIX)
 ```
 
 Regression tests for the *fixed* axes live in `tests/provision-blueprint.test.ts` (Axis 1 escaped-secret → `secret-hit`; Axis 2 cardinality → `too-large`). The classifier ReDoS (Axis 2, second half) is **deferred, not fixed here** — a finite quantifier bound would regress detection, and the linear rewrite is its own unit.

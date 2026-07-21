@@ -51,7 +51,7 @@ const manifestHit =
 A byte cap on the input (here: a 16 MiB read cap, mirrored from `src/scan/internal.ts`) does not bound the work done over it. Two amplifiers surfaced:
 
 - **Validator issue-amplification.** `zod`'s `safeParse` materializes a validation issue *per invalid member*. A 16 MiB array of millions of nulls → millions of issue objects → OOM/stall, despite the byte cap. Fix: a **content-free cardinality preflight** that caps the array dimensions *before* the validator runs (`withinCardinalityBudget` in `src/provision/blueprint.ts` → returns `invalid: "too-large"`). The same caps bound the per-source read loop, so a manifest that declares a million sources is rejected before a million `stat`s happen.
-- **Classifier super-linearity (ReDoS-class).** A regex with unbounded greedy runs around a keyword — `[A-Za-z0-9_]*KEYWORD[A-Za-z0-9_]*…[:=]` — is O(n²) on keyword-dense input. It was fine for years because its *original* caller (capture-time, `src/capture/secret-classify.ts`) fed it small tool-output chunks; it became a multi-second hang the moment U10's gate ran it over whole files. Fix: bound the quantifiers (`{0,64}` — real secret-key identifiers are far shorter). ~7 ms on 1.1 MB after; unbounded, 500 KB did not finish in 30 s.
+- **Classifier super-linearity (ReDoS-class) — and why the "obvious" fix is a trap.** A regex with unbounded greedy runs around a keyword — `[A-Za-z0-9_]*KEYWORD[A-Za-z0-9_]*…[:=]` — is O(n²) on keyword-dense input. It was fine for years because its *original* caller (capture-time) fed it small tool-output chunks; it became a multi-second hang the moment a new caller ran it over whole files (500 KB of the keyword did not finish in 30 s). The tempting fix — bound the quantifiers (`* → {0,64}`) — is **wrong**, and adversarial review proved it empirically: any *finite* bound trades the hang for a **false-negative** (a secret whose identifier is longer than the bound now evades detection — and in a *shared* classifier, so capture-time redaction regresses too), and it is **whack-a-mole** (a second pattern, the JWT `eyJ…` alternative, is independently quadratic). The only fix that preserves BOTH no-hang and fail-closed detection is a **single-pass linear scanner** — a coherent redesign of the shared primitive, so it belongs in its own unit, not a review-fold. Deferred (issue #42); the gate does not modify the classifier. **The lesson: a quantifier bound is not a ReDoS fix for a *detector* — it converts a liveness bug into a correctness bug.**
 
 ### 3. Say what "certified" actually covers — defer the rest by construction, not by silence
 
@@ -84,15 +84,16 @@ Axis 1 (form):   raw-scan("model":"sk-ant-api03-…")  → no match → loaded  
 
 Axis 2 (work):   safeParse(16 MiB of [null,null,…])        → millions of issues → OOM   (BUG)
                  cardinality preflight before safeParse     → invalid:"too-large"        (FIX)
-                 classify("token " × 180k)                  → >30 s on 500 KB            (BUG)
-                 quantifiers {0,64}                         → ~7 ms on 1.1 MB            (FIX)
+                 classifier O(n^2) on keyword/eyJ-dense text→ hang on a large source     (BUG)
+                 quantifier bound {0,64}                    → false-negative + whack-a-mole (WRONG FIX)
+                 single-pass linear scanner                 → the only real fix (DEFERRED, own unit)
 
 Axis 3 (scope):  docstring: "scans blueprint contents"      → reader assumes ALL forms   (BUG)
                  docstring: "manifest raw+normalized, sources as bytes; config-source
                  effective form scanned at U3 render (KTD7), a tested requirement"       (FIX)
 ```
 
-Regression tests that lock each axis live in `tests/provision-blueprint.test.ts` (escaped-secret → `secret-hit`; cardinality → `too-large`; `containsSecret` runtime budget on keyword-dense input).
+Regression tests for the *fixed* axes live in `tests/provision-blueprint.test.ts` (Axis 1 escaped-secret → `secret-hit`; Axis 2 cardinality → `too-large`). The classifier ReDoS (Axis 2, second half) is **deferred, not fixed here** — a finite quantifier bound would regress detection, and the linear rewrite is its own unit.
 
 ## Related
 

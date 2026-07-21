@@ -627,16 +627,4 @@ describe("content heuristics (unit)", () => {
     expect(containsSecret('model = "gpt-5-codex"')).toBe(false);
     expect(containsSecret("# just some portable role prose\n")).toBe(false);
   });
-
-  test("containsSecret runs in linear time on keyword-dense input (ReDoS guard — the gate runs it over whole files)", () => {
-    // The keyword-assignment pattern was O(n^2) on keyword-dense input via unbounded greedy identifier runs;
-    // bounded to {0,64}. A ~1 MB file of the repeated keyword must classify far under budget — the front-gate
-    // runs this over every blueprint source up to the 16 MiB read cap. Unbounded, 500 KB did not finish in 30s.
-    const keywordDense = "token ".repeat(180_000); // ~1.1 MB, no [:=] → not a secret assignment
-    const start = performance.now();
-    const hit = containsSecret(keywordDense);
-    const elapsedMs = performance.now() - start;
-    expect(hit).toBe(false);
-    expect(elapsedMs).toBeLessThan(2000); // ~7ms in practice; 2s cleanly separates linear from the >30s quadratic
-  });
 });

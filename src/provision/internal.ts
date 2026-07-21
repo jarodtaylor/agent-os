@@ -74,7 +74,14 @@ export function hasMachineAbsolutePath(text: string): boolean {
 
 /** True when `classify` flags any secret pattern in `text`. The floor is irrelevant — we only test for the
  *  `"secret"` escalation — so any non-secret floor works. Reuses the capture-time classifier UNCHANGED
- *  (KTD5 — one classifier, one place to harden). */
+ *  (KTD5 — one classifier, one place to harden).
+ *
+ *  NO-HANG CAVEAT (issue #42; decision #45): the shared classifier has super-linear (ReDoS-class) regex
+ *  patterns on pathological keyword/`eyJ`-dense input. That was fine for its original small capture chunks,
+ *  but this gate runs it over whole source files up to the 16 MiB read cap, so a pathological LARGE own-file
+ *  source can stall the gate. Pre-existing and unmodified here — the correct fix is a single-pass linear
+ *  scanner (its own unit; a finite quantifier bound only trades the hang for a false-negative), deferred as a
+ *  scoped own-files defer. Real blueprint sources are small prose/config, so this is not a live risk. */
 export function containsSecret(text: string): boolean {
   return classify(text, "path") === "secret";
 }

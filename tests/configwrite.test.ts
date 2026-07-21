@@ -1279,6 +1279,19 @@ describe("writeTextFile batch identity (KTD2) — recorded only when supplied", 
     expect(existsSync(target)).toBe(false); // never created
   });
 
+  test("a TRUTHY non-string batch value (past the TS types) is refused, not stamped into an un-readable row", () => {
+    // The UndoEntry read schema keeps only non-empty STRINGS, so a number/object that slipped past the compile
+    // types (`as any`, a JS caller) would append a row listUndo silently drops — un-undoable. The guard checks
+    // typeof, not just truthiness, so it fails closed before any file work.
+    const target = join(configsDir, "ROLE.md");
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect(() => writeTextFile(target, "x\n", { dataDir, batchId: 1 as any, projectRoot: "/p" })).toThrow(/both-or-neither/);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect(() => writeTextFile(target, "x\n", { dataDir, batchId: "run-1", projectRoot: {} as any })).toThrow(/both-or-neither/);
+    expect(existsSync(target)).toBe(false); // never created
+    expect(listUndo(dataDir)).toEqual([]); // no un-readable row appended
+  });
+
   test("mergeConfig enforces the same both-or-neither rule (shared publish guard)", () => {
     const target = seed("settings.json", JSON.stringify({ a: 1 }, null, 2) + "\n");
     expect(() => mergeConfig(target, { b: 2 }, { dataDir, batchId: "", projectRoot: "/p" })).toThrow(/both-or-neither/);

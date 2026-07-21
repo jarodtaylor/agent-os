@@ -11,10 +11,12 @@
  *   parse (fail CLOSED on a corrupt config) → transform (merge or remove) → serialize
  *   → short-circuit if the result already matches disk → byte-exact backup → atomic temp-write+rename
  *   → journal the undo entry.
- * The `text` format is the one exception to two of those steps: its parse and serialize are IDENTITY on raw
- * bytes — no fail-closed parsing to trip, no trailing-newline canonicalization — so a copy lands byte-exact
- * and a re-write of identical bytes still no-ops; the backup / atomic-rename / journal / undo half is shared
- * unchanged. It has no merge/removal semantics, so `mergeConfig`/`removeConfigKeys` refuse it (see `publish`).
+ * The `text` format is the one exception to two of those steps: it treats the file as one opaque string — its
+ * parse and serialize are IDENTITY (no fail-closed parsing to trip, no trailing-newline canonicalization) — so
+ * a copy of valid-UTF-8 content round-trips byte-for-byte; the backup / atomic-rename / journal / undo half is
+ * shared unchanged. Byte-identity of the idempotence check is enforced separately, by the byte-exact no-op
+ * comparison below (a string compare would be lossy on invalid UTF-8). It has no merge/removal semantics, so
+ * `mergeConfig`/`removeConfigKeys` refuse it (see `publish`).
  *
  * Two invariants make this safe to point at a live setup:
  *   1. The ORIGINAL FILE IS UNTOUCHED until the final atomic rename. A throw at any earlier step —
@@ -259,14 +261,16 @@ function publish(
       `configwrite: '${targetPath}' resolves to the whole-file 'text' format, which mergeConfig/removeConfigKeys cannot handle — use writeTextFile`,
     );
   }
-  // Batch identity (KTD2) is both-or-neither and non-empty. `publish` stamps opts.batchId/projectRoot straight
-  // into the UndoEntry, whose read schema (undo.ts) requires NON-EMPTY strings — so a partial or empty-string
-  // batch value would append a journal row that `listUndo` then silently rejects, leaving the mutation
-  // applied-but-un-undoable (a success return + undoId that resolves to nothing). Fail CLOSED here, before any
-  // file work, matching the engine's parse-fail-closed discipline — the invariant holds at the write boundary
-  // even though the only batch producer (U5) will always pass well-formed UUID + project root.
+  // Batch identity (KTD2) is both-or-neither and NON-EMPTY STRINGS. `publish` stamps opts.batchId/projectRoot
+  // straight into the UndoEntry, whose read schema (undo.ts) requires non-empty strings — so ANY value that
+  // schema would reject (undefined, "", or a truthy NON-STRING like a number/object slipped past the TS types)
+  // must be refused HERE, or the write appends a journal row that `listUndo` silently drops, leaving the
+  // mutation applied-but-un-undoable (a success return + undoId that resolves to nothing). Fail CLOSED before
+  // any file work, matching the engine's parse-fail-closed discipline — the invariant holds at the write
+  // boundary even though the only batch producer (U5) will always pass a well-formed UUID + project root.
+  const isBatchKey = (v: unknown): boolean => typeof v === "string" && v.length > 0;
   const hasBatch = opts.batchId !== undefined || opts.projectRoot !== undefined;
-  if (hasBatch && (!opts.batchId || !opts.projectRoot)) {
+  if (hasBatch && (!isBatchKey(opts.batchId) || !isBatchKey(opts.projectRoot))) {
     throw new Error(
       "configwrite: a batched write requires both batchId and projectRoot to be non-empty strings (both-or-neither)",
     );
@@ -583,7 +587,7 @@ function parseConfig(format: ConfigFormat, text: string, path: string): unknown 
       case "yaml":
         return parseYaml(text);
       case "text":
-        return text; // opaque whole-file: the parsed value IS the raw bytes (identity, never throws)
+        return text; // opaque whole-file: no structured parse — the decoded content passes through as-is (identity, never throws)
       default:
         return assertNever(format);
     }
@@ -598,10 +602,11 @@ function parseConfig(format: ConfigFormat, text: string, path: string): unknown 
 }
 
 function serializeConfig(format: ConfigFormat, value: unknown): string {
-  // Whole-file `text` (KTD1): the value IS the full rendered content — return it VERBATIM, before the
+  // Whole-file `text` (KTD1): the value IS the full rendered content string — return it VERBATIM, before the
   // structured-format switch and its trailing-newline canonicalization below. Load-bearing: verbatim output
-  // keeps a copy byte-identical to its source (even with zero or multiple trailing newlines) and makes a
-  // re-apply a true no-op via publish's byte-compare. writeTextFile is the only producer, and its transform
+  // preserves the caller's string exactly (even with zero or multiple trailing newlines), so a copy of valid-
+  // UTF-8 content stays byte-identical and a re-apply is a true no-op via publish's byte-compare. writeTextFile
+  // is the only producer, and its transform
   // returns a string, so `value` is always a string here.
   if (format === "text") return value as string;
   let text: string;

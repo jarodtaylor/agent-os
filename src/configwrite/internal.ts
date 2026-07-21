@@ -16,9 +16,11 @@ import * as z from "zod";
 export { resolveDataDir } from "../paths";
 
 /** The formats the engine can write. JSON is native; TOML/YAML go through their libs; `text` is the
- *  opaque whole-file format (KTD1) — parse/serialize are identity on raw bytes, no merge semantics, so a
- *  markdown role file or an extension-less config gets the same backup/atomic-write/undo discipline as a
- *  structured config. `text` is never inferred from an extension; a caller (writeTextFile) forces it. */
+ *  opaque whole-file format (KTD1) — its content is treated as one opaque string (no structured parse or
+ *  merge, no trailing-newline canonicalization), so a markdown role file or an extension-less config gets the
+ *  same backup/atomic-write/undo discipline as a structured config. Byte-identity is enforced separately, by
+ *  the byte-exact no-op comparison in `publish` (not by parse/serialize, which round-trip the decoded string).
+ *  `text` is never inferred from an extension; a caller (writeTextFile) forces it. */
 export const ConfigFormat = z.enum(["json", "toml", "yaml", "text"]);
 export type ConfigFormat = z.infer<typeof ConfigFormat>;
 

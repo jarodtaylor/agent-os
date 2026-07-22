@@ -27,6 +27,7 @@
 import { randomUUID } from "node:crypto";
 import { lstatSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, posix } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import {
   AppliedButUnjournaledError,
   mergeConfig,
@@ -37,8 +38,8 @@ import {
 } from "../configwrite/index";
 import type { Manifest, Runtime } from "../contract/index";
 import { diffRendered, type DestinationRead, type DestinationReader, type DiffError, type PlanAction } from "./diff";
-import { errorText, isNotFound, readFileBounded } from "./internal";
-import { renderBlueprint, type RenderError, type RenderedFile, type RenderIo } from "./render";
+import { containsSecret, errorText, isNotFound, readFileBounded } from "./internal";
+import { isPlainRecord, parseConfigValue, renderBlueprint, type RenderError, type RenderedFile, type RenderIo } from "./render";
 import {
   checkTargetCompatibility,
   resolveTarget,
@@ -145,46 +146,112 @@ export function apply(input: ApplyInput, options: ApplyOptions = {}): ApplyOutco
   }
   const rows = diffed.rows;
 
-  // ── Preflight, phase 3: resolve + compatibility for every non-noop / non-scaffold-skip target ──
+  // ── Preflight, phase 3: resolve every row; for non-skip rows run compat → shape-guard → effective-scan ──
   const inspection = realInspection();
   const targets: Array<ResolvedTarget | null> = new Array(files.length).fill(null);
   const preflightFailures: Array<{ path: string; error: string }> = [];
-  // Group the transforms of every non-skip row by its resolved destination, so a blueprint where two writers
-  // fight over one destination can be refused before any write (see the duplicate-destination guard below).
-  const contributorsByDestination = new Map<string, RenderedFile["transform"][]>();
+  // Group the CONTRIBUTORS of every row (including noop / scaffold-skip rows) by resolved destination. Grouping
+  // must span ALL rows, not just non-skip ones: a whole-file writer whose content already matches disk currently
+  // diffs to `noop`, and if that row were invisible to the guard, two whole-file writers to one destination
+  // could escape detection and oscillate on later applies. A skip row is still a contributor if it resolves.
+  const contributorsByDestination = new Map<string, Contributor[]>();
   for (let i = 0; i < files.length; i++) {
-    if (isSkip(rows[i]!.action)) continue;
     const file = files[i]!;
+    const skip = isSkip(rows[i]!.action);
     const absPath = posix.join(projectRoot, file.destination);
+
+    // Resolve for grouping. A non-provisionable / unresolvable destination is a HARD failure for a non-skip row
+    // (it names a write we cannot perform); for a skip row it simply is not a contributor — there is nothing it
+    // would write, so a stray unresolvable noop must not abort an otherwise-valid blueprint.
     if (!isProvisionHarness(file.harness)) {
-      preflightFailures.push({ path: absPath, error: `role '${file.role}' targets non-provisionable harness '${file.harness}'` });
+      if (!skip) preflightFailures.push({ path: absPath, error: `role '${file.role}' targets non-provisionable harness '${file.harness}'` });
       continue;
     }
     const target = resolveTarget(projectRoot, file.harness, file.destination);
     if (!target) {
-      preflightFailures.push({ path: absPath, error: `destination '${file.destination}' does not resolve to a known ${file.harness} surface` });
+      if (!skip) preflightFailures.push({ path: absPath, error: `destination '${file.destination}' does not resolve to a known ${file.harness} surface` });
       continue;
     }
+    const contributors = contributorsByDestination.get(target.destination) ?? [];
+    contributors.push({ transform: file.transform, patch: file.transform === "config-merge" ? file.patch : undefined });
+    contributorsByDestination.set(target.destination, contributors);
+    if (skip) continue; // compat / shape-guard / effective-scan / write are for NON-SKIP rows only
+
     const compat = checkTargetCompatibility(target, inspection);
     if (!compat.compatible) {
       preflightFailures.push({ path: target.destination, error: compat.message });
       continue;
     }
-    targets[i] = target;
-    const contributors = contributorsByDestination.get(target.destination) ?? [];
-    contributors.push(file.transform);
-    contributorsByDestination.set(target.destination, contributors);
+
+    // Transform-vs-surface-shape clobber guard (brief FOLD 3): a whole-file transform (copy/compose/scaffold)
+    // overwrites the ENTIRE file, so aiming one at a `shape:"merge"` surface (`.cursor/mcp.json`, `.mcp.json`,
+    // the `.codex/config.toml` MCP tables) would clobber the user's own foreign content in that shared config.
+    // Only `config-merge` may write a merge surface. Content-free: names the surface label + offending transform.
+    if (file.transform !== "config-merge" && target.surface.shape === "merge") {
+      preflightFailures.push({
+        path: target.destination,
+        error: `whole-file transform '${file.transform}' cannot target merge surface '${target.surface.label}' — only config-merge may write a shared merge surface`,
+      });
+      continue;
+    }
+
+    // Effective-form secret scan (issue #43, brief FOLD 1): apply is the FIRST code that writes parser-consumed
+    // formats to disk, so it must scan the DECODED/effective form of every json|toml|yaml write — a secret hidden
+    // behind an encoding escape (JSON `\uXXXX`) slips past the raw front-gate (which scans source BYTES at the
+    // U6/U7 verb boundary) but not a scan of what the parser will actually materialize. `text` surfaces have no
+    // decode path, so the front-gate covers them and we skip. Fail CLOSED on a hit OR an unparseable source.
+    // The `JSON.stringify` below is total for every REACHABLE input: JSON never yields a BigInt, smol-toml
+    // REJECTS any non-losslessly-representable integer at parse time (so a big-int toml fails closed as
+    // unparseable / malformed-source before this runs), and no registry surface is yaml — so no `BigInt` value
+    // can reach `stringify` to throw. (Reachable formats are asserted text/json/toml by a dedicated test.)
+    const format = target.surface.format;
+    if (format !== "text") {
+      if (file.transform === "config-merge") {
+        // Scan ONLY the patch WE contribute — render already parsed it. NEVER the merge result or the existing
+        // disk content: foreign config legitimately holds the user's OWN secrets, and scanning it would
+        // false-positive on real user configs. This keeps the gate a secret-EGRESS check, not a secret detector.
+        if (containsSecret(JSON.stringify(file.patch))) {
+          preflightFailures.push({ path: target.destination, error: secretMessage(file.role, target.destination) });
+          continue;
+        }
+      } else if (file.content !== null) {
+        // A whole-file write to a config-format surface (e.g. a copy onto `.codex/agents/*.toml`): render did NOT
+        // parse it, so decode HERE and scan the effective value. Unparseable ⇒ fail closed — bytes we cannot
+        // decode are bytes we cannot certify secret-free.
+        const parsed = parseConfigValue(format, file.content);
+        if (!parsed.ok) {
+          preflightFailures.push({ path: target.destination, error: `unparseable ${format} config source at '${target.destination}'` });
+          continue;
+        }
+        if (containsSecret(JSON.stringify(parsed.value))) {
+          preflightFailures.push({ path: target.destination, error: secretMessage(file.role, target.destination) });
+          continue;
+        }
+      }
+    }
+
+    targets[i] = target; // fully validated — the write pass may use it
   }
-  // Duplicate-destination guard (brief pt 3 corollary): 2+ non-skip rows resolving to ONE destination compose
-  // safely ONLY when every writer is `config-merge` (the shared `.cursor/mcp.json` multi-role registration).
-  // The moment a whole-file copy/compose/scaffold shares that destination, the blueprint is last-writer-wins
-  // and could silently drop a role's content — refuse it loudly, before any write, like every other preflight
-  // failure. The legal all-config-merge case is untouched.
-  for (const [destination, transforms] of contributorsByDestination) {
-    if (transforms.length >= 2 && !transforms.every((t) => t === "config-merge")) {
+  // Duplicate-destination guards (brief pt 3 corollary + FOLD 2) over the FULL contributor set per destination.
+  for (const [destination, contributors] of contributorsByDestination) {
+    if (contributors.length < 2) continue;
+    // (B) 2+ rows compose safely ONLY when every writer is `config-merge` (the shared `.cursor/mcp.json`
+    // multi-role registration). A whole-file copy/compose/scaffold sharing that destination is last-writer-wins
+    // and could silently drop a role's content — refuse it loudly, before any write.
+    if (!contributors.every((c) => c.transform === "config-merge")) {
       preflightFailures.push({
         path: destination,
-        error: `${transforms.length} non-mergeable writers target '${destination}' — an ambiguous, last-writer-wins blueprint (only all-config-merge rows may share a destination)`,
+        error: `${contributors.length} non-mergeable writers target '${destination}' — an ambiguous, last-writer-wins blueprint (only all-config-merge rows may share a destination)`,
+      });
+      continue;
+    }
+    // (C) all config-merge, but two patches disagree on a shared leaf ⇒ order-dependent last-writer-wins ON that
+    // leaf, which oscillates across applies. Disjoint patches (two different mcp server keys) never conflict and
+    // compose safely; any conflicting pair refuses the whole blueprint. Content-free — names only the destination.
+    if (anyPatchesConflict(contributors.map((c) => c.patch!))) {
+      preflightFailures.push({
+        path: destination,
+        error: `conflicting config-merge patches target '${destination}' — two rows disagree on a shared config leaf`,
       });
     }
   }
@@ -253,6 +320,46 @@ export function apply(input: ApplyInput, options: ApplyOptions = {}): ApplyOutco
   }
 
   return { batchId, applied, noops, failed: [], rolledBack: false };
+}
+
+/** One row that resolves to a shared destination. `patch` is present ONLY for a `config-merge` contributor,
+ *  so the leaf-conflict guard can compare what each merge row would contribute without re-reading the render. */
+type Contributor = { transform: RenderedFile["transform"]; patch?: Record<string, unknown> };
+
+/** The content-free preflight message for an effective-form secret hit (brief FOLD 1). Names the role + the
+ *  destination path only — NEVER the secret bytes or any other file content (threat model: no secret escapes). */
+function secretMessage(role: string, destination: string): string {
+  return `role '${role}' → '${destination}': effective/decoded form contains a secret`;
+}
+
+/** True when any pair among these `config-merge` patches disagrees on a shared leaf. O(n²) pairwise, but a
+ *  destination's contributor count is tiny (one row per role), so the simple form is correct and cheap. */
+function anyPatchesConflict(patches: ReadonlyArray<Record<string, unknown>>): boolean {
+  for (let a = 0; a < patches.length; a++) {
+    for (let b = a + 1; b < patches.length; b++) {
+      if (patchesConflict(patches[a]!, patches[b]!)) return true;
+    }
+  }
+  return false;
+}
+
+/** Pure structural conflict test for two `config-merge` patches (brief FOLD 2C). Recurse both plain objects; for
+ *  a key present in BOTH, if both values are plain objects recurse, else conflict iff the two values are not
+ *  deep-equal. Disjoint keys (two different mcp server keys) never overlap on a leaf, so they compose safely —
+ *  that is the legal multi-role registration into one shared config. Mirrors the engine's deep-merge leaf
+ *  semantics, so the guard refuses exactly the patches a real apply would resolve last-writer-wins. */
+function patchesConflict(a: Record<string, unknown>, b: Record<string, unknown>): boolean {
+  for (const key of Object.keys(a)) {
+    if (!Object.hasOwn(b, key)) continue;
+    const av = a[key];
+    const bv = b[key];
+    if (isPlainRecord(av) && isPlainRecord(bv)) {
+      if (patchesConflict(av, bv)) return true;
+    } else if (!isDeepStrictEqual(av, bv)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /** Dispatch one rendered file to the engine by transform (brief WRITE-PASS RULES). */

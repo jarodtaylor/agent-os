@@ -650,6 +650,177 @@ describe("provision runs — KTD2 fresh-process batch view", () => {
   });
 });
 
+describe("provision apply — FOLD1 effective-form secret scan (issue #43)", () => {
+  // The whole-file (copy/scaffold) cases target `.codex/agents/*.toml` — the ONLY create-shaped config-format
+  // surface in the registry — so the effective-form scan (#1) is the gate. A copy of a `.json` source can only
+  // resolve to a merge-shaped surface (`.mcp.json`/`.cursor/mcp.json`) and is refused by the shape guard (#3)
+  // first, so it could never isolate #1. The config-merge case keeps JSON — the truest #43 repro.
+  test("a copy whose DECODED config value hides a secret behind a TOML \\u escape is refused; zero writes", () => {
+    // On disk the source holds `sk-ant-…` (double backslash → literal escape), so a raw byte-scan misses
+    // it; apply must decode via parseConfigValue and scan the effective value. Key `x` is not a secret keyword,
+    // so the RAW bytes contain no secret at all — only the decoded form does. That isolates the #43 gap.
+    wBlueprint("evil.toml", 'x = "\\u0073k-ant-api03-AAAAAAAAAAAAAAAAAAAA"\n');
+    const manifest: Manifest = {
+      schemaVersion: 1,
+      roles: [{ name: "executor", harness: "codex", files: [{ transform: "copy", source: "evil.toml", destination: ".codex/agents/evil.toml" }] }],
+    };
+    const outcome = apply({ manifest, blueprintRoot, projectRoot, dataDir });
+    expect(outcome.failed).toHaveLength(1);
+    expect(outcome.failed[0]!.path).toBe(join(projectRoot, ".codex/agents/evil.toml"));
+    expect(outcome.failed[0]!.error).toContain("effective/decoded form contains a secret");
+    expect(outcome.failed[0]!.error).not.toContain("sk-ant"); // content-free: NO secret bytes in the message
+    expect(outcome.applied).toEqual([]);
+    expect(existsProject(".codex/agents/evil.toml")).toBe(false);
+    expect(readBatches(dataDir)).toEqual([]);
+  });
+
+  test("a config-merge whose patch decodes to a secret (JSON \\u escape) is refused; zero writes", () => {
+    wBlueprint("mcp.json", '{"mcpServers":{"x":{"headers":{"Authorization":"Bearer \\u0073k-ant-api03-AAAAAAAAAAAAAAAAAAAA"}}}}');
+    const manifest: Manifest = {
+      schemaVersion: 1,
+      roles: [{ name: "qa", harness: "cursor", files: [{ transform: "config-merge", source: "mcp.json", destination: ".cursor/mcp.json" }] }],
+    };
+    const outcome = apply({ manifest, blueprintRoot, projectRoot, dataDir });
+    expect(outcome.failed).toHaveLength(1);
+    expect(outcome.failed[0]!.path).toBe(join(projectRoot, ".cursor/mcp.json"));
+    expect(outcome.failed[0]!.error).toContain("effective/decoded form contains a secret");
+    expect(outcome.failed[0]!.error).not.toContain("sk-ant"); // content-free
+    expect(outcome.applied).toEqual([]);
+    expect(existsProject(".cursor/mcp.json")).toBe(false);
+  });
+
+  test("an UNPARSEABLE config-format copy source fails closed in preflight; zero writes", () => {
+    wBlueprint("broken.toml", "this is = = not valid toml [[[\n");
+    const manifest: Manifest = {
+      schemaVersion: 1,
+      roles: [{ name: "executor", harness: "codex", files: [{ transform: "copy", source: "broken.toml", destination: ".codex/agents/broken.toml" }] }],
+    };
+    const outcome = apply({ manifest, blueprintRoot, projectRoot, dataDir });
+    expect(outcome.failed).toHaveLength(1);
+    expect(outcome.failed[0]!.error).toContain("unparseable toml config source");
+    expect(outcome.applied).toEqual([]);
+    expect(existsProject(".codex/agents/broken.toml")).toBe(false);
+  });
+
+  test("a CLEAN config source still applies normally (the scan does not over-fire)", () => {
+    wBlueprint("clean.json", JSON.stringify({ mcpServers: { ok: { command: "run" } } }));
+    const manifest: Manifest = {
+      schemaVersion: 1,
+      roles: [{ name: "qa", harness: "cursor", files: [{ transform: "config-merge", source: "clean.json", destination: ".cursor/mcp.json" }] }],
+    };
+    const outcome = apply({ manifest, blueprintRoot, projectRoot, dataDir });
+    expect(outcome.failed).toEqual([]);
+    expect(outcome.applied).toHaveLength(1);
+    expect((parseJsonProject(".cursor/mcp.json").mcpServers as Record<string, unknown>).ok).toEqual({ command: "run" });
+  });
+});
+
+describe("provision apply — FOLD2 duplicate-destination (group ALL rows + config-merge leaf conflict)", () => {
+  test("two whole-file copies to ONE destination, one already matching disk (diffs noop), are STILL refused", () => {
+    // The noop row is invisible if grouping skips noops — this proves the group-ALL-rows fix: two whole-file
+    // writers to one destination must be caught even when one currently oscillates to a no-op.
+    wBlueprint("same.md", "shared\n");
+    wBlueprint("other.md", "different\n");
+    mkdirSync(join(projectRoot, ".claude", "agents"), { recursive: true });
+    wProject(".claude/agents/dup.md", "shared\n"); // makes the first copy diff to noop
+    const manifest: Manifest = {
+      schemaVersion: 1,
+      roles: [
+        {
+          name: "architect",
+          harness: "claude-code",
+          files: [
+            { transform: "copy", source: "same.md", destination: ".claude/agents/dup.md" },
+            { transform: "copy", source: "other.md", destination: ".claude/agents/dup.md" },
+          ],
+        },
+      ],
+    };
+    const outcome = apply({ manifest, blueprintRoot, projectRoot, dataDir });
+    expect(outcome.failed).toHaveLength(1);
+    expect(outcome.failed[0]!.path).toBe(join(projectRoot, ".claude/agents/dup.md"));
+    expect(outcome.failed[0]!.error).toContain("non-mergeable");
+    expect(outcome.applied).toEqual([]);
+    expect(rProject(".claude/agents/dup.md")).toBe("shared\n"); // untouched
+    expect(readBatches(dataDir)).toEqual([]);
+  });
+
+  test("two config-merge rows to one destination that CONFLICT on a leaf are refused; zero writes", () => {
+    wBlueprint("c1.json", JSON.stringify({ mcpServers: { shared: { command: "one" } } }));
+    wBlueprint("c2.json", JSON.stringify({ mcpServers: { shared: { command: "two" } } }));
+    const manifest: Manifest = {
+      schemaVersion: 1,
+      roles: [
+        {
+          name: "qa",
+          harness: "cursor",
+          files: [
+            { transform: "config-merge", source: "c1.json", destination: ".cursor/mcp.json" },
+            { transform: "config-merge", source: "c2.json", destination: ".cursor/mcp.json" },
+          ],
+        },
+      ],
+    };
+    const outcome = apply({ manifest, blueprintRoot, projectRoot, dataDir });
+    expect(outcome.failed).toHaveLength(1);
+    expect(outcome.failed[0]!.path).toBe(join(projectRoot, ".cursor/mcp.json"));
+    expect(outcome.failed[0]!.error).toContain("conflicting config-merge");
+    expect(outcome.applied).toEqual([]);
+    expect(existsProject(".cursor/mcp.json")).toBe(false);
+  });
+
+  test("two config-merge rows to one destination with DISJOINT keys still apply (legal multi-role registration)", () => {
+    wBlueprint("d1.json", JSON.stringify({ mcpServers: { alpha: { command: "1" } } }));
+    wBlueprint("d2.json", JSON.stringify({ mcpServers: { beta: { command: "2" } } }));
+    const manifest: Manifest = {
+      schemaVersion: 1,
+      roles: [
+        {
+          name: "qa",
+          harness: "cursor",
+          files: [
+            { transform: "config-merge", source: "d1.json", destination: ".cursor/mcp.json" },
+            { transform: "config-merge", source: "d2.json", destination: ".cursor/mcp.json" },
+          ],
+        },
+      ],
+    };
+    const outcome = apply({ manifest, blueprintRoot, projectRoot, dataDir });
+    expect(outcome.failed).toEqual([]);
+    const servers = parseJsonProject(".cursor/mcp.json").mcpServers as Record<string, unknown>;
+    expect(servers.alpha).toEqual({ command: "1" });
+    expect(servers.beta).toEqual({ command: "2" });
+  });
+});
+
+describe("provision apply — FOLD3 transform-vs-surface-shape clobber guard", () => {
+  test("a whole-file copy targeting a merge-shaped surface (.cursor/mcp.json) is refused; zero writes", () => {
+    wBlueprint("whole.json", JSON.stringify({ mcpServers: { y: { command: "z" } } }));
+    const manifest: Manifest = {
+      schemaVersion: 1,
+      roles: [{ name: "qa", harness: "cursor", files: [{ transform: "copy", source: "whole.json", destination: ".cursor/mcp.json" }] }],
+    };
+    const outcome = apply({ manifest, blueprintRoot, projectRoot, dataDir });
+    expect(outcome.failed).toHaveLength(1);
+    expect(outcome.failed[0]!.path).toBe(join(projectRoot, ".cursor/mcp.json"));
+    expect(outcome.failed[0]!.error).toContain("merge surface");
+    expect(outcome.failed[0]!.error).toContain("copy"); // names the offending transform
+    expect(outcome.applied).toEqual([]);
+    expect(existsProject(".cursor/mcp.json")).toBe(false);
+  });
+
+  test("a config-merge targeting the same merge-shaped surface is allowed", () => {
+    wBlueprint("merge.json", JSON.stringify({ mcpServers: { y: { command: "z" } } }));
+    const manifest: Manifest = {
+      schemaVersion: 1,
+      roles: [{ name: "qa", harness: "cursor", files: [{ transform: "config-merge", source: "merge.json", destination: ".cursor/mcp.json" }] }],
+    };
+    const outcome = apply({ manifest, blueprintRoot, projectRoot, dataDir });
+    expect(outcome.failed).toEqual([]);
+    expect(outcome.applied).toHaveLength(1);
+  });
+});
+
 describe("provision apply — YAML round-trip reachability (documented)", () => {
   test("no registry surface is YAML, so YAML apply→apply is unreachable at the apply seam (covered at the U2 engine layer)", () => {
     // KTD1's `text` format and U2 prove the yaml write/undo path at the engine; U5's apply can only write

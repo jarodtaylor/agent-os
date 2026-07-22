@@ -48,6 +48,14 @@ export function readBatches(dataDir?: string): ProvisionBatch[] {
  * The newest batch for a project: the batch of the LAST-APPEARING journal entry for `projectRoot` (journal
  * order, NOT `max(ts)` — that avoids ms-tie/clock-skew misordering). `null` when the project has no batch.
  * One journal read: the entries found here are reused to build the batch (no second `listUndo` pass).
+ *
+ * HONESTY CAVEAT (deferred, no fix here): "newest" is the newest JOURNALED batch, not the newest SUCCESSFUL
+ * one. A failed apply rolls back in-process but its reversed entries STAY in the append-only journal, so that
+ * rolled-back batch is the last-appearing one and becomes the default undo target — its already-reversed
+ * entries then report `superseded`/`reversed:[]` (an honest no-op), never data loss or a false success. An
+ * operator wanting to undo the last SUCCESSFUL apply must pass that batch id explicitly to `undoBatch`. The
+ * durable fix (a batch terminal-state / run-status so default selection can skip a rolled-back batch) lands
+ * with the U6 CLI undo verb; do NOT change the selection logic before then.
  */
 export function newestBatchForProject(projectRoot: string, dataDir?: string): ProvisionBatch | null {
   const entries = listUndo(dataDir);
@@ -75,6 +83,12 @@ export interface UndoOutcome {
  * Reverse a project's batch, newest-first. `batchId` selects the batch (default: the project's newest); the
  * default is the operator's `undo`, and passing an OLDER batch's id is how a specific run is unwound — that is
  * the path that surfaces `superseded` entries when a newer batch already overwrote a shared target.
+ *
+ * DEFAULT-SELECTION CAVEAT (see `newestBatchForProject`): the default targets the newest JOURNALED batch, not
+ * the newest SUCCESSFUL one. After a FAILED + rolled-back apply, that rolled-back batch is newest in the
+ * append-only journal, so a bare `undoBatch(projectRoot, dataDir)` selects it and reports an honest no-op
+ * (`superseded`/`reversed:[]`) rather than undoing the prior successful run — pass that run's batch id
+ * explicitly to unwind it. Deferred; the durable fix (durable batch terminal-state) lands with the U6 CLI verb.
  */
 export function undoBatch(projectRoot: string, dataDir?: string, batchId?: string): UndoOutcome {
   const batch = batchId

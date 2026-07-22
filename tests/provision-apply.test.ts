@@ -1096,11 +1096,11 @@ describe("issue #50 — default undo targets the newest COMMITTED batch", () => 
     expect(newestBatchForProject(projectRoot, dataDir)?.batchId).toBe(a.batchId!);
   });
 
-  test("a duplicate status line OUT OF ts ORDER loses to the newer record — resolution is ts, never read order", () => {
-    // `apply` writes one record per batch, so a duplicate only arrives by hand-edit or crash — precisely the
-    // untrusted-input case this reader is validated for. An older `rolled-back` line appended AFTER the real
-    // `committed` one must not win: a plain last-line-wins overwrite would silently exclude a live batch from
-    // default undo, stranding it behind an explicit `--batch` id.
+  test("a lifecycle transition resolves by APPEND ORDER even when its clock went backwards", () => {
+    // Gate round 2: `ts` was the tiebreak, so a backward clock between the `apply` and the `undo` that spent
+    // the batch left the older `committed` record outranking the newer `undone` one FOREVER — the batch was
+    // never skipped, bare `undo` re-selected the spent batch every run, and older history stayed unreachable
+    // behind it. Append order is the causal order the transitions happened in, and is clock-independent.
     wBlueprint("first.md", "# Executor\n");
     const a = apply({
       manifest: { schemaVersion: 1, roles: [{ name: "executor", harness: "codex", files: [{ transform: "copy", source: "first.md", destination: "AGENTS.md" }] }] },
@@ -1108,10 +1108,14 @@ describe("issue #50 — default undo targets the newest COMMITTED batch", () => 
       projectRoot,
       dataDir,
     });
-    appendFileSync(batchStatusPath(dataDir), `${JSON.stringify({ batchId: a.batchId, projectRoot, status: "rolled-back", ts: 1 })}\n`);
+    expect(readBatchStatuses(dataDir).get(a.batchId!)?.status).toBe("committed");
 
-    expect(newestBatchForProject(projectRoot, dataDir)?.batchId).toBe(a.batchId!);
-    expect(undoBatch(projectRoot, dataDir).reversed).toEqual([join(projectRoot, "AGENTS.md")]);
+    // The `undone` transition lands LATER in the file but carries an EARLIER wall clock (ts: 1).
+    appendFileSync(batchStatusPath(dataDir), `${JSON.stringify({ batchId: a.batchId, projectRoot, status: "undone", ts: 1 })}\n`);
+
+    expect(readBatchStatuses(dataDir).get(a.batchId!)?.status).toBe("undone");
+    // …and the consumer agrees: a spent batch is skipped by default selection despite the older timestamp.
+    expect(newestBatchForProject(projectRoot, dataDir)).toBeNull();
   });
 });
 
@@ -1572,5 +1576,80 @@ describe("gate finding 4 — a run that journals nothing advertises no batch", (
     expect(outcome.batchId).not.toBeNull();
     expect(readBatches(dataDir).map((b) => b.batchId)).toContain(outcome.batchId!);
     expect(readBatchStatuses(dataDir).get(outcome.batchId!)?.status).toBe("rolled-back");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Cross-model gate round 2, finding 3: a MIXED batch — some writes journaled, one applied-but-unjournaled —
+// could be retired as fully `undone`. `undo` reverses only what the journal shows, so reversing every visible
+// entry left the invisible survivor live while the durable record claimed the batch held nothing. Future bare
+// undos then skipped it, and the last trace of the stranded file was gone. Reachable from an ORDINARY journal
+// append failure (a full disk mid-batch) — no attacker, so squarely inside decision #45.
+// ─────────────────────────────────────────────────────────────────────────────
+describe("gate round 2 finding 3 — a batch with an unjournaled survivor is never retired as undone", () => {
+  test("undoing every journaled entry does NOT record `undone` while a survivor is live", () => {
+    wBlueprint("first.md", "# Executor\n");
+    wBlueprint("second.md", "stranded survivor\n");
+    // Row 1 journals normally; row 2 LANDS but its journal append fails — the mixed batch the gate describes.
+    const flaky: ProvisionEngine = {
+      mergeConfig,
+      writeTextFile: (t, c, o) => {
+        // The survivor must land WITHOUT a journal entry, or the fixture is not the bug: calling the real
+        // `writeTextFile` first would journal it, and `undo` would then reverse it like any other row. Write
+        // the bytes directly and throw — exactly what production leaves behind when the rename succeeds and
+        // the journal append then fails.
+        if (t.endsWith(".cursor/agents/qa.md")) {
+          mkdirSync(dirname(t), { recursive: true });
+          writeFileSync(t, c);
+          throw new AppliedButUnjournaledError(t, null, new Error("injected journal failure"));
+        }
+        return writeTextFile(t, c, o);
+      },
+    };
+    const outcome = apply(
+      {
+        manifest: {
+          schemaVersion: 1,
+          roles: [
+            { name: "executor", harness: "codex", files: [{ transform: "copy", source: "first.md", destination: "AGENTS.md" }] },
+            { name: "qa", harness: "cursor", files: [{ transform: "copy", source: "second.md", destination: ".cursor/agents/qa.md" }] },
+          ],
+        },
+        blueprintRoot,
+        projectRoot,
+        dataDir,
+      },
+      { engine: flaky },
+    );
+
+    // The apply SUCCEEDED — one journaled write, one live-but-un-undoable survivor.
+    expect(outcome.batchId).not.toBeNull();
+    expect(outcome.applied.filter((w) => w.unjournaled)).toHaveLength(1);
+    expect(readBatchStatuses(dataDir).get(outcome.batchId!)?.stranded).toBe(true);
+
+    // Undo reverses every entry the journal HAS, and reports a clean sweep of them…
+    const undone = undoBatch(projectRoot, dataDir);
+    expect(undone.failed).toEqual([]);
+    expect(undone.superseded).toEqual([]);
+    expect(undone.reversed).toEqual([join(projectRoot, "AGENTS.md")]);
+
+    // …but the survivor is still on disk, so the batch must NOT be retired.
+    expect(existsProject(".cursor/agents/qa.md")).toBe(true);
+    expect(readBatchStatuses(dataDir).get(outcome.batchId!)?.status).toBe("committed");
+    // Still default-selectable — the fail-safe side, so the stranded file stays reachable.
+    expect(newestBatchForProject(projectRoot, dataDir)?.batchId).toBe(outcome.batchId!);
+  });
+
+  test("a batch with NO survivor still retires normally (the guard is not over-broad)", () => {
+    wBlueprint("first.md", "# Executor\n");
+    const clean = apply({
+      manifest: { schemaVersion: 1, roles: [{ name: "executor", harness: "codex", files: [{ transform: "copy", source: "first.md", destination: "AGENTS.md" }] }] },
+      blueprintRoot,
+      projectRoot,
+      dataDir,
+    });
+    expect(readBatchStatuses(dataDir).get(clean.batchId!)?.stranded).toBeUndefined();
+    undoBatch(projectRoot, dataDir);
+    expect(readBatchStatuses(dataDir).get(clean.batchId!)?.status).toBe("undone");
   });
 });

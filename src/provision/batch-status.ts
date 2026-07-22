@@ -52,6 +52,18 @@ export const BatchStatusRecord = z.object({
   projectRoot: z.string().min(1),
   status: BatchTerminalState,
   ts: z.number().int().nonnegative(),
+  /**
+   * True when this batch left at least one APPLIED-BUT-UNJOURNALED write on disk (gate round 2, finding 3).
+   * `.optional()` — NOT `.nullable()` — so the key is absent on every ordinary record and on every pre-existing
+   * one, which keeps them validating unchanged.
+   *
+   * WHY IT MUST BE STAMPED AT APPLY TIME: an unjournaled write has no journal entry by definition, so `undo`
+   * cannot see it. Without this flag `undoBatch` reversed every entry it COULD see, found no failures, and
+   * recorded `undone` — retiring a batch whose survivor is still live, hiding it from future bare undos and
+   * erasing the last durable trace of it. `apply` is the only moment that knows, so `apply` is where it is
+   * recorded.
+   */
+  stranded: z.boolean().optional(),
 });
 export type BatchStatusRecord = z.infer<typeof BatchStatusRecord>;
 
@@ -71,8 +83,16 @@ export function batchStatusPath(dataDir: string): string {
  * `dataDir` is optional, and both sides must resolve the default identically or they would read and write
  * different files.
  */
-export function recordBatchStatus(dataDir: string | undefined, batchId: string, projectRoot: string, status: BatchTerminalState): void {
+export function recordBatchStatus(
+  dataDir: string | undefined,
+  batchId: string,
+  projectRoot: string,
+  status: BatchTerminalState,
+  stranded = false,
+): void {
   const record: BatchStatusRecord = { batchId, projectRoot: canonicalProjectRoot(projectRoot), status, ts: Date.now() };
+  // Written only when true, so ordinary records keep their exact previous shape on disk.
+  if (stranded) record.stranded = true;
   const path = batchStatusPath(resolveDataDir(dataDir));
   try {
     appendJsonlRecord(path, record);
@@ -82,8 +102,10 @@ export function recordBatchStatus(dataDir: string | undefined, batchId: string, 
 }
 
 /**
- * Every well-formed terminal state, newest record winning per `batchId` (a batch is written once, but a
- * duplicate must resolve deterministically rather than by read order). Malformed/torn/schema-invalid lines are
+ * Every well-formed terminal state, the LAST valid record winning per `batchId` — append order, which is the
+ * causal order the lifecycle transitions (committed → undone) actually occurred in. Wall-clock `ts` is NOT the
+ * tiebreak: it is non-monotonic, and ordering by it let a backward clock strand a spent batch permanently (see
+ * the comment at the assignment). Malformed/torn/schema-invalid lines are
  * skipped — one corrupt row must not hide the good records around it, and an unparseable file must not throw
  * a read that `undo` depends on. A missing file yields an empty map: unknown everywhere ⇒ eligible everywhere.
  *
@@ -108,11 +130,21 @@ export function readBatchStatuses(dataDir?: string): Map<string, BatchStatusReco
     }
     const parsed = BatchStatusRecord.safeParse(parsedLine);
     if (!parsed.success) continue;
-    // Newest `ts` wins, with a later LINE breaking a tie — the same resolution `readKnownProjects` uses. A
-    // plain overwrite would make the LAST line win, i.e. read order, which is exactly what this reader must
-    // not depend on for a file the module's own contract treats as hand-editable and torn-tail-prone.
-    const current = out.get(parsed.data.batchId);
-    if (!current || parsed.data.ts >= current.ts) out.set(parsed.data.batchId, parsed.data);
+    // LAST VALID RECORD WINS — append order, NOT `ts`. This file records a LIFECYCLE (committed → undone),
+    // and append order is the causal order those transitions actually happened in; `ts` is wall clock, which
+    // is not monotonic. A `ts` comparison meant that if the clock moved backward between an `apply` and the
+    // `undo` that spent it — NTP correction, a same-millisecond tie, a laptop waking — the older `committed`
+    // record outranked the newer `undone` one FOREVER: the batch never got skipped, bare `undo` re-selected
+    // the spent batch on every run, and older history stayed unreachable behind it.
+    //
+    // This deliberately reverts a `ts`-based resolution added earlier in this unit. That change came from a
+    // review finding that the docstring PROMISED `ts` ordering while the code did append order — the right
+    // repair was the docstring, not the code, and the promise itself was wrong for a lifecycle log. Append
+    // order is also what the undo journal (the file this one annotates) has always used.
+    //
+    // A duplicate only arrives by hand-edit or crash; resolving those by append order too is consistent, and
+    // a hostile hand-edited data dir is out of scope by decision #45 in any case.
+    out.set(parsed.data.batchId, parsed.data);
   }
   return out;
 }
@@ -132,4 +164,16 @@ export function isFullyReversed(batchId: string, projectRoot: string, statuses: 
   const record = statuses.get(batchId);
   if (record === undefined || record.projectRoot !== canonicalProjectRoot(projectRoot)) return false;
   return record.status === "rolled-back" || record.status === "undone";
+}
+
+/**
+ * Does this batch still hold an applied-but-unjournaled write? A batch whose `committed` record carries the
+ * `stranded` flag can never be honestly retired as `undone`: `undo` reverses only JOURNALED entries, so the
+ * survivor is still live no matter how cleanly the visible half reversed. Root-matched like `isFullyReversed`,
+ * and false for every unknown/absent record — the fail-safe direction (an unknown batch stays eligible and
+ * still superseding, it just is not affirmatively retired).
+ */
+export function hasStrandedWrite(batchId: string, projectRoot: string, statuses: ReadonlyMap<string, BatchStatusRecord>): boolean {
+  const record = statuses.get(batchId);
+  return record !== undefined && record.stranded === true && record.projectRoot === canonicalProjectRoot(projectRoot);
 }

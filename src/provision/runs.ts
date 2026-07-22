@@ -13,7 +13,7 @@
  * writer forever. That write is best-effort and cannot fail an undo that already succeeded.
  */
 import { listUndo, undo, type UndoEntry } from "../configwrite/index";
-import { isFullyReversed, readBatchStatuses, recordBatchStatus } from "./batch-status";
+import { hasStrandedWrite, isFullyReversed, readBatchStatuses, recordBatchStatus } from "./batch-status";
 import { canonicalProjectRoot, errorText } from "./internal";
 
 /** Canonicalize a project root before comparison. Apply canonicalizes at ingress so NEW entries store a canonical
@@ -165,9 +165,18 @@ export function undoBatch(projectRoot: string, dataDir?: string, batchId?: strin
     : newestBatchForProject(projectRoot, dataDir);
   if (!batch) return { batchId: batchId ?? null, reversed: [], alreadyReversed: [], superseded: [], failed: [] };
   const buckets = undoEntries(batch.entries, dataDir);
-  // Nothing left live: every entry either reversed now or was already reversed. A `failed` or `superseded` entry
-  // means one was NOT reversed, so the batch stays UNKNOWN — the fail-safe side (see the docstring).
-  if (buckets.failed.length === 0 && buckets.superseded.length === 0) {
+  // Retire the batch as `undone` only when NOTHING it produced is still live. Three ways something can be:
+  //   - `failed`     — the entry was not reversed; its file is still on disk.
+  //   - `superseded` — the entry was never even attempted (and, once the superseding batch is itself undone,
+  //                    this batch becomes the live writer of that path again).
+  //   - `stranded`   — an applied-but-UNJOURNALED write from the original apply. `undo` cannot see it: it has
+  //                    no journal entry, so it is in none of the buckets above and reversing every visible
+  //                    entry says nothing about it. Recording `undone` here would retire a batch whose
+  //                    survivor is live, hide it from every future bare `undo`, and erase the last durable
+  //                    trace of it (gate round 2, finding 3). Only `apply` knew, so `apply` stamped it.
+  // Anything unretired stays UNKNOWN: default-selectable and still superseding — the fail-safe side.
+  const stranded = hasStrandedWrite(batch.batchId, batch.projectRoot, readBatchStatuses(dataDir));
+  if (buckets.failed.length === 0 && buckets.superseded.length === 0 && !stranded) {
     recordBatchStatus(dataDir, batch.batchId, batch.projectRoot, "undone");
   }
   return { batchId: batch.batchId, ...buckets };

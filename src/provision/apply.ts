@@ -424,7 +424,9 @@ export function apply(input: ApplyInput, options: ApplyOptions = {}): ApplyOutco
   // selected an OLDER real batch and reversed work they never meant to touch. `null` says what is true — nothing
   // reversible happened — and the same rule gives preflight failures a null id (they journal nothing either).
   const journaled = rollback.length > 0;
-  if (journaled) recordBatchStatus(dataDir, batchId, projectRoot, "committed");
+  // Stamp the survivor fact NOW — this is the only moment anything knows about an applied-but-unjournaled
+  // write, since it left no journal entry for `undo` to find later.
+  if (journaled) recordBatchStatus(dataDir, batchId, projectRoot, "committed", applied.some((w) => w.unjournaled));
   return { batchId: journaled ? batchId : null, applied, noops, failed: [], rolledBack: false };
 }
 

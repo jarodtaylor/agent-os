@@ -1,0 +1,367 @@
+/**
+ * Apply/undo orchestration (U10 U5 — R5/R7/R8 write side, KTD2/KTD8).
+ *
+ * Apply is the ONE Act path: it composes the pure U3 render + diff, the U4 target registry, and the U14
+ * config-write engine into an ABORT-ALL batch write. A half-provisioned project would defeat "clone +
+ * provision reproducibly", so the pass is all-or-nothing: preflight-then-write, never interleaved.
+ *
+ * Order (brief pt 1):
+ *   renderBlueprint → diffRendered (over the SAME RenderedFile[], so rows co-index with files by construction)
+ *   → checkTargetCompatibility for every non-noop / non-scaffold-skip target → THEN the write pass.
+ * An unresolvable/incompatible/unreadable/malformed target aborts BEFORE any file is written (nothing to roll
+ * back). Compatibility does NOT check writability, so a mid-write fault (an unwritable dir) still reaches the
+ * write pass and exercises rollback — preflight and rollback are BOTH load-bearing.
+ *
+ * Two error regimes inside the write pass (brief pt 4):
+ *   - a genuine throw mid-write → the mutation NEVER landed → roll back this batch's earlier writes LIFO →
+ *     abort, report the file in `failed`.
+ *   - an AppliedButUnjournaledError → the write LANDED with no undoId → warn, annotate the applied write as
+ *     un-undoable (`applied[].unjournaled`), and CONTINUE. The rollback list is built INCREMENTALLY (each undoId
+ *     pushed as its write returns), so a later error's rollback can never reverse an applied-but-unjournaled
+ *     write and the report stays honest.
+ *
+ * LIFO reversal is universal (brief pt 3): a blueprint CAN write the same destination twice (two config-merge
+ * rows into one shared `.cursor/mcp.json`), forming a postHash chain X→v1→v2. `undo` is hash-checked, so v2
+ * must reverse before v1 — LIFO is required when same-target collisions are possible and harmless otherwise.
+ */
+import { randomUUID } from "node:crypto";
+import { lstatSync, mkdirSync, readFileSync, statSync } from "node:fs";
+import { dirname, posix } from "node:path";
+import {
+  AppliedButUnjournaledError,
+  mergeConfig,
+  undo,
+  writeTextFile,
+  type MergeOptions,
+  type MergeResult,
+} from "../configwrite/index";
+import type { Manifest, Runtime } from "../contract/index";
+import { diffRendered, type DestinationRead, type DestinationReader, type DiffError, type PlanAction } from "./diff";
+import { errorText, isNotFound, readFileBounded } from "./internal";
+import { renderBlueprint, type RenderError, type RenderedFile, type RenderIo } from "./render";
+import {
+  checkTargetCompatibility,
+  resolveTarget,
+  type ProvisionHarness,
+  type ResolvedTarget,
+  type TargetInspection,
+  type TargetPathState,
+} from "./targets";
+
+/** Same 16 MiB ceiling as the shared read-boundary discipline in `src/provision/internal.ts` (and
+ *  `src/scan/internal.ts` / `src/codex-credential.ts`): the two live-destination readers below stat-before-read
+ *  and refuse an oversized file rather than OOM on a pathological one. Kept local — a cross-module export just
+ *  for this constant would over-couple the modules. */
+const MAX_APPLY_READ_BYTES = 16 * 1024 * 1024; // 16 MiB, matching src/provision/internal.ts
+
+/** The two engine primitives apply dispatches to, injectable so a test can wrap them to exercise the
+ *  AppliedButUnjournaledError regime honestly (a real write that lands, then the real error type). */
+export interface ProvisionEngine {
+  mergeConfig(targetPath: string, patch: Record<string, unknown>, opts: MergeOptions): MergeResult;
+  writeTextFile(targetPath: string, content: string, opts: MergeOptions): MergeResult;
+}
+
+const REAL_ENGINE: ProvisionEngine = { mergeConfig, writeTextFile };
+
+export interface ApplyInput {
+  manifest: Manifest;
+  /** Absolute root of the blueprint directory; manifest `source` paths are relative to it. */
+  blueprintRoot: string;
+  /** Absolute project root where native surfaces are written; manifest `destination` paths are relative to it. */
+  projectRoot: string;
+  /** Root for backups + the undo journal (KTD2). Tests inject a temp dir; the engine writes real paths. */
+  dataDir: string;
+}
+
+export interface ApplyOptions {
+  /** Injectable engine writers (default: the real config-write primitives). */
+  engine?: ProvisionEngine;
+}
+
+/** One write this run performed (never a noop/scaffold-skip). `undoId` is null when the engine self-no-op'd
+ *  or the write was applied-but-unjournaled (un-undoable). */
+export interface AppliedWrite {
+  targetPath: string;
+  action: Extract<PlanAction, "create" | "overwrite" | "merge">;
+  created: boolean;
+  undoId: string | null;
+  /** Present ONLY for an applied-but-unjournaled write — the write LANDED on disk but the journal write failed,
+   *  so it is un-undoable (`undoId` is null and it is never in the rollback list). `backupPath` is the byte-exact
+   *  backup to recover from when reverting by hand, or `null` when this write CREATED the target (delete the file
+   *  to revert). A consumer finds every un-undoable write via `applied.filter((w) => w.unjournaled)`. */
+  unjournaled?: { backupPath: string | null; error: string };
+}
+
+/**
+ * The apply report (KTD2) — mirrors `UninstallOutcome`'s applied/failed shape plus `noops`. Three honesty
+ * signals let a U6 CLI / U7 MCP consumer report the truth after an imperfect run without a fragile path-string
+ * join back to `applied`:
+ *   - `applied[].unjournaled` — an applied write that could not be journaled (un-undoable); recover from its
+ *     `backupPath` (or delete a created file) if reverting. On a mid-write abort these SURVIVE in `applied`
+ *     (they were never in the rollback list), so a consumer can see what is still stuck on disk.
+ *   - `rollbackFailures` — on the abort path, the targets whose rollback `undo()` itself FAILED: they remain
+ *     applied on disk despite `rolledBack: true`. Absent/empty on a clean rollback and on the success path,
+ *     which is what makes `rolledBack: true` honest rather than an unconditional claim.
+ *   - `rolledBack` — true when a genuine mid-write fault aborted the run and LIFO reversal ran.
+ * On a clean mid-write abort, `applied` holds only the un-undoable survivors (every reversible write was
+ * reversed); on the success path `rolledBack` is false and both annotations are absent/empty.
+ */
+export interface ApplyOutcome {
+  batchId: string;
+  applied: AppliedWrite[];
+  noops: string[];
+  failed: Array<{ path: string; error: string }>;
+  rolledBack: boolean;
+  /** Present only when a rollback `undo()` failed — those targets remain on disk despite `rolledBack: true`. */
+  rollbackFailures?: Array<{ path: string; error: string }>;
+}
+
+/**
+ * Provision `manifest` onto `projectRoot`, abort-all with LIFO rollback. Reads are real filesystem reads
+ * rooted at `blueprintRoot`/`projectRoot` (the composition root; render/diff/targets stay pure/DI); the engine
+ * writes real paths under `dataDir`'s journal.
+ */
+export function apply(input: ApplyInput, options: ApplyOptions = {}): ApplyOutcome {
+  const { manifest, blueprintRoot, projectRoot, dataDir } = input;
+  const engine = options.engine ?? REAL_ENGINE;
+  const batchId = randomUUID();
+
+  // ── Preflight, phase 1: render (pure) ──
+  const renderIo: RenderIo = {
+    readSource: (source) => readFileBounded(posix.join(blueprintRoot, source)),
+    readDestination: (destination) => readFileBounded(posix.join(projectRoot, destination)),
+  };
+  const rendered = renderBlueprint(manifest, renderIo);
+  if (!rendered.ok) {
+    return preflightFailure(batchId, projectRoot, rendered.error.destination, renderErrorText(rendered.error));
+  }
+  const files = rendered.files;
+
+  // ── Preflight, phase 2: diff (pure) over the SAME files — rows co-index with files (brief pt 7) ──
+  const readDestinationBytes: DestinationReader = (destination) => readDestination(posix.join(projectRoot, destination));
+  const diffed = diffRendered(files, readDestinationBytes);
+  if (!diffed.ok) {
+    return preflightFailure(batchId, projectRoot, diffed.error.destination, diffErrorText(diffed.error));
+  }
+  const rows = diffed.rows;
+
+  // ── Preflight, phase 3: resolve + compatibility for every non-noop / non-scaffold-skip target ──
+  const inspection = realInspection();
+  const targets: Array<ResolvedTarget | null> = new Array(files.length).fill(null);
+  const preflightFailures: Array<{ path: string; error: string }> = [];
+  // Group the transforms of every non-skip row by its resolved destination, so a blueprint where two writers
+  // fight over one destination can be refused before any write (see the duplicate-destination guard below).
+  const contributorsByDestination = new Map<string, RenderedFile["transform"][]>();
+  for (let i = 0; i < files.length; i++) {
+    if (isSkip(rows[i]!.action)) continue;
+    const file = files[i]!;
+    const absPath = posix.join(projectRoot, file.destination);
+    if (!isProvisionHarness(file.harness)) {
+      preflightFailures.push({ path: absPath, error: `role '${file.role}' targets non-provisionable harness '${file.harness}'` });
+      continue;
+    }
+    const target = resolveTarget(projectRoot, file.harness, file.destination);
+    if (!target) {
+      preflightFailures.push({ path: absPath, error: `destination '${file.destination}' does not resolve to a known ${file.harness} surface` });
+      continue;
+    }
+    const compat = checkTargetCompatibility(target, inspection);
+    if (!compat.compatible) {
+      preflightFailures.push({ path: target.destination, error: compat.message });
+      continue;
+    }
+    targets[i] = target;
+    const contributors = contributorsByDestination.get(target.destination) ?? [];
+    contributors.push(file.transform);
+    contributorsByDestination.set(target.destination, contributors);
+  }
+  // Duplicate-destination guard (brief pt 3 corollary): 2+ non-skip rows resolving to ONE destination compose
+  // safely ONLY when every writer is `config-merge` (the shared `.cursor/mcp.json` multi-role registration).
+  // The moment a whole-file copy/compose/scaffold shares that destination, the blueprint is last-writer-wins
+  // and could silently drop a role's content — refuse it loudly, before any write, like every other preflight
+  // failure. The legal all-config-merge case is untouched.
+  for (const [destination, transforms] of contributorsByDestination) {
+    if (transforms.length >= 2 && !transforms.every((t) => t === "config-merge")) {
+      preflightFailures.push({
+        path: destination,
+        error: `${transforms.length} non-mergeable writers target '${destination}' — an ambiguous, last-writer-wins blueprint (only all-config-merge rows may share a destination)`,
+      });
+    }
+  }
+  if (preflightFailures.length > 0) {
+    return { batchId, applied: [], noops: [], failed: preflightFailures, rolledBack: false };
+  }
+
+  // ── Write pass — nothing has been written until here; every target is proven compatible ──
+  const opts: MergeOptions = { dataDir, batchId, projectRoot };
+  const applied: AppliedWrite[] = [];
+  const noops: string[] = [];
+  // Built incrementally so a rollback can never touch an applied-but-unjournaled write (it has no undoId).
+  const rollback: Array<{ undoId: string; targetPath: string }> = [];
+
+  for (let i = 0; i < files.length; i++) {
+    const file = files[i]!;
+    const action = rows[i]!.action;
+    if (isSkip(action)) {
+      noops.push(posix.join(projectRoot, file.destination));
+      continue;
+    }
+    const target = targets[i]!; // preflight proved every write target resolves
+    const path = target.destination;
+
+    try {
+      mkdirSync(dirname(path), { recursive: true }); // the engine writes into, but never creates, the parent dir
+      const res = writeOne(engine, file, path, opts);
+      if (res.noop) {
+        // The engine's own byte/semantic compare found nothing to change (e.g. a second same-patch row into an
+        // already-created file) — record it as a noop, not an applied write.
+        noops.push(path);
+        continue;
+      }
+      applied.push({ targetPath: path, action, created: res.created, undoId: res.undoId });
+      if (res.undoId) rollback.push({ undoId: res.undoId, targetPath: path });
+    } catch (err) {
+      if (err instanceof AppliedButUnjournaledError) {
+        // The write LANDED but its journal entry didn't record — un-undoable. Warn, annotate it, CONTINUE.
+        // `created` is derived from the error's OWN contract (backupPath===null means the write created the target).
+        console.error(`[agent-os] provision apply: '${path}' applied but journaling failed (recover from backup if reverting):`, err);
+        applied.push({
+          targetPath: path,
+          action,
+          created: err.backupPath === null,
+          undoId: null,
+          unjournaled: { backupPath: err.backupPath, error: errorText(err) },
+        });
+        continue;
+      }
+      // Genuine failure: the mutation (or the mkdir before it) never landed. Roll this batch's earlier writes
+      // back LIFO and abort. `applied` becomes the un-undoable SURVIVORS only (`undoId === null`) — the reversed
+      // journaled writes are dropped, but any applied-but-unjournaled write stays, honestly, because it is still
+      // on disk. `rollbackFailures` names any target whose reversal itself failed (still on disk, not honest to
+      // drop) so `rolledBack: true` never overclaims.
+      const rollbackFailures = rollbackLifo(rollback, dataDir);
+      const outcome: ApplyOutcome = {
+        batchId,
+        applied: applied.filter((w) => w.undoId === null),
+        noops,
+        failed: [{ path, error: errorText(err) }],
+        rolledBack: true,
+      };
+      if (rollbackFailures.length > 0) outcome.rollbackFailures = rollbackFailures;
+      return outcome;
+    }
+  }
+
+  return { batchId, applied, noops, failed: [], rolledBack: false };
+}
+
+/** Dispatch one rendered file to the engine by transform (brief WRITE-PASS RULES). */
+function writeOne(engine: ProvisionEngine, file: RenderedFile, path: string, opts: MergeOptions): MergeResult {
+  switch (file.transform) {
+    case "config-merge":
+      return engine.mergeConfig(path, file.patch, opts);
+    case "copy":
+    case "compose":
+      return engine.writeTextFile(path, file.content, opts);
+    case "scaffold":
+      // A "create"-action scaffold always carries materialized content; a present scaffold diffs to
+      // scaffold-skip and never reaches the write pass. The guard keeps apply total if that ever changes.
+      if (file.content === null) throw new Error(`provision apply: scaffold '${path}' reached the write pass with no content`);
+      return engine.writeTextFile(path, file.content, opts);
+  }
+}
+
+/** Reverse a batch's successful writes newest-first. Best-effort: a rollback failure is logged AND returned (so
+ *  the caller can surface it in `rollbackFailures` — a still-applied file `rolledBack: true` would otherwise
+ *  hide), never masking the original error the caller is already reporting. Returns the `{path,error}` of every
+ *  target whose `undo()` threw; an empty array when every reversal succeeded. */
+function rollbackLifo(
+  rollback: ReadonlyArray<{ undoId: string; targetPath: string }>,
+  dataDir: string,
+): Array<{ path: string; error: string }> {
+  const failures: Array<{ path: string; error: string }> = [];
+  for (let i = rollback.length - 1; i >= 0; i--) {
+    const { undoId, targetPath } = rollback[i]!;
+    try {
+      undo(undoId, dataDir);
+    } catch (err) {
+      console.error(`[agent-os] provision apply: rollback of '${targetPath}' failed (leaving it as-is):`, err);
+      failures.push({ path: targetPath, error: errorText(err) });
+    }
+  }
+  return failures;
+}
+
+/** A type predicate (not a plain boolean) so the write loop's `if (isSkip(action)) continue;` narrows the
+ *  fall-through `action` to exactly `AppliedWrite["action"]` — the compiler checks the narrowing instead of
+ *  the two call sites asserting it with `as`. */
+const isSkip = (action: PlanAction): action is Extract<PlanAction, "noop" | "scaffold-skip"> =>
+  action === "noop" || action === "scaffold-skip";
+
+function isProvisionHarness(harness: Runtime): harness is ProvisionHarness {
+  return harness === "claude-code" || harness === "codex" || harness === "cursor";
+}
+
+/** Real byte-aware destination reader for the diff (KTD8 needs raw bytes for the text identity check). Mirrors
+ *  the engine's lstat discipline: a symlink or non-regular node reads as `blocked`, never silently absent; an
+ *  oversized file (past the shared 16 MiB read bound) is refused the same way, before it is read into memory. */
+function readDestination(absPath: string): DestinationRead {
+  try {
+    const stat = lstatSync(absPath);
+    if (stat.isSymbolicLink() || !stat.isFile()) return { ok: false, reason: "blocked" };
+    if (stat.size > MAX_APPLY_READ_BYTES) return { ok: false, reason: "blocked" };
+    const bytes = readFileSync(absPath);
+    return { ok: true, content: bytes.toString("utf8"), bytes };
+  } catch (err) {
+    return { ok: false, reason: isNotFound(err) ? "absent" : "blocked" };
+  }
+}
+
+/** Real path inspection for `checkTargetCompatibility`. `stat` maps the live node to a `TargetPathState`;
+ *  a non-ENOENT lookup failure throws so the compatibility check classifies it as inspection-failed. */
+function realInspection(): TargetInspection {
+  return {
+    stat: (path): TargetPathState => {
+      let stat;
+      try {
+        stat = lstatSync(path);
+      } catch (err) {
+        if (isNotFound(err)) return "absent";
+        throw err;
+      }
+      if (stat.isSymbolicLink()) return "symlink";
+      if (stat.isFile()) return "file";
+      if (stat.isDirectory()) return "directory";
+      return "other";
+    },
+    read: (path): string | null => {
+      try {
+        // Match the shared read-boundary discipline: refuse a non-regular or oversized file before reading it.
+        const stat = statSync(path);
+        if (!stat.isFile() || stat.size > MAX_APPLY_READ_BYTES) return null;
+        return readFileSync(path, "utf8");
+      } catch {
+        return null;
+      }
+    },
+  };
+}
+
+function preflightFailure(batchId: string, projectRoot: string, destination: string, error: string): ApplyOutcome {
+  return {
+    batchId,
+    applied: [],
+    noops: [],
+    failed: [{ path: posix.join(projectRoot, destination), error }],
+    rolledBack: false,
+  };
+}
+
+function renderErrorText(error: RenderError): string {
+  const where = `role '${error.role}' (${error.harness}) → '${error.destination}'`;
+  return "source" in error ? `render ${error.problem} for ${where} from '${error.source}'` : `render ${error.problem} for ${where}`;
+}
+
+function diffErrorText(error: DiffError): string {
+  return `diff ${error.problem} for role '${error.role}' (${error.harness}) → '${error.destination}'`;
+}

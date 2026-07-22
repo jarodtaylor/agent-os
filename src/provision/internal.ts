@@ -52,9 +52,17 @@ export function readFileBounded(path: string): ReadOutcome {
 export const realBlueprintIo: BlueprintIo = { readFileBounded };
 
 /** ENOENT (the path truly does not exist) vs any other stat/read failure (permissions, etc.). Reads the
- *  Node error's `code` through a typeof guard so inspecting the thrown value can't itself throw. */
-function isNotFound(e: unknown): boolean {
+ *  Node error's `code` through a typeof guard so inspecting the thrown value can't itself throw. Shared by the
+ *  loader here and the apply orchestrator (`apply.ts`) so "what counts as ENOENT" has one definition in-module. */
+export function isNotFound(e: unknown): boolean {
   return typeof e === "object" && e !== null && (e as { code?: unknown }).code === "ENOENT";
+}
+
+/** Message text of a caught unknown error. Kept in `provision/internal.ts` — not imported from
+ *  `install/shared.ts` — so provision never depends on install (the wrong dependency direction); `apply.ts`
+ *  and `runs.ts` both import this one copy so their error formatting can't drift. */
+export function errorText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
 /**

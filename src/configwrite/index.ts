@@ -5,4 +5,4 @@
 export { mergeConfig, removeConfigKeys, writeTextFile, deepMerge, MERGE_NOOP, AppliedButUnjournaledError } from "./engine";
 export type { MergeOptions, MergeResult } from "./engine";
 export { undo, listUndo, UndoEntry } from "./undo";
-export { ConfigFormat } from "./internal";
+export { ConfigFormat, hashContent } from "./internal";

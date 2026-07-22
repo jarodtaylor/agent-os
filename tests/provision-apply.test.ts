@@ -1034,3 +1034,19 @@ describe("gate round-4 fold — equivalent project-root spellings select the rig
     expect(existsProject("CLAUDE.md")).toBe(true); // the older batch stays applied
   });
 });
+
+describe("bot review (PR #52) — corrupt-journal fail-closed batch grouping", () => {
+  test("an entry reusing a batchId under a DIFFERENT project root is dropped, not mixed into the batch", () => {
+    // The journal is untrusted (module header): craft one with two entries sharing a batchId but two roots.
+    mkdirSync(dataDir, { recursive: true });
+    const base = { backupPath: null, created: true, mode: null, format: "text", ts: 1 };
+    const mine = { ...base, id: "e1", targetPath: `${projectRoot}/CLAUDE.md`, postHash: "h1", batchId: "shared", projectRoot };
+    const foreign = { ...base, id: "e2", targetPath: "/other/project/CLAUDE.md", postHash: "h2", batchId: "shared", projectRoot: "/other/project" };
+    writeFileSync(join(dataDir, "undo-journal.jsonl"), `${JSON.stringify(mine)}\n${JSON.stringify(foreign)}\n`);
+    const batches = readBatches(dataDir);
+    expect(batches).toHaveLength(1);
+    // Only the first-seen root's entry survives; the foreign-root entry is fail-closed out.
+    expect(batches[0]!.entries.map((e) => e.targetPath)).toEqual([`${projectRoot}/CLAUDE.md`]);
+    expect(batches[0]!.entries.some((e) => e.targetPath.startsWith("/other/project"))).toBe(false);
+  });
+});

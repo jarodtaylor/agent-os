@@ -32,11 +32,19 @@ function groupBatches(entries: readonly UndoEntry[]): ProvisionBatch[] {
   const byId = new Map<string, ProvisionBatch>();
   for (const entry of entries) {
     if (!entry.batchId || !entry.projectRoot) continue;
+    const root = canonicalRoot(entry.projectRoot);
     let batch = byId.get(entry.batchId);
     if (!batch) {
-      batch = { batchId: entry.batchId, projectRoot: entry.projectRoot, entries: [] };
+      batch = { batchId: entry.batchId, projectRoot: root, entries: [] };
       byId.set(entry.batchId, batch);
       order.push(entry.batchId);
+    } else if (batch.projectRoot !== root) {
+      // Fail CLOSED on the untrusted/corrupt journal the module header warns about: an entry that REUSES a
+      // batchId under a DIFFERENT (canonicalized) project root is not part of this batch — dropping it stops
+      // `undoBatch(project, …, batchId)` from reversing another project's paths through a shared batch id. A
+      // legitimate batch's entries all carry the ingress-canonicalized root, so this only ever excludes a
+      // corrupt / hand-edited row (bot review, PR #52).
+      continue;
     }
     batch.entries.push(entry);
   }

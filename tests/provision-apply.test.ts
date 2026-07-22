@@ -1040,6 +1040,21 @@ describe("gate round-4 fold — equivalent project-root spellings select the rig
 // so these craft the journal directly — which in reality is attacker-owns-HOME, out of decision #45's threat
 // model. The quarantine is documented as such; deeper crafted-journal integrity is a deferred, out-of-scope unit.
 describe("bot review + post-PR gate (PR #52) — corrupt-journal quarantine (best-effort defense-in-depth)", () => {
+  test("newest batch is the LAST journal entry's batch, not the last first-appearance group (A1,B1,A2 → A)", () => {
+    // Recency must follow the last journal ENTRY (CodeRabbit PR #54). Interleaved batch entries A1,B1,A2 (one
+    // root) end at A2, so A is newest — but first-appearance order ends at B. (Interleaving needs concurrency or
+    // a crafted journal; the invariant must still hold.)
+    mkdirSync(dataDir, { recursive: true });
+    const base = { backupPath: null, created: true, mode: null, format: "text", projectRoot };
+    const rows = [
+      { ...base, id: "a1", targetPath: `${projectRoot}/A1.md`, postHash: "ha1", batchId: "A", ts: 1 },
+      { ...base, id: "b1", targetPath: `${projectRoot}/B1.md`, postHash: "hb1", batchId: "B", ts: 2 },
+      { ...base, id: "a2", targetPath: `${projectRoot}/A2.md`, postHash: "ha2", batchId: "A", ts: 3 },
+    ];
+    writeFileSync(join(dataDir, "undo-journal.jsonl"), `${rows.map((r) => JSON.stringify(r)).join("\n")}\n`);
+    expect(newestBatchForProject(projectRoot, dataDir)?.batchId).toBe("A");
+  });
+
   test("a batchId appearing under two roots is quarantined out of readBatches entirely", () => {
     // Craft an untrusted journal with two entries sharing a batchId but two roots (impossible without direct writes).
     mkdirSync(dataDir, { recursive: true });

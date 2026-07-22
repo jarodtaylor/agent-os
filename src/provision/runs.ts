@@ -78,14 +78,21 @@ export function readBatches(dataDir?: string): ProvisionBatch[] {
  * with the U6 CLI undo verb; do NOT change the selection logic before then.
  */
 export function newestBatchForProject(projectRoot: string, dataDir?: string): ProvisionBatch | null {
-  // Select from the grouping (quarantined batches removed), matching the target root, newest by first-appearance.
-  // On any LEGITIMATE journal this is identical to the pre-quarantine behavior — nothing is ever quarantined
-  // (see `groupBatches`). The residual crafted-journal behaviors the gate names (a poisoned-newest silently
-  // falling back to an older batch; supersession losing a quarantined later-writer) are reachable only by direct
-  // writes to the data dir — attacker-owns-HOME, out of decision #45 — and are best-effort, not guaranteed.
+  // Recency is the batch of the LAST journal ENTRY for `target` — NOT the last batch in `groupBatches`
+  // first-appearance order (CodeRabbit PR #54): those differ only when a batch's entries are interleaved with
+  // another's (`A1, B1, A2` → last entry is A's, but first-appearance order ends at B), which needs concurrent
+  // applies (KTD9/#28) or a crafted journal (out of #45) — but the two must not disagree, and the docstring
+  // promises "last-appearing journal entry". Resolve each entry's batchId through the VALIDATED grouping so a
+  // quarantined (cross-root) batchId is never a candidate; a batch is returned only when its OWN canonical root
+  // matches. On any legitimate journal nothing is quarantined, so this is exactly the pre-quarantine behavior.
   const target = canonicalRoot(projectRoot);
-  const matching = groupBatches(listUndo(dataDir)).filter((batch) => batch.projectRoot === target);
-  return matching.length > 0 ? matching[matching.length - 1]! : null;
+  const entries = listUndo(dataDir);
+  const validatedById = new Map(groupBatches(entries).map((batch) => [batch.batchId, batch]));
+  for (let index = entries.length - 1; index >= 0; index--) {
+    const batch = entries[index]!.batchId === undefined ? undefined : validatedById.get(entries[index]!.batchId!);
+    if (batch?.projectRoot === target) return batch;
+  }
+  return null;
 }
 
 /** The result of an undo verb, four honest per-target buckets (one entry's outcome never aborts the rest —

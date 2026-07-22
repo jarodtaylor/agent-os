@@ -655,6 +655,27 @@ describe("a blocked destination names its cause (adversarial: symlinked AGENTS.m
       expect(run.text).toContain("symlink");
     }
   });
+
+  test("a blocked destination's BYTES never escape, only its cause", () => {
+    // A blocked destination is read-ATTEMPTED user content, so the refusal path has to be as content-free as
+    // the success path. The message may name the file and the cause; it may not carry what was in it — nor,
+    // for a symlink, disclose the link target.
+    const canary = "sk-ant-blocked-canary-9876543210";
+    const secretTarget = join(root, "outside-secret.md");
+    mkdirSync(dirname(secretTarget), { recursive: true });
+    writeFileSync(secretTarget, `${canary}\n`);
+
+    cli(["init"]);
+    symlinkSync(secretTarget, p("AGENTS.md"));
+
+    for (const verb of ["plan", "status", "apply"]) {
+      const run = cli([verb]);
+      const seen = `${run.text}\n${JSON.stringify(run.json)}`;
+      expect(seen).not.toContain(canary);
+      expect(seen).not.toContain("sk-ant");
+      expect(seen).not.toContain("outside-secret.md"); // the link TARGET is not disclosed either
+    }
+  });
 });
 
 describe("init withdraws a directory it created when it then refuses", () => {

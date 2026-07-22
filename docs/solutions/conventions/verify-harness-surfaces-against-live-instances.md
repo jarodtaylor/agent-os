@@ -96,6 +96,6 @@ for (const row of rows) {
 }
 ```
 
-Full record: PR for `feat/u10-u6-cli-seed-template`, commit `2880586` ("fix(review): drift means divergence, init refuses before writing, Codex seed key").
+Full record: branch `feat/u10-u6-cli-seed-template`, commit subject "fix(review): drift means divergence, init refuses before writing, Codex seed key" (unmerged, no PR yet as of this writing).
 
-Evidence: the U9 branch `feat/u9-inventory-scanners` (the `feat(scan)` + `fix(adversarial)` commits; PR pending); defer issues #35 (project scope), #36 (Codex skills / holistic root verification), #37 (degradation metadata). U10 U6 branch `feat/u10-u6-cli-seed-template`, commit `2880586`.
+Evidence: the U9 branch `feat/u9-inventory-scanners` (the `feat(scan)` + `fix(adversarial)` commits; PR pending); defer issues #35 (project scope), #36 (Codex skills / holistic root verification), #37 (degradation metadata). U10 U6 branch `feat/u10-u6-cli-seed-template` (PR pending).

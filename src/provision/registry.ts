@@ -23,10 +23,11 @@
  * everywhere. This module does not itself realpath — it cannot, since it must stay total and a record may name
  * a root that no longer exists.
  */
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import * as z from "zod";
 import { resolveDataDir } from "../paths";
+import { appendJsonlRecord } from "./internal";
 
 /**
  * Is this a LOGICAL project name — a key, never a path fragment? Refuses everything that could act as a path
@@ -89,21 +90,11 @@ export function registerProject(
   const record: KnownProjectRecord = { name, projectRoot, blueprintRoot, ts: Date.now() };
   const path = knownProjectsPath(resolved);
   try {
-    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-    // Lead with a newline when a prior crash left a partial final line, so this record starts clean and the
-    // torn line stays isolated (identical reasoning to `recordUndo` / `recordBatchStatus`).
-    const lead = existsSync(path) && !endsWithNewline(path) ? "\n" : "";
-    appendFileSync(path, lead + JSON.stringify(record) + "\n", { mode: 0o600 });
+    appendJsonlRecord(path, record);
   } catch (err) {
     return { kind: "write-failed", name, error: err instanceof Error ? err.message : String(err) };
   }
   return { kind: "registered", record };
-}
-
-/** True iff the registry file ends with a newline (or is empty) — i.e. the next append starts on a clean line. */
-function endsWithNewline(path: string): boolean {
-  const buf = readFileSync(path);
-  return buf.length === 0 || buf[buf.length - 1] === 0x0a;
 }
 
 /**

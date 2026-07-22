@@ -6,8 +6,8 @@
  * The bounded read mirrors `src/scan/internal.ts` and `src/codex-credential.ts` EXACTLY — a stat-before-read
  * regular-file guard + the same 16 MiB ceiling — so all three read boundaries stay identically disciplined.
  */
-import { lstatSync, readFileSync, statSync } from "node:fs";
-import { posix } from "node:path";
+import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync, statSync } from "node:fs";
+import { dirname, posix } from "node:path";
 import { classify } from "../capture/secret-classify";
 
 /**
@@ -146,4 +146,29 @@ export function hasMachineAbsolutePath(text: string): boolean {
  *  scoped own-files defer. Real blueprint sources are small prose/config, so this is not a live risk. */
 export function containsSecret(text: string): boolean {
   return classify(text, "path") === "secret";
+}
+
+/**
+ * Append one self-contained JSONL record, isolating a torn tail — the shared writer for this layer's two
+ * append-only sidecars (`batch-status.ts`, `registry.ts`).
+ *
+ * If a prior crash left a partial final line (no trailing newline), a plain append would concatenate onto it
+ * and corrupt BOTH lines — losing the new record too. Leading with a newline keeps the torn line isolated so
+ * the reader skips exactly one row. Owner-only throughout: 0600 file inside a 0700 directory, since these
+ * records name the operator's real project paths.
+ *
+ * `configwrite`'s undo journal implements the identical discipline and deliberately keeps its own copy:
+ * `provision` depends on `configwrite`, never the reverse, so sharing one definition would invert the module
+ * DAG. Two copies across that barrier, one within this layer.
+ */
+export function appendJsonlRecord(path: string, record: unknown): void {
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  const lead = existsSync(path) && !endsWithNewline(path) ? "\n" : "";
+  appendFileSync(path, lead + JSON.stringify(record) + "\n", { mode: 0o600 });
+}
+
+/** True iff the file ends with a newline (or is empty) — i.e. the next append starts on a clean line. */
+function endsWithNewline(path: string): boolean {
+  const buf = readFileSync(path);
+  return buf.length === 0 || buf[buf.length - 1] === 0x0a;
 }

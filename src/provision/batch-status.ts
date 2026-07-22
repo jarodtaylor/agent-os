@@ -20,11 +20,11 @@
  * `undo` find nothing, and `recordBatchStatus` is best-effort (it can never fail an apply that already
  * succeeded — an apply's outcome must not hinge on a metadata line landing).
  */
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import * as z from "zod";
 import { resolveDataDir } from "../paths";
-import { canonicalProjectRoot } from "./internal";
+import { appendJsonlRecord, canonicalProjectRoot } from "./internal";
 
 /**
  * How a batch finished:
@@ -65,20 +65,10 @@ export function recordBatchStatus(dataDir: string, batchId: string, projectRoot:
   const record: BatchStatusRecord = { batchId, projectRoot: canonicalProjectRoot(projectRoot), status, ts: Date.now() };
   const path = batchStatusPath(resolveDataDir(dataDir));
   try {
-    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-    // Lead with a newline when a prior crash left a partial final line, so this record starts clean and the torn
-    // line stays isolated (identical reasoning to `recordUndo`).
-    const lead = existsSync(path) && !endsWithNewline(path) ? "\n" : "";
-    appendFileSync(path, lead + JSON.stringify(record) + "\n", { mode: 0o600 });
+    appendJsonlRecord(path, record);
   } catch (err) {
     console.error(`[agent-os] provision: recording terminal state '${status}' for batch '${batchId}' failed (undo selection degrades to journal order):`, err);
   }
-}
-
-/** True iff the status file ends with a newline (or is empty) — i.e. the next append starts on a clean line. */
-function endsWithNewline(path: string): boolean {
-  const buf = readFileSync(path);
-  return buf.length === 0 || buf[buf.length - 1] === 0x0a;
 }
 
 /**

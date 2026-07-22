@@ -7,7 +7,21 @@
  * regular-file guard + the same 16 MiB ceiling — so all three read boundaries stay identically disciplined.
  */
 import { readFileSync, statSync } from "node:fs";
+import { posix } from "node:path";
 import { classify } from "../capture/secret-classify";
+
+/**
+ * Canonical form of an absolute project root, for BOTH storing it in an undo entry and comparing two roots for
+ * equality (gate round 4). `posix.normalize` collapses `.`/`..`/duplicate-slashes but KEEPS a trailing slash, so
+ * it alone leaves `/p` and `/p/` distinct — we additionally drop a trailing slash (except the filesystem root
+ * `/`). Result: `/p`, `/p/`, and `/p/x/..` all canonicalize to one string, so a batch applied under one spelling
+ * is found by an undo under another. Lexical ONLY — a symlinked root is a different string this cannot fold, so
+ * realpath canonicalization at the U6 registry ingress stays deferred (issue #51).
+ */
+export function canonicalProjectRoot(root: string): string {
+  const normalized = posix.normalize(root);
+  return normalized.length > 1 && normalized.endsWith("/") ? normalized.slice(0, -1) : normalized;
+}
 
 /** Same 16 MiB ceiling as `src/scan/internal.ts` / `src/codex-credential.ts` — generous for real blueprint
  *  files (KBs), bounding the OOM surface of a pathological oversized one. */
@@ -52,9 +66,17 @@ export function readFileBounded(path: string): ReadOutcome {
 export const realBlueprintIo: BlueprintIo = { readFileBounded };
 
 /** ENOENT (the path truly does not exist) vs any other stat/read failure (permissions, etc.). Reads the
- *  Node error's `code` through a typeof guard so inspecting the thrown value can't itself throw. */
-function isNotFound(e: unknown): boolean {
+ *  Node error's `code` through a typeof guard so inspecting the thrown value can't itself throw. Shared by the
+ *  loader here and the apply orchestrator (`apply.ts`) so "what counts as ENOENT" has one definition in-module. */
+export function isNotFound(e: unknown): boolean {
   return typeof e === "object" && e !== null && (e as { code?: unknown }).code === "ENOENT";
+}
+
+/** Message text of a caught unknown error. Kept in `provision/internal.ts` — not imported from
+ *  `install/shared.ts` — so provision never depends on install (the wrong dependency direction); `apply.ts`
+ *  and `runs.ts` both import this one copy so their error formatting can't drift. */
+export function errorText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
 /**

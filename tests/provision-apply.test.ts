@@ -646,7 +646,7 @@ describe("provision runs — KTD2 fresh-process batch view", () => {
 
   test("newestBatchForProject / undoBatch return empty for a project with no batch", () => {
     expect(newestBatchForProject(projectRoot, dataDir)).toBeNull();
-    expect(undoBatch(projectRoot, dataDir)).toEqual({ batchId: null, reversed: [], superseded: [], failed: [] });
+    expect(undoBatch(projectRoot, dataDir)).toEqual({ batchId: null, reversed: [], alreadyReversed: [], superseded: [], failed: [] });
   });
 });
 
@@ -818,6 +818,126 @@ describe("provision apply — FOLD3 transform-vs-surface-shape clobber guard", (
     const outcome = apply({ manifest, blueprintRoot, projectRoot, dataDir });
     expect(outcome.failed).toEqual([]);
     expect(outcome.applied).toHaveLength(1);
+  });
+});
+
+describe("provision apply — FOLD1+4 blueprint-validity runs for ALL rows (disk-independent)", () => {
+  test("a whole-file COPY of a TEXT source containing a secret is refused; zero writes (raw text scan closes the text gap)", () => {
+    // The secret lives in RAW bytes of a `.md` role file — no config decode involved. Pre-FOLD1 the secret
+    // scan only ran on json/toml/yaml, so a CLAUDE.md/AGENTS.md/.md copy carrying a secret sailed through.
+    wBlueprint("evil.md", "# Role\nAPI key: sk-ant-api03-AAAAAAAAAAAAAAAAAAAA\n");
+    const manifest: Manifest = {
+      schemaVersion: 1,
+      roles: [{ name: "architect", harness: "claude-code", files: [{ transform: "copy", source: "evil.md", destination: ".claude/agents/evil.md" }] }],
+    };
+    const outcome = apply({ manifest, blueprintRoot, projectRoot, dataDir });
+    expect(outcome.failed).toHaveLength(1);
+    expect(outcome.failed[0]!.path).toBe(join(projectRoot, ".claude/agents/evil.md"));
+    expect(outcome.failed[0]!.error).toContain("contains a secret");
+    expect(outcome.failed[0]!.error).not.toContain("sk-ant"); // content-free
+    expect(outcome.applied).toEqual([]);
+    expect(existsProject(".claude/agents/evil.md")).toBe(false);
+    expect(readBatches(dataDir)).toEqual([]);
+  });
+
+  test("a whole-file copy to a merge surface that currently NO-OPs (disk already matches) is STILL refused by the shape guard", () => {
+    // Disk-independence of the shape guard: pre-write .cursor/mcp.json with the copy's exact bytes so the row
+    // diffs to `noop` — the guard must still fire, because validity is a property of the blueprint, not disk.
+    const bytes = JSON.stringify({ mcpServers: { y: { command: "z" } } });
+    wBlueprint("whole.json", bytes);
+    wProject(".cursor/mcp.json", bytes); // makes the copy diff to noop
+    const manifest: Manifest = {
+      schemaVersion: 1,
+      roles: [{ name: "qa", harness: "cursor", files: [{ transform: "copy", source: "whole.json", destination: ".cursor/mcp.json" }] }],
+    };
+    const outcome = apply({ manifest, blueprintRoot, projectRoot, dataDir });
+    expect(outcome.failed).toHaveLength(1);
+    expect(outcome.failed[0]!.error).toContain("merge surface");
+    expect(outcome.applied).toEqual([]);
+    expect(outcome.noops).toEqual([]); // refused in preflight, never reached the write pass
+    expect(rProject(".cursor/mcp.json")).toBe(bytes); // untouched
+    expect(readBatches(dataDir)).toEqual([]);
+  });
+
+  test("a secret-bearing copy that currently NO-OPs (disk already matches) is STILL refused by the secret scan", () => {
+    // Disk-independence of the secret scan: the destination already holds the identical secret bytes, so the
+    // copy diffs to `noop`. Pre-FOLD1 the scan ran only after the skip-continue, so this escaped on this machine
+    // yet failed on a fresh clone. The scan must run for the noop row too.
+    const secret = "# Role\ntoken sk-ant-api03-AAAAAAAAAAAAAAAAAAAA\n";
+    wBlueprint("evil.md", secret);
+    wProject(".claude/agents/evil.md", secret); // identical bytes ⇒ the copy diffs to noop
+    const manifest: Manifest = {
+      schemaVersion: 1,
+      roles: [{ name: "architect", harness: "claude-code", files: [{ transform: "copy", source: "evil.md", destination: ".claude/agents/evil.md" }] }],
+    };
+    const outcome = apply({ manifest, blueprintRoot, projectRoot, dataDir });
+    expect(outcome.failed).toHaveLength(1);
+    expect(outcome.failed[0]!.error).toContain("contains a secret");
+    expect(outcome.failed[0]!.error).not.toContain("sk-ant"); // content-free
+    expect(outcome.applied).toEqual([]);
+    expect(outcome.noops).toEqual([]); // refused in preflight
+    expect(rProject(".claude/agents/evil.md")).toBe(secret); // untouched
+  });
+});
+
+describe("provision apply — FOLD2 honest no-op (undo disposition → alreadyReversed)", () => {
+  test("a failed+rolled-back batch, undone again, reports its entries in alreadyReversed — never falsely in reversed", () => {
+    // Force a mid-write fault so apply rolls back its one journaled write (AGENTS.md); its journal entry lingers
+    // in the append-only journal. A bare undoBatch then selects that rolled-back batch (newest journaled) and
+    // finds every entry ALREADY reversed on disk — the honest-no-op #50 claim made TRUE by the disposition.
+    wBlueprint("first.md", "# Executor\n");
+    wBlueprint("victim.md", "never lands\n");
+    mkdirSync(join(projectRoot, ".claude", "agents"), { recursive: true });
+    chmodSync(join(projectRoot, ".claude", "agents"), 0o500); // owner r-x: the later write faults
+    const manifest: Manifest = {
+      schemaVersion: 1,
+      roles: [
+        { name: "executor", harness: "codex", files: [{ transform: "copy", source: "first.md", destination: "AGENTS.md" }] },
+        { name: "architect", harness: "claude-code", files: [{ transform: "copy", source: "victim.md", destination: ".claude/agents/victim.md" }] },
+      ],
+    };
+
+    const outcome = apply({ manifest, blueprintRoot, projectRoot, dataDir });
+    expect(outcome.rolledBack).toBe(true);
+    expect(existsProject("AGENTS.md")).toBe(false); // the journaled write was reversed by rollback
+
+    const undoResult = undoBatch(projectRoot, dataDir); // selects the rolled-back batch (newest journaled)
+    expect(undoResult.batchId).toBe(outcome.batchId);
+    expect(undoResult.alreadyReversed).toEqual([join(projectRoot, "AGENTS.md")]); // honest no-op
+    expect(undoResult.reversed).toEqual([]); // NOT falsely reported as a real reversal
+    expect(undoResult.superseded).toEqual([]);
+    expect(undoResult.failed).toEqual([]);
+  });
+});
+
+describe("provision apply — FOLD3 journal-ordering supersession (ABA content cycle)", () => {
+  test("three batches write A→B→A to one target; explicit undo of the OLDEST is superseded (refused), newest state preserved", () => {
+    // The classic byte-hash defeat: after A→B→A, batch1's postHash (hash A) reappears on disk, so a byte-hash
+    // supersession check would MISS it and undo would DELETE the file — clobbering batch3's identical-looking A.
+    // Journal-ordering keys on batch position, not bytes, so batch1 is correctly superseded by batches 2 & 3.
+    const dest = ".claude/agents/cycle.md";
+    const mk = (): Manifest => ({
+      schemaVersion: 1,
+      roles: [{ name: "architect", harness: "claude-code", files: [{ transform: "copy", source: "cycle.md", destination: dest }] }],
+    });
+
+    wBlueprint("cycle.md", "A\n");
+    const batch1 = apply({ manifest: mk(), blueprintRoot, projectRoot, dataDir }); // creates dest = A
+    wBlueprint("cycle.md", "B\n");
+    apply({ manifest: mk(), blueprintRoot, projectRoot, dataDir }); // overwrite → B
+    wBlueprint("cycle.md", "A\n");
+    apply({ manifest: mk(), blueprintRoot, projectRoot, dataDir }); // overwrite → A again (content cycle closed)
+    expect(rProject(dest)).toBe("A\n");
+
+    // Explicitly undo the OLDEST batch while the newest state is live. Fail CLOSED: refuse, never clobber.
+    const undoResult = undoBatch(projectRoot, dataDir, batch1.batchId);
+    expect(undoResult.superseded).toHaveLength(1);
+    expect(undoResult.superseded[0]!.path).toBe(join(projectRoot, dest));
+    expect(undoResult.superseded[0]!.error).toContain("superseded");
+    expect(undoResult.reversed).toEqual([]); // NOT reversed — that would have clobbered batch3's state
+    expect(undoResult.failed).toEqual([]);
+    expect(existsProject(dest)).toBe(true); // the newest batch's file survives untouched
+    expect(rProject(dest)).toBe("A\n");
   });
 });
 

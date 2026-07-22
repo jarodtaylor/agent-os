@@ -175,18 +175,18 @@ export function apply(input: ApplyInput, options: ApplyOptions = {}): ApplyOutco
     const contributors = contributorsByDestination.get(target.destination) ?? [];
     contributors.push({ transform: file.transform, patch: file.transform === "config-merge" ? file.patch : undefined });
     contributorsByDestination.set(target.destination, contributors);
-    if (skip) continue; // compat / shape-guard / effective-scan / write are for NON-SKIP rows only
 
-    const compat = checkTargetCompatibility(target, inspection);
-    if (!compat.compatible) {
-      preflightFailures.push({ path: target.destination, error: compat.message });
-      continue;
-    }
+    // ── Blueprint-validity checks (brief FOLD 1 + FOLD 4): run for EVERY resolving row, INCLUDING noop /
+    //    scaffold-skip rows, BEFORE the skip-continue. Validity is a property of the BLUEPRINT, not of ambient
+    //    disk: a whole-file copy to a merge surface, or a secret-bearing source, that currently diffs to `noop`
+    //    only because disk already matches it must fail exactly as it would on a fresh clone — otherwise the
+    //    same blueprint validates or refuses depending on the machine it runs on. Shape guard BEFORE secret scan
+    //    (a whole-file copy of a config source onto a merge surface is refused by shape, never reaching decode). ──
 
-    // Transform-vs-surface-shape clobber guard (brief FOLD 3): a whole-file transform (copy/compose/scaffold)
-    // overwrites the ENTIRE file, so aiming one at a `shape:"merge"` surface (`.cursor/mcp.json`, `.mcp.json`,
-    // the `.codex/config.toml` MCP tables) would clobber the user's own foreign content in that shared config.
-    // Only `config-merge` may write a merge surface. Content-free: names the surface label + offending transform.
+    // (i) Transform-vs-surface-shape clobber guard (FOLD 3): a whole-file transform (copy/compose/scaffold)
+    //     overwrites the ENTIRE file, so aiming one at a `shape:"merge"` surface (`.cursor/mcp.json`, `.mcp.json`,
+    //     the `.codex/config.toml` MCP tables) would clobber the user's own foreign content in that shared config.
+    //     Only `config-merge` may write a merge surface. Content-free: names the surface label + offending transform.
     if (file.transform !== "config-merge" && target.surface.shape === "merge") {
       preflightFailures.push({
         path: target.destination,
@@ -195,29 +195,34 @@ export function apply(input: ApplyInput, options: ApplyOptions = {}): ApplyOutco
       continue;
     }
 
-    // Effective-form secret scan (issue #43, brief FOLD 1): apply is the FIRST code that writes parser-consumed
-    // formats to disk, so it must scan the DECODED/effective form of every json|toml|yaml write — a secret hidden
-    // behind an encoding escape (JSON `\uXXXX`) slips past the raw front-gate (which scans source BYTES at the
-    // U6/U7 verb boundary) but not a scan of what the parser will actually materialize. `text` surfaces have no
-    // decode path, so the front-gate covers them and we skip. Fail CLOSED on a hit OR an unparseable source.
-    // The `JSON.stringify` below is total for every REACHABLE input: JSON never yields a BigInt, smol-toml
-    // REJECTS any non-losslessly-representable integer at parse time (so a big-int toml fails closed as
-    // unparseable / malformed-source before this runs), and no registry surface is yaml — so no `BigInt` value
-    // can reach `stringify` to throw. (Reachable formats are asserted text/json/toml by a dedicated test.)
-    const format = target.surface.format;
-    if (format !== "text") {
-      if (file.transform === "config-merge") {
-        // Scan ONLY the patch WE contribute — render already parsed it. NEVER the merge result or the existing
-        // disk content: foreign config legitimately holds the user's OWN secrets, and scanning it would
-        // false-positive on real user configs. This keeps the gate a secret-EGRESS check, not a secret detector.
-        if (containsSecret(JSON.stringify(file.patch))) {
-          preflightFailures.push({ path: target.destination, error: secretMessage(file.role, target.destination) });
-          continue;
-        }
-      } else if (file.content !== null) {
-        // A whole-file write to a config-format surface (e.g. a copy onto `.codex/agents/*.toml`): render did NOT
-        // parse it, so decode HERE and scan the effective value. Unparseable ⇒ fail closed — bytes we cannot
-        // decode are bytes we cannot certify secret-free.
+    // (ii) Secret-egress scan (issue #43, brief FOLD 1) of the bytes apply would WRITE. apply is egress defense
+    //      on what it CONTRIBUTES — it scans the patch/content of THIS row, NEVER the existing disk content or the
+    //      merge result (foreign config legitimately holds the user's OWN secrets; scanning those would
+    //      false-positive on real configs). A keyword-only secret in a config-merge SOURCE (no distinctive value
+    //      pattern) is the U6/U7 verb front-gate's job, NOT a re-run of the loader gate here. Fail CLOSED on a hit.
+    //      Every `JSON.stringify` below is total for every REACHABLE input: JSON never yields a BigInt, smol-toml
+    //      REJECTS a non-losslessly-representable integer at parse time (a big-int toml fails closed as unparseable
+    //      here or as malformed-source in render), and no registry surface is yaml — so no `BigInt` can reach it.
+    if (file.transform === "config-merge") {
+      // Decoded scan of the patch WE contribute — render already parsed it into `file.patch`.
+      if (containsSecret(JSON.stringify(file.patch))) {
+        preflightFailures.push({ path: target.destination, error: secretMessage(file.role, target.destination) });
+        continue;
+      }
+    } else if (file.content !== null) {
+      // A whole-file write (copy/compose/scaffold) with materialized content. RAW-scan the exact bytes we would
+      // write: this closes the TEXT-format gap — a secret in a CLAUDE.md / AGENTS.md / `.md` role file is now
+      // scanned, not just config formats. (A scaffold-skip row carries `content === null` — nothing is written,
+      // so there is nothing to scan; it falls through untouched.)
+      if (containsSecret(file.content)) {
+        preflightFailures.push({ path: target.destination, error: secretMessage(file.role, target.destination) });
+        continue;
+      }
+      // For a parser-consumed format (json/toml/yaml) ALSO scan the DECODED/effective form: a secret hidden
+      // behind an encoding escape (JSON `\uXXXX`) slips past the raw scan above but not a scan of what the parser
+      // materializes. Unparseable ⇒ fail CLOSED — bytes we cannot decode are bytes we cannot certify secret-free.
+      const format = target.surface.format;
+      if (format !== "text") {
         const parsed = parseConfigValue(format, file.content);
         if (!parsed.ok) {
           preflightFailures.push({ path: target.destination, error: `unparseable ${format} config source at '${target.destination}'` });
@@ -228,6 +233,17 @@ export function apply(input: ApplyInput, options: ApplyOptions = {}): ApplyOutco
           continue;
         }
       }
+    }
+
+    if (skip) continue; // validity passed; compat + `targets[i]` + the write are for NON-SKIP rows only
+
+    // (iii) Compatibility is about the LIVE write target (not blueprint validity), so it runs for non-skip rows
+    //       only: absence is compatible for every create surface; a merge surface must be a readable, parseable
+    //       object. A skip row's live state was already the basis for its noop/scaffold-skip diff.
+    const compat = checkTargetCompatibility(target, inspection);
+    if (!compat.compatible) {
+      preflightFailures.push({ path: target.destination, error: compat.message });
+      continue;
     }
 
     targets[i] = target; // fully validated — the write pass may use it

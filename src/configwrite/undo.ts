@@ -82,16 +82,29 @@ export function listUndo(dataDir?: string): UndoEntry[] {
 }
 
 /**
+ * What an `undo` call actually did — the honest disposition so a caller can distinguish a real reversal
+ * from an idempotent no-op instead of assuming every non-throwing call changed the file:
+ *   - `"reversed"` — undo CHANGED the target (deleted a created file, or restored a backup over it).
+ *   - `"noop"` — the target was ALREADY in its reversed state (a created file already gone, or a target
+ *     already holding its backup bytes), so undo made no change. This is not a failure; it is honest
+ *     idempotency (a double-undo, or undoing an already-rolled-back batch — see `runs.ts alreadyReversed`).
+ * A diverged/missing/unknown target still THROWS (an undo that cannot faithfully restore never pretends).
+ */
+export type UndoDisposition = "reversed" | "noop";
+
+/**
  * Reverse the mutation named by `id`: restore the target to its exact pre-mutation bytes + mode, or
  * delete it if the mutation created it.
  *
  * SAFE against later writes: undo only proceeds if the target still holds exactly what this mutation
  * left (its `postHash`) — otherwise a newer write or manual edit has diverged the file, and undo throws
  * rather than clobber it. Idempotent: a target already restored to its backup (or an already-deleted
- * created file) is a no-op. Throws loudly on an unknown id, a missing backup, or a diverged target — an
- * undo that cannot faithfully restore must never silently pretend to have worked.
+ * created file) is a no-op — reported as `"noop"` (vs `"reversed"` for a real change), so a caller need
+ * not re-derive from filesystem state whether anything actually happened. Throws loudly on an unknown id,
+ * a missing backup, or a diverged target — an undo that cannot faithfully restore must never silently
+ * pretend to have worked.
  */
-export function undo(id: string, dataDir?: string): void {
+export function undo(id: string, dataDir?: string): UndoDisposition {
   const resolved = resolveDataDir(dataDir);
   // Newest-wins if an id ever recurs (it shouldn't — ids are UUIDs); findLast scans back-to-front.
   const entry = listUndo(resolved).findLast((e) => e.id === id);
@@ -102,12 +115,12 @@ export function undo(id: string, dataDir?: string): void {
   if (entry.created) {
     // The mutation CREATED the target → undo deletes it. Already gone ⇒ idempotent no-op. Only delete if
     // the file is still exactly what we created — never discard a later edit to it.
-    if (currentHash === null) return;
+    if (currentHash === null) return "noop";
     if (currentHash !== entry.postHash) {
       throw new Error(`configwrite.undo: '${entry.targetPath}' changed since it was created (id '${id}') — refusing to delete`);
     }
     rmSync(entry.targetPath, { force: true });
-    return;
+    return "reversed";
   }
 
   // The target pre-existed → restore its original bytes.
@@ -118,12 +131,13 @@ export function undo(id: string, dataDir?: string): void {
     throw new Error(`configwrite.undo: '${entry.targetPath}' no longer exists (id '${id}') — refusing to resurrect it`);
   }
   if (currentHash === hashContent(readFileSync(entry.backupPath))) {
-    return; // already restored to the backup — idempotent no-op
+    return "noop"; // already restored to the backup — idempotent no-op
   }
   if (currentHash !== entry.postHash) {
     throw new Error(`configwrite.undo: '${entry.targetPath}' changed since this mutation (id '${id}') — refusing to clobber a later write`);
   }
   restoreAtomically(entry.backupPath, entry.targetPath, entry.mode);
+  return "reversed";
 }
 
 /**

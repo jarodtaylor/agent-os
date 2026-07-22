@@ -1035,18 +1035,39 @@ describe("gate round-4 fold — equivalent project-root spellings select the rig
   });
 });
 
-describe("bot review (PR #52) — corrupt-journal fail-closed batch grouping", () => {
-  test("an entry reusing a batchId under a DIFFERENT project root is dropped, not mixed into the batch", () => {
+describe("bot review + post-PR gate (PR #52) — corrupt-journal cross-project undo is fail-closed", () => {
+  test("a batchId appearing under two roots is QUARANTINED out of readBatches entirely", () => {
     // The journal is untrusted (module header): craft one with two entries sharing a batchId but two roots.
     mkdirSync(dataDir, { recursive: true });
     const base = { backupPath: null, created: true, mode: null, format: "text", ts: 1 };
     const mine = { ...base, id: "e1", targetPath: `${projectRoot}/CLAUDE.md`, postHash: "h1", batchId: "shared", projectRoot };
     const foreign = { ...base, id: "e2", targetPath: "/other/project/CLAUDE.md", postHash: "h2", batchId: "shared", projectRoot: "/other/project" };
     writeFileSync(join(dataDir, "undo-journal.jsonl"), `${JSON.stringify(mine)}\n${JSON.stringify(foreign)}\n`);
-    const batches = readBatches(dataDir);
-    expect(batches).toHaveLength(1);
-    // Only the first-seen root's entry survives; the foreign-root entry is fail-closed out.
-    expect(batches[0]!.entries.map((e) => e.targetPath)).toEqual([`${projectRoot}/CLAUDE.md`]);
-    expect(batches[0]!.entries.some((e) => e.targetPath.startsWith("/other/project"))).toBe(false);
+    // A cross-root batchId is corruption/tampering → the WHOLE batch is dropped, reachable by neither project.
+    expect(readBatches(dataDir)).toHaveLength(0);
+  });
+
+  test("default undo of project A does NOT reverse A's real files when a corrupt B-row reuses A's batchId", () => {
+    // A genuine apply for project A: creates a real file + a valid journal entry carrying A's true postHash.
+    wBlueprint("src/a.md", "project A instructions\n");
+    const a = apply({
+      manifest: { schemaVersion: 1, roles: [{ name: "r", harness: "claude-code", files: [{ transform: "copy", source: "src/a.md", destination: "CLAUDE.md" }] }] },
+      blueprintRoot,
+      projectRoot,
+      dataDir,
+    });
+    expect(existsProject("CLAUDE.md")).toBe(true);
+    // Corrupt the journal: append a foreign project-B row that REUSES A's real batchId (the exact tamper the
+    // post-PR gate flagged — pre-fix, default undo(B or A) resolved to A's batch and deleted A's real file).
+    const base = { backupPath: null, created: true, mode: null, format: "text", ts: 9 };
+    const foreign = { ...base, id: "b1", targetPath: "/other/project/CLAUDE.md", postHash: "hB", batchId: a.batchId, projectRoot: "/other/project" };
+    appendFileSync(join(dataDir, "undo-journal.jsonl"), `${JSON.stringify(foreign)}\n`);
+    // The batchId is now cross-root → quarantined. Default undo for EITHER project selects nothing…
+    expect(undoBatch(projectRoot, dataDir).reversed).toHaveLength(0);
+    expect(undoBatch("/other/project", dataDir).reversed).toHaveLength(0);
+    // …and an explicit undo of the poisoned id likewise reverses nothing. A's REAL file is untouched.
+    expect(undoBatch(projectRoot, dataDir, a.batchId).reversed).toHaveLength(0);
+    expect(existsProject("CLAUDE.md")).toBe(true);
+    expect(rProject("CLAUDE.md")).toBe("project A instructions\n");
   });
 });

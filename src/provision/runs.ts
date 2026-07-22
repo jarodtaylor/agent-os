@@ -30,6 +30,14 @@ export interface ProvisionBatch {
 function groupBatches(entries: readonly UndoEntry[]): ProvisionBatch[] {
   const order: string[] = [];
   const byId = new Map<string, ProvisionBatch>();
+  // A batchId that ever appears under two different canonical roots is QUARANTINED — excluded from the result
+  // ENTIRELY, not merely trimmed of its conflicting rows. Fail CLOSED on the untrusted/corrupt journal the module
+  // header warns about: a legitimate batch's entries all carry one ingress-canonicalized root, so a cross-root
+  // reuse is corruption/tampering. Trimming alone was insufficient (bot review PR #52 + its post-PR gate): the
+  // batch would keep its FIRST root's entries, and `newestBatchForProject`, selecting by a raw-journal batchId
+  // hit under the OTHER root, would still resolve to that batch and undo the first project's real files. Removing
+  // the whole batch means NEITHER project can reach it, by explicit id or by default selection.
+  const quarantined = new Set<string>();
   for (const entry of entries) {
     if (!entry.batchId || !entry.projectRoot) continue;
     const root = canonicalRoot(entry.projectRoot);
@@ -39,16 +47,12 @@ function groupBatches(entries: readonly UndoEntry[]): ProvisionBatch[] {
       byId.set(entry.batchId, batch);
       order.push(entry.batchId);
     } else if (batch.projectRoot !== root) {
-      // Fail CLOSED on the untrusted/corrupt journal the module header warns about: an entry that REUSES a
-      // batchId under a DIFFERENT (canonicalized) project root is not part of this batch — dropping it stops
-      // `undoBatch(project, …, batchId)` from reversing another project's paths through a shared batch id. A
-      // legitimate batch's entries all carry the ingress-canonicalized root, so this only ever excludes a
-      // corrupt / hand-edited row (bot review, PR #52).
+      quarantined.add(entry.batchId);
       continue;
     }
     batch.entries.push(entry);
   }
-  return order.map((id) => byId.get(id)!);
+  return order.filter((id) => !quarantined.has(id)).map((id) => byId.get(id)!);
 }
 
 /** Every provision batch in the journal, in first-appearance order, oldest entry first within each batch.
@@ -71,14 +75,14 @@ export function readBatches(dataDir?: string): ProvisionBatch[] {
  * with the U6 CLI undo verb; do NOT change the selection logic before then.
  */
 export function newestBatchForProject(projectRoot: string, dataDir?: string): ProvisionBatch | null {
-  const entries = listUndo(dataDir);
-  let lastBatchId: string | null = null;
+  // Select ONLY from the VALIDATED grouping (quarantined batches already removed), matching the target root, and
+  // take the last in first-appearance order = newest. Selecting a raw-journal batchId first and resolving it
+  // afterwards was the bypass the post-PR gate caught: a corrupted project-B row could name a batchId whose
+  // grouped batch belongs to project A, so default undo reversed A's files. Here a batch's own `projectRoot` (a
+  // single canonical root, since a cross-root batchId is quarantined out) is the only thing that can match.
   const target = canonicalRoot(projectRoot);
-  for (const entry of entries) {
-    if (entry.projectRoot !== undefined && canonicalRoot(entry.projectRoot) === target && entry.batchId) lastBatchId = entry.batchId;
-  }
-  if (lastBatchId === null) return null;
-  return groupBatches(entries).find((batch) => batch.batchId === lastBatchId) ?? null;
+  const matching = groupBatches(listUndo(dataDir)).filter((batch) => batch.projectRoot === target);
+  return matching.length > 0 ? matching[matching.length - 1]! : null;
 }
 
 /** The result of an undo verb, four honest per-target buckets (one entry's outcome never aborts the rest —

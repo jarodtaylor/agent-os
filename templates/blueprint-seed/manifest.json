@@ -1,0 +1,76 @@
+{
+  "schemaVersion": 1,
+  "roles": [
+    {
+      "name": "architect",
+      "harness": "claude-code",
+      "model": "opus",
+      "files": [
+        {
+          "transform": "compose",
+          "sources": [
+            "shared/project-overview.md",
+            "shared/run-state-protocol.md",
+            "roles/architect/instructions.md"
+          ],
+          "destination": "CLAUDE.md"
+        },
+        {
+          "transform": "copy",
+          "source": "roles/architect/agent.md",
+          "destination": ".claude/agents/architect.md"
+        }
+      ]
+    },
+    {
+      "name": "executor",
+      "harness": "codex",
+      "model": "gpt-5.4",
+      "files": [
+        {
+          "transform": "copy",
+          "source": "roles/executor/AGENTS.md",
+          "destination": "AGENTS.md"
+        },
+        {
+          "transform": "copy",
+          "source": "roles/executor/agent.toml",
+          "destination": ".codex/agents/executor.toml"
+        }
+      ]
+    },
+    {
+      "name": "qa",
+      "harness": "cursor",
+      "files": [
+        {
+          "transform": "copy",
+          "source": "roles/qa/agent.md",
+          "destination": ".cursor/agents/qa.md"
+        },
+        {
+          "transform": "copy",
+          "source": "roles/qa/skill.md",
+          "destination": ".cursor/skills/qa-browser-e2e/SKILL.md"
+        },
+        {
+          "transform": "config-merge",
+          "source": "roles/qa/browser-mcp.json",
+          "destination": ".cursor/mcp.json"
+        }
+      ]
+    },
+    {
+      "name": "reviewer",
+      "harness": "claude-code",
+      "model": "sonnet",
+      "files": [
+        {
+          "transform": "copy",
+          "source": "roles/reviewer/agent.md",
+          "destination": ".claude/agents/reviewer.md"
+        }
+      ]
+    }
+  ]
+}

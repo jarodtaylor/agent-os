@@ -30,16 +30,16 @@
  * `process.exit`, no ambient cwd, an injectable `dataDir` — so the suite drives every verb in-process and one
  * spawn test proves the `package.json` wiring. The `import.meta.main` block below is the only I/O adapter.
  */
-import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, posix, resolve } from "node:path";
 import type { Manifest, Runtime } from "../contract/index";
 import { resolveDataDir } from "../paths";
 import { apply, type ApplyOutcome } from "./apply";
 import { loadBlueprint } from "./blueprint";
-import { diffRendered, type DestinationRead, type DiffError, type DiffRow } from "./diff";
-import { containsSecret, errorText, hasMachineAbsolutePath, isNotFound, readFileBounded } from "./internal";
+import { diffRendered, type DiffError, type DiffRow } from "./diff";
+import { containsSecret, errorText, hasMachineAbsolutePath, isNotFound, readDestinationBounded, readFileBounded } from "./internal";
 import { renderBlueprint, type RenderError, type RenderIo } from "./render";
-import { lookupProject, registerProject } from "./registry";
+import { isLogicalProjectName, lookupProject, registerProject } from "./registry";
 import { undoBatch, type UndoOutcome } from "./runs";
 
 /** The blueprint directory inside a project. A fixed convention (R1: "a plain directory plus a manifest,
@@ -103,6 +103,11 @@ export type CliJson =
   | { verb: "status"; ok: boolean; errors: string[]; project: string | null; rows: DiffRow[]; drifted: number }
   | {
       verb: "apply";
+      /** ⚠️ `ok` (and therefore the exit code) reflects only whether every intended write LANDED — it is
+       *  `errors.length === 0`. An applied-but-unjournaled write is a SUCCESS by that measure (the bytes are on
+       *  disk) but is permanently un-undoable, and it reports ONLY in `warnings`. Automation that gates on the
+       *  exit code alone will therefore treat such a run as fully clean AND fully reversible, which it is not:
+       *  **check `warnings` too.** Asserted in `tests/provision-cli.test.ts` so it cannot change silently. */
       ok: boolean;
       errors: string[];
       warnings: string[];
@@ -358,31 +363,9 @@ function survey(projectRoot: string, blueprintRoot: string): Surveyed {
   const rendered = renderBlueprint(gated.manifest, io);
   if (!rendered.ok) return { ok: false, error: renderErrorText(rendered.error) };
 
-  const diffed = diffRendered(rendered.files, (destination) => readDestinationBytes(posix.join(projectRoot, destination)));
+  const diffed = diffRendered(rendered.files, (destination) => readDestinationBounded(posix.join(projectRoot, destination)));
   if (!diffed.ok) return { ok: false, error: diffErrorText(diffed.error) };
   return { ok: true, rows: diffed.rows };
-}
-
-/** Same 16 MiB ceiling as every other read boundary in this subsystem (`provision/internal.ts`, `scan/`). */
-const MAX_READ_BYTES = 16 * 1024 * 1024;
-
-/**
- * Byte-aware live-destination read for the diff (KTD8 needs raw bytes for the opaque-text identity check).
- * This MIRRORS `apply.ts`'s private reader exactly — same lstat discipline, same symlink/non-regular/oversized
- * ⇒ `blocked`, same ENOENT ⇒ `absent`. It is duplicated rather than imported because it is private to the
- * apply composition root; the two must stay identical, since any divergence would let `plan` and `apply`
- * disagree about a symlinked or oversized target (the exact class of surprise R10 exists to prevent).
- */
-function readDestinationBytes(absPath: string): DestinationRead {
-  try {
-    const stat = lstatSync(absPath);
-    if (stat.isSymbolicLink() || !stat.isFile()) return { ok: false, reason: "blocked" };
-    if (stat.size > MAX_READ_BYTES) return { ok: false, reason: "blocked" };
-    const bytes = readFileSync(absPath);
-    return { ok: true, content: bytes.toString("utf8"), bytes };
-  } catch (err) {
-    return { ok: false, reason: isNotFound(err) ? "absent" : "blocked" };
-  }
 }
 
 /** Content-free render/diff failure text — the same shapes `apply` reports, so a failure reads identically
@@ -436,8 +419,23 @@ function runInit(rawProject: string, args: ParsedArgs, dataDir: string): CliRun 
   const blueprintRoot = blueprintRootFor(projectRoot);
   const name = args.name ?? basename(projectRoot);
 
-  // (3) Name preflight (KTD11). A basename collision between two repos would otherwise silently rebind every
-  //     U7 lookup for the first one, so it is refused here — before any file is touched — with the way out.
+  // (3a) Name SHAPE preflight (KTD11). `registerProject` re-checks this at write time, but that runs at step
+  //      (5) — after the seed is copied and the run file scaffolded — so an unusable name used to leave a
+  //      SEEDED BUT UNREGISTERED project that no verb can recover: U7 can never resolve it, and re-running
+  //      `init` demands `--force`, which deletes the blueprint the operator may already have tuned. This is
+  //      reachable from ordinary argv (`--name a/b`) and even from the DEFAULT name (a directory whose name
+  //      carries a trailing space fails the trim rule). The check belongs in the preflight, which is what this
+  //      function's contract promises: nothing is written until every refusal has had its chance.
+  if (!isLogicalProjectName(name)) {
+    return initFailure(
+      args,
+      `'${name}' is not a usable logical project name (no path separators, no NUL, no leading/trailing whitespace, 1–128 chars) — re-run with --name <other>`,
+      projectRoot,
+    );
+  }
+
+  // (3b) Name COLLISION preflight (KTD11). A basename collision between two repos would otherwise silently
+  //      rebind every U7 lookup for the first one, so it is refused here — before any file is touched.
   const existing = lookupProject(name, dataDir);
   if (existing.kind === "found" && existing.record.projectRoot !== projectRoot) {
     return initFailure(
@@ -564,7 +562,25 @@ type RunStateResult = { ok: true; state: "created" | "present" | "skipped" } | {
  */
 function scaffoldRunState(projectRoot: string, blueprintRoot: string): RunStateResult {
   const target = join(projectRoot, RUN_STATE_FILENAME);
-  if (existsSync(target)) return { ok: true, state: "present" };
+  // Guarded lstat, NOT `existsSync` — the same discipline `removeBlueprintDir` below and the engine's
+  // `statTarget` apply, and the reason is that this is the ONE write that bypasses the config-write engine
+  // (RUN_STATE.md is deliberately not a target-registry surface, so `apply` can never touch it — R12). It
+  // therefore bypasses the engine's symlink refusal too, and must re-state it here.
+  //
+  // `existsSync` FOLLOWS symlinks, so a DANGLING `RUN_STATE.md` symlink read as absent and `writeFileSync`
+  // then followed it — landing the seed bytes at the link target ANYWHERE on the filesystem, unbacked-up and
+  // unjournaled, while the run exited 0 reporting the in-project path it did not write. A false-success
+  // misreport, and the one indirection this system never accepts. ENOENT alone means absent; anything else is
+  // refused rather than written through.
+  try {
+    const stats = lstatSync(target);
+    if (stats.isSymbolicLink()) {
+      return { ok: false, error: `'${target}' is a symlink — refusing to scaffold ${RUN_STATE_FILENAME} through an indirection` };
+    }
+    return { ok: true, state: "present" }; // a real file already there is left strictly alone (R12)
+  } catch (err) {
+    if (!isNotFound(err)) return { ok: false, error: `'${target}' could not be inspected: ${errorText(err)}` };
+  }
 
   const seed = readFileBounded(join(blueprintRoot, RUN_STATE_SEED_RELATIVE));
   if (!seed.ok) {
@@ -671,7 +687,10 @@ function runApply(rawProject: string, args: ParsedArgs, dataDir: string): CliRun
   return render(args, json, applyText(outcome, json), json.ok ? EXIT_OK : EXIT_FAILED);
 }
 
-function applyJson(outcome: ApplyOutcome, projectRoot: string): Extract<CliJson, { verb: "apply" }> {
+/** Exported for direct unit test: the unjournaled → `warnings` mapping is the operator-facing half of issue
+ *  #51.2, and the CLI deliberately does NOT expose apply's engine-injection seam, so this pure
+ *  ApplyOutcome → payload function is the honest place to prove it. */
+export function applyJson(outcome: ApplyOutcome, projectRoot: string): Extract<CliJson, { verb: "apply" }> {
   // A rollback that itself failed left files on disk despite `rolledBack: true` — it is an ERROR, not a note.
   const errors = [
     ...outcome.failed.map((f) => `${f.path}: ${f.error}`),
@@ -695,7 +714,9 @@ function applyJson(outcome: ApplyOutcome, projectRoot: string): Extract<CliJson,
   });
 }
 
-function applyText(outcome: ApplyOutcome, json: Extract<CliJson, { verb: "apply" }>): string {
+/** Exported alongside `applyJson` for the same reason — the `WARNING:` line is the only human rendering of an
+ *  un-undoable write. */
+export function applyText(outcome: ApplyOutcome, json: Extract<CliJson, { verb: "apply" }>): string {
   const lines: string[] = [];
   if (json.applied.length > 0) {
     lines.push(

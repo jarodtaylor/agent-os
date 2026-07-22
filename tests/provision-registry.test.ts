@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -104,6 +104,18 @@ describe("known-projects registry", () => {
     registerProject(dataDir, record("agent-os", "/p/agent-os"));
     expect(knownProjectsPath(dataDir)).toBe(join(dataDir, "known-projects.jsonl"));
     expect(readFileSync(knownProjectsPath(dataDir), "utf8").trim().split("\n")).toHaveLength(1);
+    // The "owner-only" half of this test's own name: assert the modes rather than implying them, so a refactor
+    // that drops the `mode` options is caught. 0600 file in a 0700 dir — the undo journal's discipline, and
+    // these records name the operator's real project paths.
+    expect(statSync(knownProjectsPath(dataDir)).mode & 0o777).toBe(0o600);
+
+    // The DIRECTORY mode must be proven on a dir `registerProject` itself creates: asserting it on `dataDir`
+    // would be tautological, since `mkdtempSync` already makes 0700 and the assertion would hold even if the
+    // writer dropped its `mode` option entirely.
+    const nested = join(dataDir, "fresh", "data");
+    registerProject(nested, record("nested", "/p/nested"));
+    expect(statSync(nested).mode & 0o777).toBe(0o700);
+    expect(statSync(knownProjectsPath(nested)).mode & 0o777).toBe(0o600);
   });
 
   test("a torn final line does not corrupt the next append", () => {

@@ -105,7 +105,12 @@ export function readBatchStatuses(dataDir?: string): Map<string, BatchStatusReco
       continue; // torn / partial line — skip, keep reading
     }
     const parsed = BatchStatusRecord.safeParse(parsedLine);
-    if (parsed.success) out.set(parsed.data.batchId, parsed.data);
+    if (!parsed.success) continue;
+    // Newest `ts` wins, with a later LINE breaking a tie — the same resolution `readKnownProjects` uses. A
+    // plain overwrite would make the LAST line win, i.e. read order, which is exactly what this reader must
+    // not depend on for a file the module's own contract treats as hand-editable and torn-tail-prone.
+    const current = out.get(parsed.data.batchId);
+    if (!current || parsed.data.ts >= current.ts) out.set(parsed.data.batchId, parsed.data);
   }
   return out;
 }

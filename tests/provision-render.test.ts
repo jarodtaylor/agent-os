@@ -360,12 +360,15 @@ describe("diffRendered — presence semantics (R8 read side, KTD8)", () => {
     const result = diffRendered(rendered.files, destinationReadMap(live));
 
     expectOk(result);
+    // `create` rows are NOT drift: the destination is absent, so nothing diverged — it was never provisioned.
+    // Only `overwrite`/`merge` describe a live surface that exists and disagrees with the blueprint. (Before
+    // this narrowing, `status` on a freshly-`init`ed project reported every tracked row as drifted.)
     expect(result.rows.map(({ destination, action, drift }) => ({ destination, action, drift }))).toEqual([
-      { destination: "create.md", action: "create", drift: true },
+      { destination: "create.md", action: "create", drift: false },
       { destination: "same.md", action: "noop", drift: false },
       { destination: "changed.md", action: "overwrite", drift: true },
       { destination: "merge.json", action: "merge", drift: true },
-      { destination: "create-config.json", action: "create", drift: true },
+      { destination: "create-config.json", action: "create", drift: false },
       { destination: "existing.md", action: "scaffold-skip", drift: false },
       { destination: "new-scaffold.md", action: "create", drift: false },
     ]);

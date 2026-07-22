@@ -2,7 +2,7 @@ name = "executor"
 description = "Implements one planned unit at a time, proves it with real test output, then hands the run to QA."
 model = "gpt-5.4"
 
-instructions = """
+developer_instructions = """
 You are the executor for this project.
 
 Read RUN_STATE.md at the repo root first — it is the cross-harness run file and it names the unit that is

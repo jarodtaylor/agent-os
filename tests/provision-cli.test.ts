@@ -11,8 +11,9 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
+import { parse as parseToml } from "smol-toml";
 import { dirname, join, resolve } from "node:path";
-import { runCli } from "../src/provision/cli";
+import { applyJson, applyText, runCli } from "../src/provision/cli";
 import { readKnownProjects } from "../src/provision/registry";
 
 // Every fixture lives under a temp root; `dataDir` is injected so no test can touch the real data dir.
@@ -195,6 +196,19 @@ describe("plan / apply / status / undo", () => {
     expect(readProject("RUN_STATE.md")).toBe(runStateBefore);
     expect(readProject("FRICTION.md")).toBe(frictionBefore);
     expect(statSync(p("RUN_STATE.md")).mtimeMs).toBe(runStateMtime);
+  });
+
+  test("status on a never-applied project reports ZERO drift — absent is not drifted", () => {
+    // The regression this locks: `drift` used to mean "this row would write", so a freshly-`init`ed project
+    // reported every tracked surface as drifted and `--json`'s `drifted` count was non-zero before a single
+    // byte had been provisioned. A machine consumer gating on `drifted > 0` got a false positive on the most
+    // common first run. Drift now means DIVERGENCE — a live surface that exists and disagrees.
+    const status = cli(["status"]);
+    expect(status.exitCode).toBe(0);
+    if (status.json.verb !== "status") throw new Error("unreachable");
+    expect(status.json.drifted).toBe(0);
+    expect(status.json.rows.every((r) => r.action === "create" && !r.drift)).toBe(true);
+    expect(status.text).toContain("No drift");
   });
 
   test("AE6: status reports a hand-edited provisioned file with its role and harness, and modifies nothing", () => {
@@ -449,4 +463,142 @@ describe("package.json script wiring (real process)", () => {
     // The injected data dir is the ONLY one written.
     expect(existsSync(join(spawnData, "known-projects.jsonl"))).toBe(true);
   }, 30_000);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Seed-surface schema: the render pipeline is deliberately content-BLIND, so a wrong required key in a
+// shipped seed file lands on disk, applies cleanly, and fails nothing — until the harness silently ignores
+// the role. That is the exact class `docs/solutions/conventions/verify-harness-surfaces-against-live-instances.md`
+// exists for (this suite was 671/671 green while the executor role shipped `instructions` instead of
+// `developer_instructions`, so Codex would have loaded it with NO system prompt). These assertions encode the
+// per-harness required keys the seed's structured surfaces must carry, verified against a live install.
+// ─────────────────────────────────────────────────────────────────────────────
+describe("seed template renders surfaces the target harness will actually accept", () => {
+  test("every .codex/agents/*.toml row carries Codex's required keys", () => {
+    const manifest = JSON.parse(readFileSync(join(SEED_ROOT, "manifest.json"), "utf8")) as {
+      roles: Array<{ files: Array<{ transform: string; source?: string; destination: string }> }>;
+    };
+    const rows = manifest.roles
+      .flatMap((role) => role.files)
+      .filter((file) => file.destination.startsWith(".codex/agents/") && file.destination.endsWith(".toml"));
+    // Guard the guard: if the seed ever stops shipping a Codex agent row, this test must fail loudly rather
+    // than pass vacuously over an empty list.
+    expect(rows.length).toBeGreaterThan(0);
+
+    for (const row of rows) {
+      const parsed = parseToml(readFileSync(join(SEED_ROOT, row.source!), "utf8")) as Record<string, unknown>;
+      // `developer_instructions` — NOT `instructions` — is the per-agent system prompt Codex reads.
+      expect(Object.keys(parsed).sort()).toEqual(expect.arrayContaining(["description", "developer_instructions", "name"]));
+      expect(typeof parsed.developer_instructions).toBe("string");
+      expect((parsed.developer_instructions as string).trim().length).toBeGreaterThan(0);
+    }
+  });
+
+  test("the shipped browser-MCP patch is an object-shaped config-merge source, not a whole-file blob", () => {
+    // The merge surface (`.cursor/mcp.json`) must receive a mergeable object patch — a non-object here would
+    // be refused at apply, and R11's tool-dependency provisioning is the row that proves that path.
+    const patch = JSON.parse(readFileSync(join(SEED_ROOT, "roles/qa/browser-mcp.json"), "utf8")) as Record<string, unknown>;
+    expect(patch).toMatchObject({ mcpServers: expect.any(Object) });
+    expect(Array.isArray(patch)).toBe(false);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The applied-but-unjournaled report (issue #51.2) at the OPERATOR layer. `apply()` itself is well covered via
+// its injected-engine seam, but the CLI deliberately does not expose that seam, so the mapping from
+// `ApplyOutcome.applied[].unjournaled` into `--json`'s `warnings` and the human `WARNING:` line was the one
+// untested link — and it is precisely the fact an operator needs to recover by hand. Driven directly against a
+// hand-built outcome, which needs no test-only CLI surface.
+// ─────────────────────────────────────────────────────────────────────────────
+describe("apply reports an un-undoable write to the operator (#51.2)", () => {
+  const unjournaledOutcome = (backupPath: string | null) => ({
+    batchId: "batch-1",
+    applied: [
+      { targetPath: "/p/CLAUDE.md", action: "create" as const, created: true, undoId: "u1" },
+      {
+        targetPath: "/p/AGENTS.md",
+        action: "overwrite" as const,
+        created: false,
+        undoId: null,
+        unjournaled: { backupPath, error: "journal append failed" },
+      },
+    ],
+    noops: [],
+    failed: [],
+    rolledBack: false,
+  });
+
+  test("the un-undoable write surfaces in --json warnings and names how to revert it by hand", () => {
+    const json = applyJson(unjournaledOutcome("/data/backups/agents.bak"), "/p");
+    expect(json.warnings).toHaveLength(1);
+    expect(json.warnings[0]).toContain("/p/AGENTS.md");
+    expect(json.warnings[0]).toContain("/data/backups/agents.bak");
+    // The reversible sibling must NOT be reported as un-undoable, and `undoable` must distinguish them.
+    expect(json.applied).toMatchObject([
+      { path: "/p/CLAUDE.md", undoable: true },
+      { path: "/p/AGENTS.md", undoable: false },
+    ]);
+  });
+
+  test("a CREATED un-undoable write tells the operator to delete it, not restore a backup", () => {
+    const json = applyJson(unjournaledOutcome(null), "/p");
+    expect(json.warnings[0]).toContain("delete it");
+    expect(json.warnings[0]).not.toContain("restore from");
+  });
+
+  test("the human rendering carries a WARNING line", () => {
+    const outcome = unjournaledOutcome("/data/backups/agents.bak");
+    const text = applyText(outcome, applyJson(outcome, "/p"));
+    expect(text).toContain("WARNING:");
+    expect(text).toContain("/p/AGENTS.md");
+  });
+
+  test("an un-undoable write does NOT fail the run — automation must check `warnings`, not just ok/exit code", () => {
+    // Deliberate contract, asserted so it can never change silently: the write SUCCEEDED, so `ok` stays true
+    // and the CLI exits 0. The un-undoability is real but is not a failure, and a consumer gating only on the
+    // exit code will not learn about it. Documented on the CliJson apply variant for that reason.
+    expect(applyJson(unjournaledOutcome(null), "/p").ok).toBe(true);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Two init preflight defects the security lens reproduced against a green 671-test suite. Both are about
+// `init` keeping the contract its own docstring states: nothing is written until every refusal has had its
+// chance, and no write goes through an indirection this system did not describe.
+// ─────────────────────────────────────────────────────────────────────────────
+describe("init preflight refuses before writing", () => {
+  test("a DANGLING RUN_STATE.md symlink is refused — the seed never lands at the link target", () => {
+    // `existsSync` follows symlinks, so a dangling link read as ABSENT and `writeFileSync` then followed it,
+    // writing the seed outside the project while the run exited 0 reporting the in-project path.
+    const outside = join(root, "outside", "captured.md");
+    mkdirSync(dirname(outside), { recursive: true });
+    symlinkSync(outside, p("RUN_STATE.md"));
+
+    const init = cli(["init"]);
+    expect(init.exitCode).toBe(1);
+    expect(init.text).toContain("symlink");
+    // The decisive assertion: nothing was written through the indirection.
+    expect(existsSync(outside)).toBe(false);
+  });
+
+  test("an existing REGULAR RUN_STATE.md is still left strictly alone (R12), not refused", () => {
+    // The symlink guard must not turn the normal already-present case into a failure.
+    writeProject("RUN_STATE.md", "operator's own run state\n");
+    const init = cli(["init"]);
+    expect(init.exitCode).toBe(0);
+    if (init.json.verb !== "init") throw new Error("unreachable");
+    expect(init.json.runState).toBe("present");
+    expect(readProject("RUN_STATE.md")).toBe("operator's own run state\n");
+  });
+
+  test("an unusable --name is refused BEFORE the seed is copied, leaving the project untouched", () => {
+    // Previously the name was validated only inside registerProject, at write time — leaving a seeded but
+    // UNREGISTERED project that U7 could never resolve and that re-`init` would only replace with --force.
+    const init = cli(["init", "--name", "a/b"]);
+    expect(init.exitCode).toBe(1);
+    expect(init.text).toContain("not a usable logical project name");
+    expect(existsSync(p("blueprint"))).toBe(false);
+    expect(existsSync(p("RUN_STATE.md"))).toBe(false);
+    expect(readKnownProjects(dataDir).size).toBe(0);
+  });
 });

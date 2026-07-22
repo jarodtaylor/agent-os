@@ -6,7 +6,7 @@
  * The bounded read mirrors `src/scan/internal.ts` and `src/codex-credential.ts` EXACTLY — a stat-before-read
  * regular-file guard + the same 16 MiB ceiling — so all three read boundaries stay identically disciplined.
  */
-import { readFileSync, statSync } from "node:fs";
+import { lstatSync, readFileSync, statSync } from "node:fs";
 import { posix } from "node:path";
 import { classify } from "../capture/secret-classify";
 
@@ -64,6 +64,39 @@ export function readFileBounded(path: string): ReadOutcome {
 
 /** The real file-I/O the loader uses in production. */
 export const realBlueprintIo: BlueprintIo = { readFileBounded };
+
+/**
+ * One live-destination read, BYTE-aware — the read side of the diff (KTD8 needs raw bytes for the opaque-text
+ * identity check, which a lossy utf8 round-trip would defeat). Distinct from `readFileBounded` above, which
+ * returns decoded text for the secret gate; this one returns both forms.
+ *
+ * It lives HERE, shared, rather than privately in each caller: `apply` and the CLI's `plan`/`status` must read a
+ * live destination IDENTICALLY, or the two verbs disagree about a symlinked or oversized target — exactly the
+ * surprise R10 exists to prevent. It was briefly duplicated (once in `apply.ts`'s composition root, once in
+ * `cli.ts`) under a "private to one composition root" rationale that expired the moment the second call site
+ * existed; a comment promising two copies would stay in sync documents a hazard instead of removing it.
+ *
+ * Mirrors the engine's lstat discipline: a symlink or non-regular node reads as `blocked`, never silently
+ * absent, so provisioning never writes through an indirection it did not describe; an oversized file is refused
+ * before it is read into memory; only ENOENT is `absent`.
+ *
+ * The return shape is written structurally rather than importing `diff.ts`'s `DestinationRead`: `diff.ts`
+ * already imports `ReadOutcome` from here, so naming its type would invert this module's place in the DAG for
+ * nothing. Structural typing satisfies `DestinationReader` at every call site, and `Buffer` IS a `Uint8Array`.
+ */
+export function readDestinationBounded(
+  absPath: string,
+): { ok: true; content: string; bytes: Uint8Array } | { ok: false; reason: "absent" | "blocked" } {
+  try {
+    const stat = lstatSync(absPath);
+    if (stat.isSymbolicLink() || !stat.isFile()) return { ok: false, reason: "blocked" };
+    if (stat.size > MAX_BLUEPRINT_BYTES) return { ok: false, reason: "blocked" };
+    const bytes = readFileSync(absPath);
+    return { ok: true, content: bytes.toString("utf8"), bytes };
+  } catch (err) {
+    return { ok: false, reason: isNotFound(err) ? "absent" : "blocked" };
+  }
+}
 
 /** ENOENT (the path truly does not exist) vs any other stat/read failure (permissions, etc.). Reads the
  *  Node error's `code` through a typeof guard so inspecting the thrown value can't itself throw. Shared by the

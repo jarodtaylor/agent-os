@@ -1088,6 +1088,24 @@ describe("issue #50 — default undo targets the newest COMMITTED batch", () => 
 
     expect(newestBatchForProject(projectRoot, dataDir)?.batchId).toBe(a.batchId);
   });
+
+  test("a duplicate status line OUT OF ts ORDER loses to the newer record — resolution is ts, never read order", () => {
+    // `apply` writes one record per batch, so a duplicate only arrives by hand-edit or crash — precisely the
+    // untrusted-input case this reader is validated for. An older `rolled-back` line appended AFTER the real
+    // `committed` one must not win: a plain last-line-wins overwrite would silently exclude a live batch from
+    // default undo, stranding it behind an explicit `--batch` id.
+    wBlueprint("first.md", "# Executor\n");
+    const a = apply({
+      manifest: { schemaVersion: 1, roles: [{ name: "executor", harness: "codex", files: [{ transform: "copy", source: "first.md", destination: "AGENTS.md" }] }] },
+      blueprintRoot,
+      projectRoot,
+      dataDir,
+    });
+    appendFileSync(batchStatusPath(dataDir), `${JSON.stringify({ batchId: a.batchId, projectRoot, status: "rolled-back", ts: 1 })}\n`);
+
+    expect(newestBatchForProject(projectRoot, dataDir)?.batchId).toBe(a.batchId);
+    expect(undoBatch(projectRoot, dataDir).reversed).toEqual([join(projectRoot, "AGENTS.md")]);
+  });
 });
 
 describe("provision apply — FOLD3 journal-ordering supersession (ABA content cycle)", () => {

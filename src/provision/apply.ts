@@ -41,8 +41,8 @@ import {
 } from "../configwrite/index";
 import type { Manifest, Runtime } from "../contract/index";
 import { recordBatchStatus } from "./batch-status";
-import { diffRendered, type DestinationRead, type DestinationReader, type DiffError, type PlanAction } from "./diff";
-import { canonicalProjectRoot, containsSecret, errorText, isNotFound, readFileBounded } from "./internal";
+import { diffRendered, type DestinationReader, type DiffError, type PlanAction } from "./diff";
+import { canonicalProjectRoot, containsSecret, errorText, isNotFound, readDestinationBounded, readFileBounded } from "./internal";
 import { isPlainRecord, parseConfigValue, renderBlueprint, type RenderError, type RenderedFile, type RenderIo } from "./render";
 import {
   checkTargetCompatibility,
@@ -54,9 +54,11 @@ import {
 } from "./targets";
 
 /** Same 16 MiB ceiling as the shared read-boundary discipline in `src/provision/internal.ts` (and
- *  `src/scan/internal.ts` / `src/codex-credential.ts`): the two live-destination readers below stat-before-read
- *  and refuse an oversized file rather than OOM on a pathological one. Kept local — a cross-module export just
- *  for this constant would over-couple the modules. */
+ *  `src/scan/internal.ts` / `src/codex-credential.ts`): the compatibility inspector below stat-before-reads and
+ *  refuses an oversized file rather than OOM on a pathological one. Kept local — a cross-module export just for
+ *  this constant would over-couple the modules. (The live-DESTINATION read is no longer here: it moved to
+ *  `internal.ts#readDestinationBounded`, shared with the CLI so `plan`/`status` and `apply` cannot disagree
+ *  about a symlinked or oversized target.) */
 const MAX_APPLY_READ_BYTES = 16 * 1024 * 1024; // 16 MiB, matching src/provision/internal.ts
 
 /** The two engine primitives apply dispatches to, injectable so a test can wrap them to exercise the
@@ -150,7 +152,7 @@ export function apply(input: ApplyInput, options: ApplyOptions = {}): ApplyOutco
   const files = rendered.files;
 
   // ── Preflight, phase 2: diff (pure) over the SAME files — rows co-index with files (brief pt 7) ──
-  const readDestinationBytes: DestinationReader = (destination) => readDestination(posix.join(projectRoot, destination));
+  const readDestinationBytes: DestinationReader = (destination) => readDestinationBounded(posix.join(projectRoot, destination));
   const diffed = diffRendered(files, readDestinationBytes);
   if (!diffed.ok) {
     return preflightFailure(batchId, projectRoot, diffed.error.destination, diffErrorText(diffed.error));
@@ -472,21 +474,6 @@ const isSkip = (action: PlanAction): action is Extract<PlanAction, "noop" | "sca
 
 function isProvisionHarness(harness: Runtime): harness is ProvisionHarness {
   return harness === "claude-code" || harness === "codex" || harness === "cursor";
-}
-
-/** Real byte-aware destination reader for the diff (KTD8 needs raw bytes for the text identity check). Mirrors
- *  the engine's lstat discipline: a symlink or non-regular node reads as `blocked`, never silently absent; an
- *  oversized file (past the shared 16 MiB read bound) is refused the same way, before it is read into memory. */
-function readDestination(absPath: string): DestinationRead {
-  try {
-    const stat = lstatSync(absPath);
-    if (stat.isSymbolicLink() || !stat.isFile()) return { ok: false, reason: "blocked" };
-    if (stat.size > MAX_APPLY_READ_BYTES) return { ok: false, reason: "blocked" };
-    const bytes = readFileSync(absPath);
-    return { ok: true, content: bytes.toString("utf8"), bytes };
-  } catch (err) {
-    return { ok: false, reason: isNotFound(err) ? "absent" : "blocked" };
-  }
 }
 
 /** Real path inspection for `checkTargetCompatibility`. `stat` maps the live node to a `TargetPathState`;

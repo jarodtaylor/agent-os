@@ -108,8 +108,24 @@ function parseLiveConfig(
   return parsed.ok ? parsed : configFailure(file, "malformed-destination");
 }
 
+/**
+ * DRIFT MEANS DIVERGENCE, NOT "WOULD WRITE". Only `overwrite` and `merge` describe a live surface that EXISTS
+ * and disagrees with the blueprint — the two actions a drift report is actually about. A `create` row means the
+ * destination is ABSENT (never provisioned), which is not drift: without this restriction, `status` on a
+ * freshly-`init`ed project reports every tracked row as drifted and its `drifted` count is non-zero before a
+ * single byte was ever written — a false positive on the most common first run, and one that lies to a machine
+ * consumer reading `--json`, not just to the table.
+ *
+ * The narrowing lives HERE rather than in the CLI's rendering because `DiffRow.drift` is the one shared field
+ * every consumer reads — `plan`, `status`, and the U7 `provision_status` MCP tool all build their output from
+ * it. Fixing only the CLI's summary would leave the field itself lying to the next consumer.
+ *
+ * `scaffold` needs no separate guard now: a scaffold row is create-once, so `diffRendered` short-circuits it to
+ * `scaffold-skip` (present) or emits `create` (absent) — it can never reach `overwrite`/`merge`. Its exclusion
+ * from drift (KTD8) therefore falls out of the action check instead of being asserted twice.
+ */
 function row(file: RenderedFile, action: PlanAction): DiffRow {
-  const drift = file.transform !== "scaffold" && action !== "noop" && file.driftTracked;
+  const drift = (action === "overwrite" || action === "merge") && file.driftTracked;
   return { role: file.role, harness: file.harness, destination: file.destination, action, drift };
 }
 

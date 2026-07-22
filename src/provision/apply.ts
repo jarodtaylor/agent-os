@@ -20,8 +20,10 @@
  *     CONTINUE. The rollback list is built INCREMENTALLY (each undoId pushed as its write returns), so a later
  *     error's rollback can never reverse an applied-but-unjournaled write and the report stays honest.
  *
- * Every batch that reaches the write pass records its TERMINAL STATE (`batch-status.ts`, issue #50) so a later
- * `undo` can tell a committed run from a rolled-back one — the journal alone cannot say how a batch ended.
+ * Every batch that JOURNALS a write records its TERMINAL STATE (`batch-status.ts`, issue #50) so a later `undo`
+ * can tell a committed run from a rolled-back one — the journal alone cannot say how a batch ended. A run that
+ * journals nothing (a preflight refusal, or an all-noop re-apply) records no state and reports a NULL `batchId`:
+ * there is no batch, so there is nothing to have a terminal state and nothing to advertise (gate finding 4).
  *
  * LIFO reversal is universal (brief pt 3): a blueprint CAN write the same destination twice (two config-merge
  * rows into one shared `.cursor/mcp.json`), forming a postHash chain X→v1→v2. `undo` is hash-checked, so v2
@@ -114,7 +116,21 @@ export interface AppliedWrite {
  * reversed); on the success path `rolledBack` is false and both annotations are absent/empty.
  */
 export interface ApplyOutcome {
-  batchId: string;
+  /**
+   * The batch id, non-null IFF this run JOURNALED at least one reversible write — i.e. iff a batch exists that
+   * `undo --batch <id>` can find. `null` for a preflight failure, for an all-noop run (the routine repeat apply),
+   * and for a run whose every write was applied-but-unjournaled.
+   *
+   * WHY NULLABLE (gate finding 4): the id used to be minted unconditionally, so an all-noop apply advertised a
+   * batch with NO journal entries and told the operator to reverse it. Naming that id explicitly failed to find
+   * it, while the bare `undo` the message invited selected and reversed an OLDER real batch instead — a harmless
+   * repeated apply leading straight to an unintended rollback. An id that cannot be undone is not a value worth
+   * reporting, so the illegal state is now unrepresentable rather than documented.
+   *
+   * An ABORTED apply that DID journal keeps its id: those entries exist, and when a rollback itself failed the
+   * files are still on disk, so the id is the operator's only handle on them.
+   */
+  batchId: string | null;
   applied: AppliedWrite[];
   noops: string[];
   failed: Array<{ path: string; error: string }>;
@@ -147,7 +163,7 @@ export function apply(input: ApplyInput, options: ApplyOptions = {}): ApplyOutco
   };
   const rendered = renderBlueprint(manifest, renderIo);
   if (!rendered.ok) {
-    return preflightFailure(batchId, projectRoot, rendered.error.destination, renderErrorText(rendered.error));
+    return preflightFailure(projectRoot, rendered.error.destination, renderErrorText(rendered.error));
   }
   const files = rendered.files;
 
@@ -155,7 +171,7 @@ export function apply(input: ApplyInput, options: ApplyOptions = {}): ApplyOutco
   const readDestinationBytes: DestinationReader = (destination) => readDestinationBounded(posix.join(projectRoot, destination));
   const diffed = diffRendered(files, readDestinationBytes);
   if (!diffed.ok) {
-    return preflightFailure(batchId, projectRoot, diffed.error.destination, diffErrorText(diffed.error));
+    return preflightFailure(projectRoot, diffed.error.destination, diffErrorText(diffed.error));
   }
   const rows = diffed.rows;
 
@@ -287,7 +303,8 @@ export function apply(input: ApplyInput, options: ApplyOptions = {}): ApplyOutco
     }
   }
   if (preflightFailures.length > 0) {
-    return { batchId, applied: [], noops: [], failed: preflightFailures, rolledBack: false };
+    // Null id for the same reason as `preflightFailure`: nothing was written, so no batch exists to reverse.
+    return { batchId: null, applied: [], noops: [], failed: preflightFailures, rolledBack: false };
   }
 
   // ── Write pass — nothing has been written until here; every target is proven compatible ──
@@ -363,6 +380,7 @@ export function apply(input: ApplyInput, options: ApplyOptions = {}): ApplyOutco
       // journaled writes are dropped, but any applied-but-unjournaled write stays, honestly, because it is still
       // on disk. `rollbackFailures` names any target whose reversal itself failed (still on disk, not honest to
       // drop) so `rolledBack: true` never overclaims.
+      const journaled = rollback.length > 0; // captured BEFORE the reversal — the entries survive it, in the journal
       const rollbackFailures = rollbackLifo(rollback, dataDir);
       // Durable terminal state (issue #50), recorded ONLY when this batch provably left NOTHING live on disk —
       // then and only then may default `undo` skip it and reach the last committed run instead.
@@ -378,10 +396,12 @@ export function apply(input: ApplyInput, options: ApplyOptions = {}): ApplyOutco
       // Leaving the batch UNKNOWN keeps it default-selectable and still superseding — the fail-safe direction
       // this module commits to everywhere. The cost is the pre-#50 no-op for this one narrow case (a bare
       // `undo` picks it and honestly reports `alreadyReversed`), which is exactly the trade case (1) accepts.
+      // A third suppressor, from gate finding 4: a batch that journaled NOTHING has no entries for a terminal
+      // state to describe, so recording one would leave an orphan row keyed to a batch `undo` can never find.
       const stranded = applied.some((w) => w.unjournaled);
-      if (rollbackFailures.length === 0 && !stranded) recordBatchStatus(dataDir, batchId, projectRoot, "rolled-back");
+      if (journaled && rollbackFailures.length === 0 && !stranded) recordBatchStatus(dataDir, batchId, projectRoot, "rolled-back");
       const outcome: ApplyOutcome = {
-        batchId,
+        batchId: journaled ? batchId : null,
         applied: applied.filter((w) => w.undoId === null),
         noops,
         failed: [{ path, error: errorText(err) }],
@@ -392,12 +412,20 @@ export function apply(input: ApplyInput, options: ApplyOptions = {}): ApplyOutco
     }
   }
 
-  // The write pass completed: this batch's writes are live and undoable. (Both this and the abort path record
-  // AFTER the outcome is settled, and best-effort — a status line that fails to land degrades selection to
-  // journal order, it never turns a successful apply into a failure. Preflight failures never reach either
-  // recording site: they journal nothing, so there is no batch to have a terminal state.)
-  recordBatchStatus(dataDir, batchId, projectRoot, "committed");
-  return { batchId, applied, noops, failed: [], rolledBack: false };
+  // The write pass completed. (Both this and the abort path record AFTER the outcome is settled, and
+  // best-effort — a status line that fails to land degrades selection to journal order, it never turns a
+  // successful apply into a failure.)
+  //
+  // ONLY when the pass JOURNALED something (gate finding 4). A run can complete having written nothing reversible
+  // in two ways: every row diffed to a noop — the routine repeat apply, since the fine-tune loop re-applies
+  // constantly — or every write was applied-but-unjournaled. Either way no journal entry carries this `batchId`,
+  // so `committed` would be an orphan row and the id would name a batch `undo` cannot find. Reporting it invited
+  // real harm: the operator was told "Batch <id> — reverse it with `undo`", and the bare `undo` that followed
+  // selected an OLDER real batch and reversed work they never meant to touch. `null` says what is true — nothing
+  // reversible happened — and the same rule gives preflight failures a null id (they journal nothing either).
+  const journaled = rollback.length > 0;
+  if (journaled) recordBatchStatus(dataDir, batchId, projectRoot, "committed");
+  return { batchId: journaled ? batchId : null, applied, noops, failed: [], rolledBack: false };
 }
 
 /** One row that resolves to a shared destination. `patch` is present ONLY for a `config-merge` contributor,
@@ -517,9 +545,11 @@ function realInspection(): TargetInspection {
   };
 }
 
-function preflightFailure(batchId: string, projectRoot: string, destination: string, error: string): ApplyOutcome {
+/** A refusal BEFORE the write pass: nothing was written and nothing journaled, so there is no batch — hence the
+ *  null id (the `batchId` contract above). The minted uuid is simply discarded; it never reached a journal entry. */
+function preflightFailure(projectRoot: string, destination: string, error: string): ApplyOutcome {
   return {
-    batchId,
+    batchId: null,
     applied: [],
     noops: [],
     failed: [{ path: posix.join(projectRoot, destination), error }],

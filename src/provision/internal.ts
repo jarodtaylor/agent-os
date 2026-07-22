@@ -6,7 +6,18 @@
  * The bounded read mirrors `src/scan/internal.ts` and `src/codex-credential.ts` EXACTLY — a stat-before-read
  * regular-file guard + the same 16 MiB ceiling — so all three read boundaries stay identically disciplined.
  */
-import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync, statSync } from "node:fs";
+import {
+  appendFileSync,
+  closeSync,
+  constants,
+  fstatSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readSync,
+  statSync,
+} from "node:fs";
 import { dirname, posix } from "node:path";
 import { classify } from "../capture/secret-classify";
 
@@ -24,7 +35,9 @@ export function canonicalProjectRoot(root: string): string {
 }
 
 /** Same 16 MiB ceiling as `src/scan/internal.ts` / `src/codex-credential.ts` — generous for real blueprint
- *  files (KBs), bounding the OOM surface of a pathological oversized one. */
+ *  files (KBs), bounding the OOM surface of a pathological oversized one. Also bounds this layer's two
+ *  append-only sidecars (`registry.ts`, `batch-status.ts`), which read through `readFileBounded` below: one
+ *  ceiling for every read this layer performs, so no read boundary can drift from the others. */
 const MAX_BLUEPRINT_BYTES = 16 * 1024 * 1024; // 16 MiB, matching src/scan/internal.ts
 
 /**
@@ -45,10 +58,11 @@ export interface BlueprintIo {
 }
 
 /**
- * Bounded, total read of one blueprint file. The stat-before-read confirms a bounded REGULAR file, so a
- * FIFO/character-device at the path can't block the read indefinitely (no writer ever comes) and an oversized
- * file can't OOM us — either is refused WITHOUT reading. ENOENT is reported distinctly from every other read
- * failure so the loader can skip-vs-fail per its own policy. Never throws.
+ * Bounded, total read of one blueprint file — and, since it is the layer's ONE disciplined read, of the two
+ * append-only sidecars too. The stat-before-read confirms a bounded REGULAR file, so a FIFO/character-device at
+ * the path can't block the read indefinitely (no writer ever comes) and an oversized file can't OOM us — either
+ * is refused WITHOUT reading. ENOENT is reported distinctly from every other read failure so the loader can
+ * skip-vs-fail per its own policy; the sidecar readers collapse both to "no records". Never throws.
  */
 export function readFileBounded(path: string): ReadOutcome {
   let raw: string;
@@ -163,12 +177,44 @@ export function containsSecret(text: string): boolean {
  */
 export function appendJsonlRecord(path: string, record: unknown): void {
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  const lead = existsSync(path) && !endsWithNewline(path) ? "\n" : "";
-  appendFileSync(path, lead + JSON.stringify(record) + "\n", { mode: 0o600 });
+  const tail = probeTail(path);
+  // A FIFO/device/directory at a sidecar path is refused BEFORE the append: `appendFileSync` opens a FIFO for
+  // write and blocks until a reader appears, which is the write-side twin of the read hang the probe avoids.
+  // Throwing here matches `configwrite`'s `statTarget`, which refuses a non-regular write target the same way;
+  // both callers already handle a throw correctly (`registerProject` reports `write-failed`, `recordBatchStatus`
+  // logs and swallows), so the refusal lands on each one's existing fail direction.
+  if (tail === "not-regular") throw new Error(`refusing to append: ${path} is not a regular file`);
+  appendFileSync(path, (tail === "torn" ? "\n" : "") + JSON.stringify(record) + "\n", { mode: 0o600 });
 }
 
-/** True iff the file ends with a newline (or is empty) — i.e. the next append starts on a clean line. */
-function endsWithNewline(path: string): boolean {
-  const buf = readFileSync(path);
-  return buf.length === 0 || buf[buf.length - 1] === 0x0a;
+/**
+ * Does the file end mid-line, so the next append must lead with a newline to isolate the torn tail?
+ *
+ * A ONE-BYTE positional read, not a whole-file read: these sidecars grow one line per `init`/apply forever, and
+ * the previous implementation read the entire file on EVERY append just to look at its last byte — a cost that
+ * scaled with history and had no bound at all. One `open` + `fstat` + one-byte `read` is constant work.
+ *
+ * O_NONBLOCK is load-bearing: a plain open of a FIFO blocks until a writer appears, so the probe would reproduce
+ * the very hang it exists to remove. With it, opening a pipe returns immediately and `fstat` on the SAME
+ * descriptor answers "is this a regular file" with no stat/open TOCTOU window.
+ *
+ * Failure direction: any I/O failure that is not a positive non-regular verdict reports `torn`, i.e. lead with a
+ * newline. A spurious blank line is skipped by every reader; a MISSING one concatenates two records and destroys
+ * both. ENOENT is `absent` — a file we are about to create has no torn tail to isolate.
+ */
+function probeTail(path: string): "absent" | "clean" | "torn" | "not-regular" {
+  let fd: number | undefined;
+  try {
+    fd = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK);
+    const stat = fstatSync(fd);
+    if (!stat.isFile()) return "not-regular";
+    if (stat.size === 0) return "clean"; // an empty file already starts on a clean line
+    const last = Buffer.alloc(1);
+    readSync(fd, last, 0, 1, stat.size - 1);
+    return last[0] === 0x0a ? "clean" : "torn";
+  } catch (err) {
+    return isNotFound(err) ? "absent" : "torn";
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
 }

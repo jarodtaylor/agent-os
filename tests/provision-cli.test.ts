@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
   chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -12,10 +13,11 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { parse as parseToml } from "smol-toml";
 import { dirname, join, resolve } from "node:path";
-import { applyJson, applyText, runCli } from "../src/provision/cli";
+import { applyJson, applyText, restoreBlueprintBackup, runCli } from "../src/provision/cli";
 import { readKnownProjects } from "../src/provision/registry";
 
 // Every fixture lives under a temp root; `dataDir` is injected so no test can touch the real data dir.
@@ -548,6 +550,33 @@ describe("apply reports an un-undoable write to the operator (#51.2)", () => {
     expect(json.warnings[0]).not.toContain("restore from");
   });
 
+  test("when EVERY write was un-undoable the summary says so — never \"nothing changed\" (gate finding 4)", () => {
+    // `batchId: null` has two causes and the human line must not conflate them. A true no-op really did change
+    // nothing; a run whose every write LANDED but none could be journaled changed files and lost only the
+    // reversibility. Telling that operator "nothing changed" would be a fresh lie in the very domain this fix
+    // hardens — and the WARNING lines below it are what name each file and how to revert it by hand.
+    const outcome = {
+      batchId: null,
+      applied: [
+        { targetPath: "/p/CLAUDE.md", action: "create" as const, created: true, undoId: null, unjournaled: { backupPath: null, error: "journal append failed" } },
+        { targetPath: "/p/AGENTS.md", action: "create" as const, created: true, undoId: null, unjournaled: { backupPath: null, error: "journal append failed" } },
+      ],
+      noops: [],
+      failed: [],
+      rolledBack: false,
+    };
+    const json = applyJson(outcome, "/p");
+    expect(json.ok).toBe(true); // the bytes landed — this run SUCCEEDED by the `errors` measure
+    expect(json.batchId).toBeNull();
+
+    const text = applyText(outcome, json);
+    expect(text).toContain("Applied 2");
+    expect(text).not.toContain("Nothing changed"); // …because two files demonstrably did change
+    expect(text).not.toContain("reverse it with"); // …and there is no batch to reverse
+    expect(text).toContain("No reversible batch");
+    expect(text.match(/WARNING:/g)).toHaveLength(2); // one per un-undoable file
+  });
+
   test("the human rendering carries a WARNING line", () => {
     const outcome = unjournaledOutcome("/data/backups/agents.bak");
     const text = applyText(outcome, applyJson(outcome, "/p"));
@@ -635,6 +664,172 @@ describe("init --force stages before it destroys (the blueprint has no undo)", (
     expect(existsSync(p("blueprint/HAND-TUNED.md"))).toBe(false); // genuinely replaced, not merged
     expect(existsSync(p("blueprint/manifest.json"))).toBe(true);
     expect(readdirSync(projectRoot).filter((e) => e.includes(".tmp"))).toEqual([]);
+  });
+});
+
+/**
+ * `--force` is the ONE mutation in this system with no backup, no journal and no undo — every other write goes
+ * through the config-write engine precisely so it is reversible, and `blueprint/` may hold weeks of an
+ * operator's hand-tuning. Staging alone only shrank the destructive window: the original was still DELETED
+ * before the replacement landed, and `RUN_STATE.md` scaffolding plus registration both ran after it was gone.
+ * These lock the transaction — set aside, install, finish, and only then drop the backup — and the honesty
+ * rules around it: a restore that fails is never reported as a restore, and a surviving backup stops the next
+ * run rather than being silently stepped over.
+ */
+describe("init --force is a recoverable transaction", () => {
+  /** Every temp/backup sibling `--force` may create. A clean run leaves NONE of them behind. */
+  const leftovers = (): string[] => readdirSync(projectRoot).filter((e) => e.startsWith("blueprint."));
+
+  test("a failure scaffolding RUN_STATE.md after the swap puts the operator's blueprint back", () => {
+    cli(["init"]);
+    writeProject("blueprint/HAND-TUNED.md", "weeks of tuning\n");
+    const manifestBefore = readProject("blueprint/manifest.json");
+
+    // A DANGLING RUN_STATE.md symlink is refused by the scaffold step — a post-swap failure reached without
+    // any production seam, which is exactly the window the old code could not recover from.
+    rmSync(p("RUN_STATE.md"));
+    symlinkSync(join(root, "nowhere.md"), p("RUN_STATE.md"));
+
+    const forced = cli(["init", "--force"]);
+    expect(forced.exitCode).toBe(1);
+    expect(forced.text).toContain("RUN_STATE.md");
+    expect(readProject("blueprint/HAND-TUNED.md")).toBe("weeks of tuning\n");
+    expect(readProject("blueprint/manifest.json")).toBe(manifestBefore);
+    expect(forced.text).toContain("restored");
+    expect(leftovers()).toEqual([]);
+    // The whole run is reversed, not just the bytes: the registration is still the first init's.
+    expect(readKnownProjects(dataDir).get("project")?.projectRoot).toBe(projectRoot);
+  });
+
+  test("a failure registering after the swap puts the operator's blueprint back", () => {
+    cli(["init"]);
+    writeProject("blueprint/HAND-TUNED.md", "weeks of tuning\n");
+    const manifestBefore = readProject("blueprint/manifest.json");
+
+    // Registration is the LAST step, so it fails with the replacement fully installed. A read-only registry
+    // file breaks the append (`appendJsonlRecord` opens the existing file for append, so the FILE's mode is
+    // what matters); the directory is locked too so a re-create cannot route around it.
+    const registry = join(dataDir, "known-projects.jsonl");
+    const registryBefore = readFileSync(registry, "utf8");
+    chmodSync(registry, 0o400);
+    chmodSync(dataDir, 0o500);
+    let forced;
+    try {
+      forced = cli(["init", "--force"]);
+    } finally {
+      chmodSync(dataDir, 0o700);
+      chmodSync(registry, 0o600);
+    }
+
+    expect(forced.exitCode).toBe(1);
+    expect(forced.text).toContain("registering");
+    expect(readProject("blueprint/HAND-TUNED.md")).toBe("weeks of tuning\n");
+    expect(readProject("blueprint/manifest.json")).toBe(manifestBefore);
+    expect(forced.text).toContain("restored");
+    expect(readFileSync(registry, "utf8")).toBe(registryBefore);
+    expect(leftovers()).toEqual([]);
+  });
+
+  test("an install that cannot land leaves the project as it was and no staging behind", () => {
+    // `blueprint` as a DANGLING symlink: `existsSync` follows it and reads absent, so this is not even a
+    // `--force` path — the failure is the install rename itself (a directory cannot be renamed onto a
+    // non-directory). Nothing may be written THROUGH the link, and the staging tree must not survive.
+    const linkTarget = join(root, "outside-blueprint");
+    symlinkSync(linkTarget, p("blueprint"));
+
+    const init = cli(["init"]);
+    expect(init.exitCode).toBe(1);
+    expect(init.text).toContain("blueprint");
+    expect(lstatSync(p("blueprint")).isSymbolicLink()).toBe(true);
+    expect(existsSync(linkTarget)).toBe(false);
+    expect(leftovers()).toEqual([]);
+    expect(readKnownProjects(dataDir).size).toBe(0);
+  });
+
+  test("a successful --force leaves neither a staging nor a backup directory behind", () => {
+    cli(["init"]);
+    writeProject("blueprint/HAND-TUNED.md", "replaced by --force\n");
+
+    expect(cli(["init", "--force"]).exitCode).toBe(0);
+    expect(existsSync(p("blueprint/HAND-TUNED.md"))).toBe(false);
+    expect(readProject("blueprint/manifest.json")).toBe(readFileSync(join(SEED_ROOT, "manifest.json"), "utf8"));
+    expect(leftovers()).toEqual([]);
+  });
+
+  test("a surviving backup stops the next init — both with and without --force", () => {
+    // A backup still on disk means a previous `--force` did not finish: `blueprint/` may be missing or
+    // half-installed, and the backup holds the one copy of the operator's original. Nothing may step over it.
+    cli(["init"]);
+    const backup = p(`blueprint.${randomUUID()}.bak`);
+    mkdirSync(backup, { recursive: true });
+    writeFileSync(join(backup, "HAND-TUNED.md"), "weeks of tuning\n");
+    const manifestBefore = readProject("blueprint/manifest.json");
+
+    for (const argv of [["init"], ["init", "--force"]]) {
+      const run = cli(argv);
+      expect(run.exitCode).toBe(1);
+      expect(run.text).toContain(backup);
+      expect(readFileSync(join(backup, "HAND-TUNED.md"), "utf8")).toBe("weeks of tuning\n");
+      expect(readProject("blueprint/manifest.json")).toBe(manifestBefore);
+    }
+  });
+
+  test("--force still refuses to move aside anything that is not a real directory", () => {
+    // The guard that survived the transaction rewrite: `--force` is an opt-in to replacing a BLUEPRINT, not a
+    // licence to rename a file, or to follow a symlink out of the project and leave the seed somewhere else.
+    const outside = join(root, "outside-blueprint");
+    mkdirSync(outside, { recursive: true });
+    writeFileSync(join(outside, "theirs.md"), "not ours to move\n");
+    symlinkSync(outside, p("blueprint"));
+
+    const linked = cli(["init", "--force"]);
+    expect(linked.exitCode).toBe(1);
+    expect(linked.text).toContain("symlink");
+    expect(lstatSync(p("blueprint")).isSymbolicLink()).toBe(true);
+    expect(readFileSync(join(outside, "theirs.md"), "utf8")).toBe("not ours to move\n");
+    expect(leftovers()).toEqual([]);
+
+    rmSync(p("blueprint"));
+    writeFileSync(p("blueprint"), "a file where the blueprint should be\n");
+    const asFile = cli(["init", "--force"]);
+    expect(asFile.exitCode).toBe(1);
+    expect(asFile.text).toContain("not a directory");
+    expect(readProject("blueprint")).toBe("a file where the blueprint should be\n");
+    expect(leftovers()).toEqual([]);
+  });
+
+  test("a restore that itself fails says so, and the original survives in the backup", () => {
+    // The one branch no integration fixture can reach: the restore needs to fail AFTER a swap that succeeded,
+    // which needs the filesystem to turn hostile mid-run. Driven directly instead — the point is the contract
+    // (`apply`'s `rollbackFailures` discipline): a failed reversal is RETURNED, never absorbed into silence, so
+    // the caller cannot go on to tell the operator their blueprint was restored when it was not.
+    const sandbox = join(root, "hostile");
+    const blueprintRoot = join(sandbox, "blueprint");
+    const backup = join(sandbox, `blueprint.${randomUUID()}.bak`);
+    mkdirSync(blueprintRoot, { recursive: true });
+    mkdirSync(backup, { recursive: true });
+    writeFileSync(join(blueprintRoot, "seed.md"), "the replacement\n");
+    writeFileSync(join(backup, "HAND-TUNED.md"), "weeks of tuning\n");
+
+    chmodSync(sandbox, 0o500); // read-only parent: neither the removal nor the rename can complete
+    let failure;
+    try {
+      failure = restoreBlueprintBackup(blueprintRoot, backup);
+    } finally {
+      chmodSync(sandbox, 0o700);
+    }
+
+    expect(failure).toBeDefined();
+    expect(readFileSync(join(backup, "HAND-TUNED.md"), "utf8")).toBe("weeks of tuning\n");
+  });
+
+  test("a backup-shaped name the operator made themselves is not mistaken for ours", () => {
+    // The guard matches only what this code creates — `blueprint.<uuid>.bak`. An operator's own
+    // `blueprint.old.bak` is their business and must not wedge `init`.
+    cli(["init"]);
+    mkdirSync(p("blueprint.old.bak"), { recursive: true });
+    expect(cli(["init", "--force"]).exitCode).toBe(0);
+    expect(existsSync(p("blueprint.old.bak"))).toBe(true);
   });
 });
 
@@ -781,5 +976,57 @@ describe("undo refuses an explicit batch id that matches nothing", () => {
     expect(run.text).toContain("not-a-real-batch-id");
     // …and the real batch is untouched, so the operator can still undo it once they use the right id.
     expect(cli(["undo"]).exitCode).toBe(0);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Cross-model gate, finding 4, at the OPERATOR layer. Re-applying an unchanged blueprint is the routine act in
+// the fine-tune loop, and it used to end with "Batch <uuid> — reverse it with `undo`" for a batch that journaled
+// nothing. Following that instruction reversed the operator's LAST REAL apply instead, and naming the displayed
+// id explicitly failed to find it. The `--json` payload and the human line must now agree that nothing changed.
+// ─────────────────────────────────────────────────────────────────────────────
+describe("a no-op apply advertises no batch (gate finding 4)", () => {
+  beforeEach(() => {
+    cli(["init"]);
+  });
+
+  test("a repeat apply reports batchId null and never tells the operator to `undo` it", () => {
+    const first = cli(["apply"]);
+    if (first.json.verb !== "apply") throw new Error("unreachable");
+    expect(first.json.batchId).not.toBeNull();
+    expect(first.text).toContain("reverse it with");
+
+    const second = cli(["apply"]);
+    if (second.json.verb !== "apply") throw new Error("unreachable");
+    expect(second.exitCode).toBe(0);
+    expect(second.json.ok).toBe(true);
+    expect(second.json.applied).toEqual([]);
+    expect(second.json.noops).toBeGreaterThan(0);
+    // `--json` and the human line agree: no batch, and no instruction to reverse one.
+    expect(second.json.batchId).toBeNull();
+    expect(second.text).not.toContain("reverse it with");
+    expect(second.text).toContain("Nothing changed");
+  });
+
+  test("the no-op apply leaves the undoable history untouched — the only batch is still the FIRST apply's", () => {
+    // The dangerous half of the finding: the phantom id invited a bare `undo` that reversed an OLDER real batch.
+    // With nothing advertised there is no phantom id to name, and the no-op run contributes no batch of its own —
+    // so what a later `undo` can select is exactly what it was before the re-apply.
+    const first = cli(["apply"]);
+    if (first.json.verb !== "apply") throw new Error("unreachable");
+    const realBatch = first.json.batchId;
+    cli(["apply"]); // the no-op re-apply
+
+    const undone = cli(["undo"]);
+    if (undone.json.verb !== "undo") throw new Error("unreachable");
+    expect(undone.json.batchId).toBe(realBatch); // the FIRST apply's batch, the only one that ever existed
+    expect(undone.json.reversed.length).toBeGreaterThan(0);
+    for (const surface of SEED_SURFACES) expect(existsSync(p(surface))).toBe(false);
+
+    // …and a second bare undo now finds nothing: the batch is recorded `undone`, not re-selected (finding 3).
+    const again = cli(["undo"]);
+    if (again.json.verb !== "undo") throw new Error("unreachable");
+    expect(again.exitCode).toBe(0);
+    expect(again.json.batchId).toBeNull();
   });
 });

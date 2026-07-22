@@ -23,11 +23,10 @@
  * everywhere. This module does not itself realpath — it cannot, since it must stay total and a record may name
  * a root that no longer exists.
  */
-import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import * as z from "zod";
 import { resolveDataDir } from "../paths";
-import { appendJsonlRecord } from "./internal";
+import { appendJsonlRecord, readFileBounded } from "./internal";
 
 /**
  * Is this a LOGICAL project name — a key, never a path fragment? Refuses everything that could act as a path
@@ -101,17 +100,20 @@ export function registerProject(
  * Every well-formed registration, newest record winning per `name`. Malformed/torn/schema-invalid lines are
  * skipped — one corrupt row must not hide the good records around it — and an absent or unreadable file yields
  * an empty map, so an unknown name is the fail-closed answer (a refusal), never an accidental resolution.
+ *
+ * The read goes through the layer's BOUNDED reader (`readFileBounded`): a FIFO or device at this path would
+ * otherwise block the CLI forever waiting for a writer, and a 40 GiB hand-edited registry would be pulled into
+ * memory whole. Both are refused without reading, and `absent` vs `blocked` collapse to the same answer here —
+ * unlike the blueprint gate, this reader has no policy to vary: bytes we could not read are projects we cannot
+ * resolve, which is already the fail-closed direction.
  */
 export function readKnownProjects(dataDir?: string): Map<string, KnownProjectRecord> {
   const path = knownProjectsPath(resolveDataDir(dataDir));
   const out = new Map<string, KnownProjectRecord>();
-  let raw: string;
-  try {
-    raw = readFileSync(path, "utf8");
-  } catch {
-    return out; // absent or unreadable — no project is known, which refuses every lookup
-  }
-  for (const line of raw.split("\n")) {
+  const read = readFileBounded(path);
+  // absent, oversized, non-regular, or unreadable — no project is known, which refuses every lookup
+  if (!read.ok) return out;
+  for (const line of read.content.split("\n")) {
     if (line.trim() === "") continue;
     let parsedLine: unknown;
     try {

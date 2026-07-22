@@ -99,6 +99,10 @@ export type CliJson =
       blueprintRoot: string | null;
       blueprintFiles: number;
       runState: "created" | "present" | "skipped";
+      /** Non-fatal residue from an otherwise successful run — today, only a backup of the replaced blueprint
+       *  that could not be removed. `ok` stays true (the project IS seeded and registered), but something is
+       *  left on disk for a human, so it reports here rather than being dropped. Mirrors `apply.warnings`. */
+      warnings: string[];
     }
   | { verb: "plan"; ok: boolean; errors: string[]; project: string | null; rows: DiffRow[]; changes: number }
   | { verb: "status"; ok: boolean; errors: string[]; project: string | null; rows: DiffRow[]; drifted: number }
@@ -411,6 +415,7 @@ function initFailure(args: ParsedArgs, error: string, project: string | null = n
     blueprintRoot: null,
     blueprintFiles: 0,
     runState: "skipped",
+    warnings: [],
   };
   return render(args, json, error, EXIT_FAILED);
 }
@@ -422,8 +427,9 @@ function initFailure(args: ParsedArgs, error: string, project: string | null = n
  *      machine-absolute path must fail as a pure read, not as a half-copied blueprint.
  *   2. resolve (and, only here, create) the project root.
  *   3. refuse a name already bound to a different project, BEFORE copying.
- *   4. refuse an existing blueprint unless `--force`.
- *   5. copy → scaffold the run file → register.
+ *   4. refuse a surviving backup from an unfinished `--force`, then an existing blueprint unless `--force`.
+ *   5. stage the copy → set any existing blueprint aside → install → scaffold the run file → register → drop
+ *      the backup. Every failure from the install onward puts the operator's blueprint back.
  */
 function runInit(rawProject: string, args: ParsedArgs, dataDir: string): CliRun {
   // (1) The shipped seed must pass the same front-gate a hand-authored blueprint does (R4/KTD5).
@@ -482,47 +488,95 @@ function runInit(rawProject: string, args: ParsedArgs, dataDir: string): CliRun 
     );
   }
 
-  // (4) An existing blueprint is the operator's hand-tuned source of truth: never replaced implicitly.
+  // (4a) A SURVIVING BACKUP is a previous `--force` that never finished: it was killed mid-transaction (so
+  //      `blueprint/` may be missing, or hold a replacement the operator never approved) or its final cleanup
+  //      failed. That directory holds the operator's hand-tuned original — the one thing here nothing can
+  //      rebuild — so BOTH `init` and `init --force` refuse until a human has decided its fate. Auto-recovery
+  //      is deliberately NOT attempted: only the operator knows whether the backup or what is at `blueprint/`
+  //      is the version they want, and guessing wrong destroys the answer. Fail closed, name the path, name
+  //      both remedies. (Staging `.tmp` leftovers are NOT guarded: they hold nothing but a copy of the shipped
+  //      seed, so stepping over one loses nothing.)
+  const backups = findBlueprintBackups(projectRoot);
+  if (!backups.ok) return refuse(backups.error);
+  if (backups.paths.length > 0) {
+    const named = backups.paths.map((path) => `'${path}'`).join(", ");
+    return refuse(
+      `a previous 'init --force' left a backup of this project's blueprint behind (at ${named}) — it holds the blueprint as it was before that run: restore it (rename it to '${blueprintRoot}') or remove it, then re-run`,
+    );
+  }
+
+  // (4b) An existing blueprint is the operator's hand-tuned source of truth: never replaced implicitly.
   const blueprintExists = existsSync(blueprintRoot);
   if (blueprintExists && !args.force) {
     return refuse(`a blueprint already exists at '${blueprintRoot}' — re-run with --force to replace it`);
   }
 
-  // (5) Write: STAGE the seed into a sibling temp dir, and only swap it in once the copy is COMPLETE.
+  // (5) Write, as a RECOVERABLE TRANSACTION: stage → set the original aside → install → finish → drop the
+  //     backup. `--force` is the one mutation in this system with no journal and no undo — every other write
+  //     goes through the config-write engine precisely so it is reversible — and `blueprint/` may hold weeks of
+  //     hand-tuning, so this path builds its own reversal by hand.
   //
-  // `--force` is the one mutation in this system with no backup, no journal and no undo — every other write
-  // goes through the config-write engine precisely so it is reversible. Deleting first and copying second meant
-  // any ordinary I/O fault (ENOSPC, EIO, a killed process) left a half-populated blueprint and NO copy of the
-  // operator's hand-tuned original anywhere on the machine — and recovery was doubly blocked, since a plain
-  // `init` then refuses because `blueprint/` exists, leaving only `--force` again: the same destructive path.
-  // Staging shrinks the window from "the whole copy" to one POSIX rename. Same temp-then-rename discipline as
-  // `configwrite`'s `restoreAtomically`.
-  const staging = `${blueprintRoot}.${randomUUID()}.tmp`;
+  //     Staging alone (copy into a sibling temp dir, then one POSIX rename — the same temp-then-rename
+  //     discipline as `configwrite`'s `restoreAtomically`) only shrinks the DESTRUCTIVE window; it does not
+  //     close it. The original was still DELETED before the replacement landed, and two more steps that can
+  //     fail — scaffolding `RUN_STATE.md` and registering the project — ran with nothing on the machine to put
+  //     back. So the original is RENAMED aside instead of removed, and every failure from the install onward
+  //     restores it.
+  const staging = `${blueprintRoot}.${randomUUID()}${STAGING_SUFFIX}`;
+  const discardStaging = (): void => rmSync(staging, { recursive: true, force: true });
   let blueprintFiles: number;
   try {
     mkdirSync(staging, { recursive: true });
     blueprintFiles = copyTree(SEED_ROOT, staging);
   } catch (err) {
-    rmSync(staging, { recursive: true, force: true });
+    discardStaging();
     return initFailure(args, `copying the seed blueprint into '${blueprintRoot}' failed: ${errorText(err)}`, projectRoot);
   }
+
+  let backup: string | null = null;
   if (blueprintExists) {
-    // Keeps its own lstat symlink/non-directory guard — this is still the only thing that removes the original.
-    const removal = removeBlueprintDir(blueprintRoot);
-    if (removal) {
-      rmSync(staging, { recursive: true, force: true });
-      return initFailure(args, removal, projectRoot);
+    // The lstat guard still runs, and still runs FIRST: `--force` is an opt-in to replacing a blueprint, not a
+    // licence to move a file or a symlink pointing out of the project.
+    const guard = guardReplaceableBlueprint(blueprintRoot);
+    if (guard) {
+      discardStaging();
+      return initFailure(args, guard, projectRoot);
+    }
+    backup = `${blueprintRoot}.${randomUUID()}${BACKUP_SUFFIX}`;
+    try {
+      renameSync(blueprintRoot, backup);
+    } catch (err) {
+      discardStaging();
+      return initFailure(args, `setting the existing blueprint at '${blueprintRoot}' aside failed: ${errorText(err)}`, projectRoot);
     }
   }
+
+  /**
+   * Fail from the install onward: put the operator's blueprint back, and NEVER claim a restore that did not
+   * happen. Same honesty `apply` owes through `rollbackFailures` — a reversal that itself failed is surfaced
+   * with what is still on disk and where, rather than being absorbed by the wording of the failure it followed.
+   */
+  const abort = (error: string): CliRun => {
+    if (!backup) return initFailure(args, error, projectRoot);
+    const failure = restoreBlueprintBackup(blueprintRoot, backup);
+    return initFailure(
+      args,
+      failure === undefined
+        ? `${error} — the existing blueprint at '${blueprintRoot}' was restored`
+        : `${error} — AND restoring the existing blueprint failed: ${failure}. It is intact at '${backup}': rename it to '${blueprintRoot}' to recover`,
+      projectRoot,
+    );
+  };
+
   try {
     renameSync(staging, blueprintRoot);
   } catch (err) {
-    rmSync(staging, { recursive: true, force: true });
-    return initFailure(args, `installing the seed blueprint at '${blueprintRoot}' failed: ${errorText(err)}`, projectRoot);
+    discardStaging();
+    return abort(`installing the seed blueprint at '${blueprintRoot}' failed: ${errorText(err)}`);
   }
 
   const runState = scaffoldRunState(projectRoot, blueprintRoot);
-  if (!runState.ok) return initFailure(args, runState.error, projectRoot);
+  if (!runState.ok) return abort(runState.error);
 
   const registration = registerProject(dataDir, { name, projectRoot, blueprintRoot });
   if (registration.kind !== "registered") {
@@ -532,7 +586,21 @@ function runInit(rawProject: string, args: ParsedArgs, dataDir: string): CliRun 
         : registration.kind === "invalid-name"
           ? "it is not a usable logical project name (no path separators, no NUL, 1–128 chars)"
           : registration.error;
-    return initFailure(args, `the project was seeded, but registering it as '${name}' failed: ${detail}`, projectRoot);
+    return abort(`seeding succeeded, but registering the project as '${name}' failed: ${detail}`);
+  }
+
+  // COMMIT. Everything that can fail has succeeded, so the backup has no job left — and leaving it would wedge
+  // the next `init` on the (4a) guard. A removal that fails is a warning, not a failure: the run really did
+  // seed and register the project, and saying otherwise would push the operator back into `--force`.
+  const warnings: string[] = [];
+  if (backup) {
+    try {
+      rmSync(backup, { recursive: true, force: true });
+    } catch (err) {
+      warnings.push(
+        `the replaced blueprint's backup at '${backup}' could not be removed (${errorText(err)}) — remove it by hand; until it is gone, the next 'init' will refuse`,
+      );
+    }
   }
 
   const json: CliJson = {
@@ -544,11 +612,13 @@ function runInit(rawProject: string, args: ParsedArgs, dataDir: string): CliRun 
     blueprintRoot,
     blueprintFiles,
     runState: runState.state,
+    warnings,
   };
   const lines = [
     `Seeded ${blueprintFiles} blueprint file${blueprintFiles === 1 ? "" : "s"} into ${blueprintRoot}`,
     `Registered as project '${name}'`,
     runStateLine(runState.state, projectRoot),
+    ...warnings.map((warning) => `Warning: ${warning}`),
     "",
     "Next: tune blueprint/, then `plan` to see what would change.",
   ];
@@ -568,10 +638,47 @@ function runStateLine(state: "created" | "present" | "skipped", projectRoot: str
   }
 }
 
-/** Remove an existing `blueprint/` for `--force`. Returns an error string, or `undefined` on success. Refuses
+/** Sibling of `blueprint/` holding a COMPLETE copy of the seed that has not been installed yet. Disposable:
+ *  its contents are the shipped template, so nothing is lost by removing one. */
+const STAGING_SUFFIX = ".tmp";
+
+/** Sibling of `blueprint/` holding the operator's PREVIOUS blueprint during a `--force` run. Precious: while
+ *  it exists it may be the only copy of weeks of hand-tuning, which is why `init` refuses to run past one. */
+const BACKUP_SUFFIX = ".bak";
+
+/** Matches ONLY the backup names this module creates — `blueprint.<uuid v4>.bak`. Deliberately narrow: an
+ *  operator's own `blueprint.old.bak` is their business and must not wedge `init`, and the guard's whole value
+ *  is that a match means "a run of THIS code did not finish". */
+const BLUEPRINT_BACKUP_PATTERN = new RegExp(
+  // `.replace` escapes the suffix's leading dot — a bare `.` here would match `blueprint.<uuid>Xbak` too.
+  `^${BLUEPRINT_DIRNAME}\\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}${BACKUP_SUFFIX.replace(".", "\\.")}$`,
+  "i",
+);
+
+type BackupScan = { ok: true; paths: string[] } | { ok: false; error: string };
+
+/** Every surviving `--force` backup in `projectRoot`, sorted for a deterministic message. Fail-closed: a root
+ *  we cannot read is an error, not an empty answer — "no backups" must mean we looked, or the guard that
+ *  protects the operator's only copy would be silently skippable. `isDirectory()` on a dirent is lstat-grade,
+ *  so a symlink wearing a backup name never counts (this code only ever creates real directories). */
+function findBlueprintBackups(projectRoot: string): BackupScan {
+  let entries;
+  try {
+    entries = readdirSync(projectRoot, { withFileTypes: true });
+  } catch (err) {
+    return { ok: false, error: `'${projectRoot}' could not be inspected: ${errorText(err)}` };
+  }
+  const paths = entries
+    .filter((entry) => entry.isDirectory() && BLUEPRINT_BACKUP_PATTERN.test(entry.name))
+    .map((entry) => join(projectRoot, entry.name))
+    .sort();
+  return { ok: true, paths };
+}
+
+/** May `--force` move this `blueprint/` aside? Returns an error string, or `undefined` if it may. Refuses
  *  anything that is not a real directory: `--force` is an opt-in to replacing a blueprint, NOT a licence to
- *  delete a file or follow a symlink out of the project and recursively remove whatever is on the other end. */
-function removeBlueprintDir(blueprintRoot: string): string | undefined {
+ *  move a file or follow a symlink out of the project and put the seed somewhere else entirely. */
+function guardReplaceableBlueprint(blueprintRoot: string): string | undefined {
   let stats;
   try {
     stats = lstatSync(blueprintRoot);
@@ -580,10 +687,26 @@ function removeBlueprintDir(blueprintRoot: string): string | undefined {
   }
   if (stats.isSymbolicLink()) return `'${blueprintRoot}' is a symlink — refusing to replace it`;
   if (!stats.isDirectory()) return `'${blueprintRoot}' is not a directory — refusing to replace it`;
+  return undefined;
+}
+
+/**
+ * Put a `--force` backup back where it came from, discarding whatever this run installed. Returns `undefined`
+ * on success, or the reason it could not — NEVER throws, and never reports a partial recovery as a recovery:
+ * the caller has already failed once, and its next act is to tell the operator what is on their disk.
+ *
+ * Exported for direct fault-injection coverage. This is the last line of defence for the one directory the
+ * system cannot rebuild, and its failure branch is unreachable through the CLI (it needs the filesystem to
+ * turn hostile between the swap and the failure), so it is tested here rather than left to review.
+ */
+export function restoreBlueprintBackup(blueprintRoot: string, backup: string): string | undefined {
   try {
+    // Whatever is at `blueprintRoot` is this run's own freshly-installed seed copy (or nothing, if the install
+    // itself failed) — never operator content, which by now lives in `backup`.
     rmSync(blueprintRoot, { recursive: true, force: true });
+    renameSync(backup, blueprintRoot);
   } catch (err) {
-    return `replacing '${blueprintRoot}' failed: ${errorText(err)}`;
+    return errorText(err);
   }
   return undefined;
 }
@@ -620,7 +743,7 @@ type RunStateResult = { ok: true; state: "created" | "present" | "skipped" } | {
  */
 function scaffoldRunState(projectRoot: string, blueprintRoot: string): RunStateResult {
   const target = join(projectRoot, RUN_STATE_FILENAME);
-  // Guarded lstat, NOT `existsSync` — the same discipline `removeBlueprintDir` below and the engine's
+  // Guarded lstat, NOT `existsSync` — the same discipline `guardReplaceableBlueprint` below and the engine's
   // `statTarget` apply, and the reason is that this is the ONE write that bypasses the config-write engine
   // (RUN_STATE.md is deliberately not a target-registry surface, so `apply` can never touch it — R12). It
   // therefore bypasses the engine's symlink refusal too, and must re-state it here.
@@ -784,14 +907,31 @@ export function applyText(outcome: ApplyOutcome, json: Extract<CliJson, { verb: 
       ),
     );
   }
-  lines.push(
-    json.ok
-      ? `Applied ${json.applied.length}, unchanged ${json.noops}. Batch ${outcome.batchId} — reverse it with \`undo\`.`
-      : `Apply FAILED${outcome.rolledBack ? " and this batch's earlier writes were rolled back" : " before anything was written"}.`,
-  );
+  lines.push(json.ok ? successSummary(json) : `Apply FAILED${outcome.rolledBack ? " and this batch's earlier writes were rolled back" : " before anything was written"}.`);
   for (const warning of json.warnings) lines.push(`WARNING: ${warning}`);
   for (const error of json.errors) lines.push(`ERROR: ${error}`);
   return lines.join("\n");
+}
+
+/**
+ * The one-line verdict on a run that LANDED. The batch clause reads off `json.batchId`, the SAME field a `--json`
+ * consumer sees, so the human text and the payload can never disagree about whether a batch exists (gate finding
+ * 4) — a null id must never be rendered as "reverse it with `undo`", because following that instruction reversed
+ * an OLDER real batch.
+ *
+ * A null id has TWO causes and they need different words. Usually it is the routine repeat apply where every row
+ * diffed to a noop — genuinely "nothing changed". But it also covers the run whose every write LANDED and none
+ * could be journaled (an unwritable journal with a writable project): there, `applied` is non-empty, files really
+ * did change, and only the reversibility is missing. Saying "nothing changed" to that operator would be a fresh
+ * lie in exactly the domain this fix hardens, so the two are split — the `WARNING:` lines below then name each
+ * un-undoable file and how to revert it by hand.
+ */
+function successSummary(json: Extract<CliJson, { verb: "apply" }>): string {
+  const counts = `Applied ${json.applied.length}, unchanged ${json.noops}.`;
+  if (json.batchId !== null) return `${counts} Batch ${json.batchId} — reverse it with \`undo\`.`;
+  return json.applied.length === 0
+    ? `${counts} Nothing changed — no batch to reverse.`
+    : `${counts} No reversible batch was recorded — \`undo\` cannot reverse this run.`;
 }
 
 function runUndo(rawProject: string, args: ParsedArgs, dataDir: string): CliRun {

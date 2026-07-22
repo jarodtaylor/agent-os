@@ -160,16 +160,18 @@ export function apply(input: ApplyInput, options: ApplyOptions = {}): ApplyOutco
     const skip = isSkip(rows[i]!.action);
     const absPath = posix.join(projectRoot, file.destination);
 
-    // Resolve for grouping. A non-provisionable / unresolvable destination is a HARD failure for a non-skip row
-    // (it names a write we cannot perform); for a skip row it simply is not a contributor — there is nothing it
-    // would write, so a stray unresolvable noop must not abort an otherwise-valid blueprint.
+    // A non-provisionable harness or an unresolvable destination makes the row INVALID, and validity is a
+    // property of the BLUEPRINT, not of current disk (FOLD 4 class-fix, gate round 3): reject it for EVERY row —
+    // including a noop / scaffold-skip whose bytes happen to match — so the same blueprint that would fail on a
+    // fresh clone also fails here, rather than passing as a disk-dependent "successful no-op". (Compat + the
+    // actual write below stay non-skip-only — those ARE about the live write target.)
     if (!isProvisionHarness(file.harness)) {
-      if (!skip) preflightFailures.push({ path: absPath, error: `role '${file.role}' targets non-provisionable harness '${file.harness}'` });
+      preflightFailures.push({ path: absPath, error: `role '${file.role}' targets non-provisionable harness '${file.harness}'` });
       continue;
     }
     const target = resolveTarget(projectRoot, file.harness, file.destination);
     if (!target) {
-      if (!skip) preflightFailures.push({ path: absPath, error: `destination '${file.destination}' does not resolve to a known ${file.harness} surface` });
+      preflightFailures.push({ path: absPath, error: `destination '${file.destination}' does not resolve to a known ${file.harness} surface` });
       continue;
     }
     const contributors = contributorsByDestination.get(target.destination) ?? [];
@@ -307,6 +309,15 @@ export function apply(input: ApplyInput, options: ApplyOptions = {}): ApplyOutco
       if (err instanceof AppliedButUnjournaledError) {
         // The write LANDED but its journal entry didn't record — un-undoable. Warn, annotate it, CONTINUE.
         // `created` is derived from the error's OWN contract (backupPath===null means the write created the target).
+        //
+        // DEFERRED recovery gap (gate round 3, issue #50/U6): if a LATER row in this same batch legally writes the
+        // SAME path (only config-merge can — whole-file same-dest is refused) and journals successfully, that later
+        // write's byte-exact backup captures THIS unjournaled mutation's result, not the pre-batch bytes. A fresh
+        // process then reverses only the later entry and reports it `reversed`, unaware the pre-batch state was never
+        // fully restored. Reachable only via the rare post-rename journal-failure window PLUS a same-path config-merge
+        // later in the batch. The durable fix (poison the path after an unjournaled write; refuse later same-path
+        // writes in the batch) rides with U6's write-path hardening; today the un-undoable write is at least surfaced
+        // via `applied[].unjournaled`.
         console.error(`[agent-os] provision apply: '${path}' applied but journaling failed (recover from backup if reverting):`, err);
         applied.push({
           targetPath: path,

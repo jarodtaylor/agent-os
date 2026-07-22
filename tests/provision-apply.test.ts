@@ -951,3 +951,58 @@ describe("provision apply — YAML round-trip reachability (documented)", () => 
     expect(new Set(formats)).toEqual(new Set(["text", "json", "toml"]));
   });
 });
+
+describe("gate round-3 folds — disk-independent validity + alias-proof supersession", () => {
+  // FOLD 4: an invalid row (non-provisionable harness OR unresolvable destination) must fail preflight for EVERY
+  // row, including a noop whose bytes already match disk — validity is a property of the blueprint, not of disk.
+  test("a non-provisionable-harness row that currently NO-OPs is STILL refused (disk-independent validity)", () => {
+    wBlueprint("src/role.md", "hermes role body\n");
+    wProject("HERMES.md", "hermes role body\n"); // destination already matches → this row would diff to noop
+    const manifest: Manifest = {
+      schemaVersion: 1,
+      roles: [{ name: "r", harness: "hermes" as Manifest["roles"][number]["harness"], files: [{ transform: "copy", source: "src/role.md", destination: "HERMES.md" }] }],
+    };
+    const before = readFileSync(join(projectRoot, "HERMES.md"), "utf8");
+    const out = apply({ manifest, blueprintRoot, projectRoot, dataDir });
+    expect(out.failed.some((f) => f.error.includes("non-provisionable harness 'hermes'"))).toBe(true);
+    expect(out.applied).toHaveLength(0);
+    expect(readBatches(dataDir)).toHaveLength(0); // zero writes journaled
+    expect(readFileSync(join(projectRoot, "HERMES.md"), "utf8")).toBe(before);
+  });
+
+  test("an unresolvable-destination row that currently NO-OPs is STILL refused", () => {
+    wBlueprint("src/role.md", "body\n");
+    wProject("not-a-surface.md", "body\n"); // matches → would diff noop
+    const manifest: Manifest = {
+      schemaVersion: 1,
+      roles: [{ name: "r", harness: "claude-code", files: [{ transform: "copy", source: "src/role.md", destination: "not-a-surface.md" }] }],
+    };
+    const out = apply({ manifest, blueprintRoot, projectRoot, dataDir });
+    expect(out.failed.some((f) => f.error.includes("does not resolve to a known"))).toBe(true);
+    expect(out.applied).toHaveLength(0);
+    expect(readBatches(dataDir)).toHaveLength(0);
+  });
+
+  // FOLD 1a: supersession keys on the posix-normalized absolute targetPath alone, so equivalent root spellings
+  // ("/p" vs "/p/") collapse to one key — a later batch under a different spelling still supersedes, so an
+  // A→B→A cycle cannot clobber via an alias miss. (Old key embedded the raw projectRoot → distinct keys → miss.)
+  test("equivalent project-root spellings still supersede — no alias clobber", () => {
+    wBlueprint("src/a.json", JSON.stringify({ shared: { k: "A" } }));
+    wBlueprint("src/b.json", JSON.stringify({ shared: { k: "B" } }));
+    const mk = (src: string): Manifest => ({
+      schemaVersion: 1,
+      roles: [{ name: "r", harness: "claude-code", files: [{ transform: "config-merge", source: src, destination: ".mcp.json" }] }],
+    });
+    // batch1 writes {k:"A"} under the bare root; batch2 writes {k:"B"} under the trailing-slash spelling.
+    const b1 = apply({ manifest: mk("src/a.json"), blueprintRoot, projectRoot, dataDir });
+    const b2 = apply({ manifest: mk("src/b.json"), blueprintRoot, projectRoot: `${projectRoot}/`, dataDir });
+    expect((parseJsonProject(".mcp.json").shared as Record<string, unknown>).k).toBe("B");
+    // Explicitly undo the OLDEST batch (b1). Its entry's path was written later by b2 (a different spelling) →
+    // superseded → refused, so b2's "B" is preserved (no clobber back to pre-A).
+    const undone = undoBatch(projectRoot, dataDir, b1.batchId);
+    expect(undone.superseded.length).toBeGreaterThan(0);
+    expect(undone.reversed).toHaveLength(0);
+    expect((parseJsonProject(".mcp.json").shared as Record<string, unknown>).k).toBe("B");
+    void b2;
+  });
+});

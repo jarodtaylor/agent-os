@@ -72,6 +72,11 @@ export function newestBatchForProject(projectRoot: string, dataDir?: string): Pr
  *   - `alreadyReversed` — `undo` ran but the target was ALREADY in its reversed state (nothing to do). This is
  *     the honest no-op signal: after a failed+rolled-back apply, a bare `undo` of that batch finds every entry
  *     already reversed on disk and reports them HERE — never falsely in `reversed`. It is not a failure.
+ *     DEFERRED caveat (gate round 3, issue #50/U6): `undo`'s created-file branch decides presence with
+ *     `existsSync`, which reads `false` for BOTH a genuinely-absent target AND an EACCES/indeterminate lookup, so
+ *     a created target still present behind an inaccessible parent dir is mapped to `noop` and lands HERE instead
+ *     of `failed`. The fix (guarded `lstat`, ENOENT-only ⇒ noop) belongs in the shared U14 `undo` primitive that
+ *     the installers also call, so it rides with U6's write-path hardening rather than being bolted on here.
  *   - `superseded` — a LATER provision batch wrote the same `(projectRoot, targetPath)`, so reversing this
  *     (older) entry would clobber the newer batch's state; we refuse (fail CLOSED) rather than reverse. Keyed on
  *     JOURNAL ORDERING (a later, different batch), NOT a byte-hash — so an A→B→A content cycle can no longer
@@ -154,8 +159,16 @@ function undoEntries(entries: readonly UndoEntry[], dataDir?: string): Omit<Undo
 /** The journal-ordering supersession index, built once per `undoEntries` call from the FULL journal:
  *   - `orderByBatch` — each batch's first-appearance index (`groupBatches` order, the SAME journal-position
  *     ordering `newestBatchForProject` trusts — never `ts`, which ms-ties/clock-skew would misorder).
- *   - `writersByPath` — every batch index that wrote each `(projectRoot, targetPath)`, keyed by
- *     `JSON.stringify([projectRoot, targetPath])` (an unambiguous composite key needing no in-path delimiter).
+ *   - `writersByPath` — every batch index that wrote each `targetPath`, keyed by the `targetPath` ALONE.
+ *     `targetPath` is `posix.join(projectRoot, dest)` (apply), so it is already absolute AND posix-normalized —
+ *     `/p`, `/p/`, and `/p/x/..` all collapse to one key (gate round 3 FOLD 1a: the earlier `[projectRoot,
+ *     targetPath]` key embedded the UNnormalized root spelling, so those aliases produced distinct keys and a
+ *     later write could miss supersession → ABA clobber). The project scoping the old key added is redundant:
+ *     `targetPath` is the absolute file identity, so two batches sharing it ARE writing one file and supersession
+ *     is correct regardless of which project logically "owns" it. DEFERRED (#50/U6, symlink residual): a root
+ *     reached via a SYMLINK is a different string `posix.normalize` cannot fold, so two spellings (`/link/f` vs
+ *     `/real/f`) still key apart; the durable fix is canonicalizing (realpath) the project root at the U6/registry
+ *     ingress, out of scope for this pure journal reader.
  *  Together these answer "is a LATER, different batch also a writer of this path?" without any byte compare. */
 interface SupersessionIndex {
   orderByBatch: Map<string, number>;
@@ -170,25 +183,25 @@ function supersessionIndex(dataDir?: string): SupersessionIndex {
     const batch = batches[index]!;
     orderByBatch.set(batch.batchId, index);
     for (const entry of batch.entries) {
-      const key = JSON.stringify([batch.projectRoot, entry.targetPath]);
-      const indices = writersByPath.get(key) ?? [];
+      const indices = writersByPath.get(entry.targetPath) ?? [];
       indices.push(index);
-      writersByPath.set(key, indices);
+      writersByPath.set(entry.targetPath, indices);
     }
   }
   return { orderByBatch, writersByPath };
 }
 
-/** True iff a LATER, DIFFERENT batch wrote this entry's `(projectRoot, targetPath)` — the byte-independent
- *  supersession signal (brief FOLD 3). `myIndex` is the entry's OWN batch's order index (looked up by its
- *  `batchId`, NOT inferred from the path — a batch can be a later writer of a path an earlier batch also
- *  touched). A STRICTLY greater writer index is a later, cross-batch writer; strictly greater is load-bearing —
- *  same-batch entries share `myIndex`, so a second row into one destination within a batch is NOT a
- *  supersession and the same-batch LIFO chain reverses intact. An entry with no resolvable batch index (should
- *  not happen — `groupBatches` only yields batched entries) is treated as not superseded. */
+/** True iff a LATER, DIFFERENT batch wrote this entry's `targetPath` — the byte-independent supersession signal
+ *  (brief FOLD 3). `myIndex` is the entry's OWN batch's order index (looked up by its `batchId`, NOT inferred
+ *  from the path — a batch can be a later writer of a path an earlier batch also touched). A STRICTLY greater
+ *  writer index is a later, cross-batch writer; strictly greater is load-bearing — same-batch entries share
+ *  `myIndex`, so a second row into one destination within a batch is NOT a supersession and the same-batch LIFO
+ *  chain reverses intact. Keyed on the absolute, posix-normalized `targetPath` alone so equivalent root spellings
+ *  collapse (FOLD 1a; symlink-root aliases deferred — see `supersessionIndex`). An entry with no resolvable batch
+ *  index (should not happen — `groupBatches` only yields batched entries) is treated as not superseded. */
 function isSuperseded(entry: UndoEntry, index: SupersessionIndex): boolean {
   const myIndex = entry.batchId === undefined ? undefined : index.orderByBatch.get(entry.batchId);
   if (myIndex === undefined) return false;
-  const writers = index.writersByPath.get(JSON.stringify([entry.projectRoot, entry.targetPath])) ?? [];
+  const writers = index.writersByPath.get(entry.targetPath) ?? [];
   return writers.some((writerIndex) => writerIndex > myIndex);
 }

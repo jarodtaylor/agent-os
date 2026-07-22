@@ -1035,18 +1035,58 @@ describe("gate round-4 fold — equivalent project-root spellings select the rig
   });
 });
 
-describe("bot review (PR #52) — corrupt-journal fail-closed batch grouping", () => {
-  test("an entry reusing a batchId under a DIFFERENT project root is dropped, not mixed into the batch", () => {
-    // The journal is untrusted (module header): craft one with two entries sharing a batchId but two roots.
+// Best-effort defense-in-depth against a CORRUPTED journal (bot review PR #52), NOT a security guarantee: a
+// legitimate journal can never produce a cross-root batchId (unique randomUUID + one canonical root per apply),
+// so these craft the journal directly — which in reality is attacker-owns-HOME, out of decision #45's threat
+// model. The quarantine is documented as such; deeper crafted-journal integrity is a deferred, out-of-scope unit.
+describe("bot review + post-PR gate (PR #52) — corrupt-journal quarantine (best-effort defense-in-depth)", () => {
+  test("newest batch is the LAST journal entry's batch, not the last first-appearance group (A1,B1,A2 → A)", () => {
+    // Recency must follow the last journal ENTRY (CodeRabbit PR #54). Interleaved batch entries A1,B1,A2 (one
+    // root) end at A2, so A is newest — but first-appearance order ends at B. (Interleaving needs concurrency or
+    // a crafted journal; the invariant must still hold.)
+    mkdirSync(dataDir, { recursive: true });
+    const base = { backupPath: null, created: true, mode: null, format: "text", projectRoot };
+    const rows = [
+      { ...base, id: "a1", targetPath: `${projectRoot}/A1.md`, postHash: "ha1", batchId: "A", ts: 1 },
+      { ...base, id: "b1", targetPath: `${projectRoot}/B1.md`, postHash: "hb1", batchId: "B", ts: 2 },
+      { ...base, id: "a2", targetPath: `${projectRoot}/A2.md`, postHash: "ha2", batchId: "A", ts: 3 },
+    ];
+    writeFileSync(join(dataDir, "undo-journal.jsonl"), `${rows.map((r) => JSON.stringify(r)).join("\n")}\n`);
+    expect(newestBatchForProject(projectRoot, dataDir)?.batchId).toBe("A");
+  });
+
+  test("a batchId appearing under two roots is quarantined out of readBatches entirely", () => {
+    // Craft an untrusted journal with two entries sharing a batchId but two roots (impossible without direct writes).
     mkdirSync(dataDir, { recursive: true });
     const base = { backupPath: null, created: true, mode: null, format: "text", ts: 1 };
     const mine = { ...base, id: "e1", targetPath: `${projectRoot}/CLAUDE.md`, postHash: "h1", batchId: "shared", projectRoot };
     const foreign = { ...base, id: "e2", targetPath: "/other/project/CLAUDE.md", postHash: "h2", batchId: "shared", projectRoot: "/other/project" };
     writeFileSync(join(dataDir, "undo-journal.jsonl"), `${JSON.stringify(mine)}\n${JSON.stringify(foreign)}\n`);
-    const batches = readBatches(dataDir);
-    expect(batches).toHaveLength(1);
-    // Only the first-seen root's entry survives; the foreign-root entry is fail-closed out.
-    expect(batches[0]!.entries.map((e) => e.targetPath)).toEqual([`${projectRoot}/CLAUDE.md`]);
-    expect(batches[0]!.entries.some((e) => e.targetPath.startsWith("/other/project"))).toBe(false);
+    // A cross-root batchId is corruption/tampering → the WHOLE batch is dropped, reachable by neither project.
+    expect(readBatches(dataDir)).toHaveLength(0);
+  });
+
+  test("default undo of project A does NOT reverse A's real files when a corrupt B-row reuses A's batchId", () => {
+    // A genuine apply for project A: creates a real file + a valid journal entry carrying A's true postHash.
+    wBlueprint("src/a.md", "project A instructions\n");
+    const a = apply({
+      manifest: { schemaVersion: 1, roles: [{ name: "r", harness: "claude-code", files: [{ transform: "copy", source: "src/a.md", destination: "CLAUDE.md" }] }] },
+      blueprintRoot,
+      projectRoot,
+      dataDir,
+    });
+    expect(existsProject("CLAUDE.md")).toBe(true);
+    // Corrupt the journal: append a foreign project-B row that REUSES A's real batchId (the exact tamper the
+    // post-PR gate flagged — pre-fix, default undo(B or A) resolved to A's batch and deleted A's real file).
+    const base = { backupPath: null, created: true, mode: null, format: "text", ts: 9 };
+    const foreign = { ...base, id: "b1", targetPath: "/other/project/CLAUDE.md", postHash: "hB", batchId: a.batchId, projectRoot: "/other/project" };
+    appendFileSync(join(dataDir, "undo-journal.jsonl"), `${JSON.stringify(foreign)}\n`);
+    // The batchId is now cross-root → quarantined. Default undo for EITHER project selects nothing…
+    expect(undoBatch(projectRoot, dataDir).reversed).toHaveLength(0);
+    expect(undoBatch("/other/project", dataDir).reversed).toHaveLength(0);
+    // …and an explicit undo of the poisoned id likewise reverses nothing. A's REAL file is untouched.
+    expect(undoBatch(projectRoot, dataDir, a.batchId).reversed).toHaveLength(0);
+    expect(existsProject("CLAUDE.md")).toBe(true);
+    expect(rProject("CLAUDE.md")).toBe("project A instructions\n");
   });
 });

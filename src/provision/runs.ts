@@ -30,6 +30,17 @@ export interface ProvisionBatch {
 function groupBatches(entries: readonly UndoEntry[]): ProvisionBatch[] {
   const order: string[] = [];
   const byId = new Map<string, ProvisionBatch>();
+  // A batchId that appears under two different canonical roots is dropped ENTIRELY (best-effort defense-in-depth,
+  // bot review PR #52). THREAT-MODEL SCOPE (decision #45): this is CORRUPTION-tolerance, NOT a security boundary.
+  // A legitimate journal cannot reach here — every `apply()` stamps a fresh `randomUUID` batchId under one
+  // ingress-canonicalized root and each `targetPath` is a `posix.join(projectRoot, PortableRelPath)` descendant by
+  // construction, so no cross-root batchId, duplicate entry-id, or path mismatch exists without DIRECT WRITES to
+  // the 0600/0700 undo journal. An attacker who can write semantically-valid malicious entries there already owns
+  // the data dir (and thus the user's real configs) — "attacker-owns-HOME", explicitly out of scope. So this
+  // guard, and the residual crafted-journal undo paths the gate names (duplicate-id redirection, projectRoot not
+  // constraining targetPath, quarantined-newest fallback), are best-effort only; full journal-integrity hardening
+  // is deferred to its own unit IF the threat model ever expands to a hostile data dir (issue tracked).
+  const quarantined = new Set<string>();
   for (const entry of entries) {
     if (!entry.batchId || !entry.projectRoot) continue;
     const root = canonicalRoot(entry.projectRoot);
@@ -39,16 +50,12 @@ function groupBatches(entries: readonly UndoEntry[]): ProvisionBatch[] {
       byId.set(entry.batchId, batch);
       order.push(entry.batchId);
     } else if (batch.projectRoot !== root) {
-      // Fail CLOSED on the untrusted/corrupt journal the module header warns about: an entry that REUSES a
-      // batchId under a DIFFERENT (canonicalized) project root is not part of this batch — dropping it stops
-      // `undoBatch(project, …, batchId)` from reversing another project's paths through a shared batch id. A
-      // legitimate batch's entries all carry the ingress-canonicalized root, so this only ever excludes a
-      // corrupt / hand-edited row (bot review, PR #52).
+      quarantined.add(entry.batchId);
       continue;
     }
     batch.entries.push(entry);
   }
-  return order.map((id) => byId.get(id)!);
+  return order.filter((id) => !quarantined.has(id)).map((id) => byId.get(id)!);
 }
 
 /** Every provision batch in the journal, in first-appearance order, oldest entry first within each batch.
@@ -71,14 +78,21 @@ export function readBatches(dataDir?: string): ProvisionBatch[] {
  * with the U6 CLI undo verb; do NOT change the selection logic before then.
  */
 export function newestBatchForProject(projectRoot: string, dataDir?: string): ProvisionBatch | null {
-  const entries = listUndo(dataDir);
-  let lastBatchId: string | null = null;
+  // Recency is the batch of the LAST journal ENTRY for `target` — NOT the last batch in `groupBatches`
+  // first-appearance order (CodeRabbit PR #54): those differ only when a batch's entries are interleaved with
+  // another's (`A1, B1, A2` → last entry is A's, but first-appearance order ends at B), which needs concurrent
+  // applies (KTD9/#28) or a crafted journal (out of #45) — but the two must not disagree, and the docstring
+  // promises "last-appearing journal entry". Resolve each entry's batchId through the VALIDATED grouping so a
+  // quarantined (cross-root) batchId is never a candidate; a batch is returned only when its OWN canonical root
+  // matches. On any legitimate journal nothing is quarantined, so this is exactly the pre-quarantine behavior.
   const target = canonicalRoot(projectRoot);
-  for (const entry of entries) {
-    if (entry.projectRoot !== undefined && canonicalRoot(entry.projectRoot) === target && entry.batchId) lastBatchId = entry.batchId;
+  const entries = listUndo(dataDir);
+  const validatedById = new Map(groupBatches(entries).map((batch) => [batch.batchId, batch]));
+  for (let index = entries.length - 1; index >= 0; index--) {
+    const batch = entries[index]!.batchId === undefined ? undefined : validatedById.get(entries[index]!.batchId!);
+    if (batch?.projectRoot === target) return batch;
   }
-  if (lastBatchId === null) return null;
-  return groupBatches(entries).find((batch) => batch.batchId === lastBatchId) ?? null;
+  return null;
 }
 
 /** The result of an undo verb, four honest per-target buckets (one entry's outcome never aborts the rest —

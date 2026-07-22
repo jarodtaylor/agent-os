@@ -8,6 +8,7 @@
  * the journal (the KTD2 fresh-process guarantee).
  */
 import { listUndo, undo, type UndoEntry } from "../configwrite/index";
+import { isRolledBack, readBatchStatuses } from "./batch-status";
 import { canonicalProjectRoot, errorText } from "./internal";
 
 /** Canonicalize a project root before comparison. Apply canonicalizes at ingress so NEW entries store a canonical
@@ -65,17 +66,20 @@ export function readBatches(dataDir?: string): ProvisionBatch[] {
 }
 
 /**
- * The newest batch for a project: the batch of the LAST-APPEARING journal entry for `projectRoot` (journal
- * order, NOT `max(ts)` — that avoids ms-tie/clock-skew misordering). `null` when the project has no batch.
- * One journal read: the entries found here are reused to build the batch (no second `listUndo` pass).
+ * The newest COMMITTED batch for a project: scanning back from the end of the journal, the batch of the
+ * last-appearing entry for `projectRoot` (journal order, NOT `max(ts)` — that avoids ms-tie/clock-skew
+ * misordering) that is not affirmatively known to have been rolled back. `null` when the project has no such
+ * batch. One journal read: the entries found here are reused to build the batch (no second `listUndo` pass).
  *
- * HONESTY CAVEAT (deferred, no fix here): "newest" is the newest JOURNALED batch, not the newest SUCCESSFUL
- * one. A failed apply rolls back in-process but its reversed entries STAY in the append-only journal, so that
- * rolled-back batch is the last-appearing one and becomes the default undo target — its already-reversed
- * entries then report in `alreadyReversed` (an honest no-op — FOLD 2), never data loss or a false success. An
- * operator wanting to undo the last SUCCESSFUL apply must pass that batch id explicitly to `undoBatch`. The
- * durable fix (a batch terminal-state / run-status so default selection can skip a rolled-back batch) lands
- * with the U6 CLI undo verb; do NOT change the selection logic before then.
+ * WHY A TERMINAL-STATE FILTER (issue #50): a failed apply rolls back in-process, but its (already-reversed)
+ * entries STAY in the append-only journal — so the rolled-back batch was the last-appearing one and captured
+ * the default undo target. The report stayed honest (its entries land in `alreadyReversed`, never falsely in
+ * `reversed`), but the operator's last SUCCESSFUL apply went un-undone unless they knew its batch id. The
+ * durable `batch-status` record now names how each batch ended, and default selection skips one recorded
+ * `rolled-back`. FAIL-SAFE: only an affirmative, well-formed, root-matching rolled-back record excludes a
+ * batch — an UNKNOWN state (a pre-U6 journal, a crash before the record landed, a partial rollback that left
+ * a file on disk) stays eligible, reproducing exactly the pre-#50 selection. `undoBatch` with an explicit id
+ * still reaches ANY batch, rolled-back ones included.
  */
 export function newestBatchForProject(projectRoot: string, dataDir?: string): ProvisionBatch | null {
   // Recency is the batch of the LAST journal ENTRY for `target` — NOT the last batch in `groupBatches`
@@ -88,9 +92,10 @@ export function newestBatchForProject(projectRoot: string, dataDir?: string): Pr
   const target = canonicalRoot(projectRoot);
   const entries = listUndo(dataDir);
   const validatedById = new Map(groupBatches(entries).map((batch) => [batch.batchId, batch]));
+  const statuses = readBatchStatuses(dataDir);
   for (let index = entries.length - 1; index >= 0; index--) {
     const batch = entries[index]!.batchId === undefined ? undefined : validatedById.get(entries[index]!.batchId!);
-    if (batch?.projectRoot === target) return batch;
+    if (batch?.projectRoot === target && !isRolledBack(batch.batchId, batch.projectRoot, statuses)) return batch;
   }
   return null;
 }
@@ -101,11 +106,9 @@ export function newestBatchForProject(projectRoot: string, dataDir?: string): Pr
  *   - `alreadyReversed` — `undo` ran but the target was ALREADY in its reversed state (nothing to do). This is
  *     the honest no-op signal: after a failed+rolled-back apply, a bare `undo` of that batch finds every entry
  *     already reversed on disk and reports them HERE — never falsely in `reversed`. It is not a failure.
- *     DEFERRED caveat (gate round 3, issue #50/U6): `undo`'s created-file branch decides presence with
- *     `existsSync`, which reads `false` for BOTH a genuinely-absent target AND an EACCES/indeterminate lookup, so
- *     a created target still present behind an inaccessible parent dir is mapped to `noop` and lands HERE instead
- *     of `failed`. The fix (guarded `lstat`, ENOENT-only ⇒ noop) belongs in the shared U14 `undo` primitive that
- *     the installers also call, so it rides with U6's write-path hardening rather than being bolted on here.
+ *     This bucket now means EXACTLY that (issue #51.3): `undo`'s presence check is a guarded stat where ONLY a
+ *     genuine ENOENT counts as absent, so a target still present behind an inaccessible parent dir throws and
+ *     lands in `failed` instead of being laundered into a clean "already reversed" it never was.
  *   - `superseded` — a LATER provision batch wrote the same `(projectRoot, targetPath)`, so reversing this
  *     (older) entry would clobber the newer batch's state; we refuse (fail CLOSED) rather than reverse. Keyed on
  *     JOURNAL ORDERING (a later, different batch), NOT a byte-hash — so an A→B→A content cycle can no longer
@@ -125,12 +128,12 @@ export interface UndoOutcome {
  * default is the operator's `undo`, and passing an OLDER batch's id is how a specific run is unwound — that is
  * the path that surfaces `superseded` entries when a newer batch already overwrote a shared target.
  *
- * DEFAULT-SELECTION CAVEAT (see `newestBatchForProject`): the default targets the newest JOURNALED batch, not
- * the newest SUCCESSFUL one. After a FAILED + rolled-back apply, that rolled-back batch is newest in the
- * append-only journal, so a bare `undoBatch(projectRoot, dataDir)` selects it and reports an honest no-op (its
- * entries land in `alreadyReversed`, not falsely in `reversed` — FOLD 2) rather than undoing the prior
- * successful run — pass that run's batch id explicitly to unwind it. Deferred; the durable fix (durable batch
- * terminal-state) lands with the U6 CLI verb.
+ * DEFAULT vs EXPLICIT selection (issue #50): the default targets the newest COMMITTED batch — a fully
+ * rolled-back run is skipped, so a bare `undoBatch(projectRoot, dataDir)` unwinds the last apply that actually
+ * left state behind rather than no-op'ing on a failed one. An EXPLICIT `batchId` still reaches ANY batch,
+ * including a rolled-back one, whose entries then report in `alreadyReversed` (an honest no-op — FOLD 2). A
+ * batch whose terminal state is unknown, or whose rollback was only PARTIAL, remains default-selectable —
+ * that is what keeps a file stranded by a failed reversal reachable without knowing its batch id.
  */
 export function undoBatch(projectRoot: string, dataDir?: string, batchId?: string): UndoOutcome {
   const batch = batchId
@@ -152,9 +155,9 @@ export function undoBatch(projectRoot: string, dataDir?: string, batchId?: strin
  *     entry — `undo` is never called for it — so an explicit old-batch undo can never clobber a newer batch.
  *     ⚠️ CROSS-BATCH ONLY: two rows into one destination WITHIN ONE batch share the same batch index, so neither
  *     supersedes the other — the same-batch LIFO chain (X→v1→v2) must still reverse newest-first intact.
- *     DEFERRED (#50/U6): this over-refuses in the rare case where the later batch was ITSELF rolled back (its
- *     entries linger in the append-only journal); proving that (fail OPEN) needs a batch terminal-state and is
- *     out of scope here — worst case is an honest "superseded" report, never a clobber.
+ *     A later batch that is affirmatively recorded FULLY rolled back is no longer counted as a writer (#50):
+ *     every one of its journaled writes was reversed, so it holds no live state that reversing an older entry
+ *     could clobber — see `supersessionIndex` for why that stays safe.
  *
  *  2. For a NON-superseded entry, `undo` runs and its disposition routes the entry: `"reversed"` (a real change)
  *     → `reversed`; `"noop"` (already in the reversed state — a double-undo, or undoing an already-rolled-back
@@ -188,17 +191,27 @@ function undoEntries(entries: readonly UndoEntry[], dataDir?: string): Omit<Undo
 /** The journal-ordering supersession index, built once per `undoEntries` call from the FULL journal:
  *   - `orderByBatch` — each batch's first-appearance index (`groupBatches` order, the SAME journal-position
  *     ordering `newestBatchForProject` trusts — never `ts`, which ms-ties/clock-skew would misorder).
- *   - `writersByPath` — every batch index that wrote each `targetPath`, keyed by the `targetPath` ALONE.
+ *   - `writersByPath` — every LIVE batch index that wrote each `targetPath`, keyed by the `targetPath` ALONE.
  *     `targetPath` is `posix.join(projectRoot, dest)` (apply), so it is already absolute AND posix-normalized —
  *     `/p`, `/p/`, and `/p/x/..` all collapse to one key (gate round 3 FOLD 1a: the earlier `[projectRoot,
  *     targetPath]` key embedded the UNnormalized root spelling, so those aliases produced distinct keys and a
  *     later write could miss supersession → ABA clobber). The project scoping the old key added is redundant:
  *     `targetPath` is the absolute file identity, so two batches sharing it ARE writing one file and supersession
- *     is correct regardless of which project logically "owns" it. DEFERRED (#50/U6, symlink residual): a root
+ *     is correct regardless of which project logically "owns" it. DEFERRED (issue #51.1, symlink residual): a root
  *     reached via a SYMLINK is a different string `posix.normalize` cannot fold, so two spellings (`/link/f` vs
  *     `/real/f`) still key apart; the durable fix is canonicalizing (realpath) the project root at the U6/registry
  *     ingress, out of scope for this pure journal reader.
- *  Together these answer "is a LATER, different batch also a writer of this path?" without any byte compare. */
+ *  Together these answer "is a LATER, different batch also a LIVE writer of this path?" without any byte compare.
+ *
+ *  ROLLED-BACK BATCHES ARE NOT WRITERS (#50). A batch recorded FULLY rolled back had every journaled write
+ *  reversed, so it holds no live state on any path — counting it as a writer over-refused an older batch's
+ *  legitimate undo with a misleading "superseded", leaving that run unwindable by nobody. It is dropped from
+ *  `writersByPath` but KEPT in `orderByBatch`: its own entries must still resolve an index, so a LATER live
+ *  batch can supersede THEM (undoing a rolled-back batch under newer live state stays a fail-closed refusal
+ *  rather than a hash-mismatch `failed`). Failing open here is safe in depth — an applied-but-unjournaled write
+ *  never had a journal entry, so it was never a writer to begin with, and `undo` itself still refuses any
+ *  target whose bytes no longer match the entry's `postHash`. The fail-safe direction is preserved: an UNKNOWN
+ *  or PARTIAL rollback is not "rolled-back", so those batches keep superseding (fail closed). */
 interface SupersessionIndex {
   orderByBatch: Map<string, number>;
   writersByPath: Map<string, number[]>;
@@ -206,11 +219,13 @@ interface SupersessionIndex {
 
 function supersessionIndex(dataDir?: string): SupersessionIndex {
   const batches = groupBatches(listUndo(dataDir));
+  const statuses = readBatchStatuses(dataDir);
   const orderByBatch = new Map<string, number>();
   const writersByPath = new Map<string, number[]>();
   for (let index = 0; index < batches.length; index++) {
     const batch = batches[index]!;
-    orderByBatch.set(batch.batchId, index);
+    orderByBatch.set(batch.batchId, index); // EVERY batch keeps its order index, live or not (see the docstring)
+    if (isRolledBack(batch.batchId, batch.projectRoot, statuses)) continue; // reversed ⇒ holds no live state
     for (const entry of batch.entries) {
       const indices = writersByPath.get(entry.targetPath) ?? [];
       indices.push(index);

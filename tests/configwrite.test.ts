@@ -373,6 +373,50 @@ test("undo is idempotent on the restore branch — a second undo is a clean no-o
   expect(read(target)).toBe(afterFirst); // unchanged
 });
 
+// ── undo's presence lookup is fail-closed on an INDETERMINATE result (#51.3) — the same discipline the
+//    engine's `statTarget` applies at write time. `existsSync` reads `false` for BOTH a genuine ENOENT and an
+//    EACCES/EIO lookup, so an unreadable-parent target used to be classified "already reversed" (a created file
+//    reported as a clean cleanup that never happened). ENOENT ONLY may mean absent. ──
+
+describe("undo fails closed on an indeterminate presence lookup (#51.3)", () => {
+  test("a CREATED target behind an unreadable parent dir THROWS instead of reporting a clean no-op", () => {
+    // Assumes a non-root runner (root ignores directory permission bits) — same assumption as the #30 tests.
+    const dir = join(configsDir, "locked-created");
+    mkdirSync(dir);
+    const target = join(dir, "created.json");
+    const result = mergeConfig(target, { a: 1 }, { dataDir });
+    expect(result.created).toBe(true);
+
+    chmodSync(dir, 0o000); // no search bit ⇒ stat(target) fails EACCES — indeterminate, NOT absent
+    try {
+      // Pre-#51.3 this returned "noop" (existsSync false ⇒ "the created file is already gone"), so a caller
+      // reported a successful cleanup while the file was still there behind the locked dir.
+      expect(() => undo(result.undoId!, dataDir)).toThrow();
+    } finally {
+      chmodSync(dir, 0o700);
+    }
+    expect(existsSync(target)).toBe(true); // still on disk — the "already reversed" claim would have been a lie
+  });
+
+  test("a PRE-EXISTING target behind an unreadable parent dir throws the real lookup error, not 'no longer exists'", () => {
+    const dir = join(configsDir, "locked-restore");
+    mkdirSync(dir);
+    const target = join(dir, "settings.json");
+    writeFileSync(target, JSON.stringify({ a: 1 }, null, 2) + "\n");
+    const result = mergeConfig(target, { b: 2 }, { dataDir });
+
+    chmodSync(dir, 0o000);
+    try {
+      // Both regimes throw here, so this pins the MESSAGE: pre-fix the EACCES was laundered into the
+      // restore branch's "no longer exists … refusing to resurrect it" — a wrong diagnosis of a live file.
+      expect(() => undo(result.undoId!, dataDir)).toThrow(/EACCES|permission denied/i);
+    } finally {
+      chmodSync(dir, 0o700);
+    }
+    expect(JSON.parse(read(target))).toEqual({ a: 1, b: 2 }); // untouched
+  });
+});
+
 // ── symlinked config targets are refused (adversarial U14-F2: don't replace the link) ──
 
 test("refuses to write through a symlinked target (fail closed)", () => {

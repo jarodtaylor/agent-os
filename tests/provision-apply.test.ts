@@ -15,6 +15,7 @@ import { dirname, join } from "node:path";
 import { parse as parseToml } from "smol-toml";
 import { apply, type ProvisionEngine } from "../src/provision/apply";
 import { readBatches, newestBatchForProject, undoBatch } from "../src/provision/runs";
+import { batchStatusPath } from "../src/provision/batch-status";
 import { TARGETS } from "../src/provision/targets";
 import { AppliedButUnjournaledError, mergeConfig, writeTextFile } from "../src/configwrite/index";
 import type { Manifest } from "../src/contract/index";
@@ -414,6 +415,57 @@ describe("provision apply — error regimes", () => {
     expect(existsProject(".cursor/agents/reviewer.md")).toBe(true); // write2 un-undoable ⇒ SURVIVES the rollback
     expect(rProject(".cursor/agents/reviewer.md")).toBe("unjournaled survivor\n");
     expect(existsProject(".claude/agents/victim.md")).toBe(false); // write3 never landed
+  });
+
+  test("a later same-path write in the batch is REFUSED after an applied-but-unjournaled write (#51.2 poisoned path)", () => {
+    // The only legal way two rows share a destination is all-config-merge (whole-file same-dest is refused by the
+    // duplicate-destination guard). If row2's write LANDS but cannot be journaled, row3's byte-exact backup would
+    // capture row2's unjournaled RESULT rather than the pre-batch bytes — so a fresh-process undo would reverse
+    // only row3's entry, restore that intermediate state, and report `reversed` while the pre-batch state was
+    // never restored. apply must poison the path instead: refuse row3, abort, and roll the batch back.
+    wBlueprint("first.md", "# Executor\n");
+    wBlueprint("mcp-a.json", JSON.stringify({ mcpServers: { alpha: { command: "1" } } }));
+    wBlueprint("mcp-b.json", JSON.stringify({ mcpServers: { beta: { command: "2" } } }));
+
+    let mcpWrites = 0;
+    const flaky: ProvisionEngine = {
+      mergeConfig: (t, p, o) => {
+        const res = mergeConfig(t, p, o); // the write LANDS
+        if (t.endsWith(".cursor/mcp.json") && ++mcpWrites === 1) {
+          throw new AppliedButUnjournaledError(t, res.backupPath, new Error("injected journal failure"));
+        }
+        return res;
+      },
+      writeTextFile: (t, c, o) => writeTextFile(t, c, o),
+    };
+    const manifest: Manifest = {
+      schemaVersion: 1,
+      roles: [
+        { name: "executor", harness: "codex", files: [{ transform: "copy", source: "first.md", destination: "AGENTS.md" }] },
+        { name: "qa", harness: "cursor", files: [{ transform: "config-merge", source: "mcp-a.json", destination: ".cursor/mcp.json" }] },
+        { name: "reviewer", harness: "cursor", files: [{ transform: "config-merge", source: "mcp-b.json", destination: ".cursor/mcp.json" }] },
+      ],
+    };
+
+    const outcome = apply({ manifest, blueprintRoot, projectRoot, dataDir }, { engine: flaky });
+    expect(outcome.failed).toHaveLength(1);
+    expect(outcome.failed[0]!.path).toBe(join(projectRoot, ".cursor/mcp.json"));
+    expect(outcome.failed[0]!.error).toContain("could not be journaled");
+    expect(outcome.rolledBack).toBe(true);
+    expect(existsProject("AGENTS.md")).toBe(false); // the journaled write was reversed
+    // The un-undoable write is still on disk and still the ONLY thing `applied` claims — never a second entry
+    // whose backup would misrepresent the pre-batch bytes.
+    expect(outcome.applied).toHaveLength(1);
+    expect(outcome.applied[0]!.unjournaled).toBeDefined();
+    expect(outcome.applied[0]!.targetPath).toBe(join(projectRoot, ".cursor/mcp.json"));
+    const servers = parseJsonProject(".cursor/mcp.json").mcpServers as Record<string, unknown>;
+    expect(servers.alpha).toEqual({ command: "1" }); // row2's unjournaled state, honestly reported as stuck
+    expect(servers.beta).toBeUndefined(); // row3 was refused — it never wrote, so no misleading backup exists
+    // The core invariant: row3's write never reached the engine at all, so no backup of the unjournaled state
+    // was ever taken. (The journal is NOT asserted here: this fixture wraps the REAL engine, so row2's entry
+    // journaled successfully before the injected throw — in production the error means that journal write is
+    // exactly what failed. The engine call count is the part of this the injection models faithfully.)
+    expect(mcpWrites).toBe(1);
   });
 
   test("applying onto a DRIFTED copy target backs up then overwrites (blueprint wins, R8); undo restores the hand-edit", () => {
@@ -881,10 +933,11 @@ describe("provision apply — FOLD1+4 blueprint-validity runs for ALL rows (disk
 });
 
 describe("provision apply — FOLD2 honest no-op (undo disposition → alreadyReversed)", () => {
-  test("a failed+rolled-back batch, undone again, reports its entries in alreadyReversed — never falsely in reversed", () => {
+  test("an EXPLICITLY undone failed+rolled-back batch reports its entries in alreadyReversed — never falsely in reversed", () => {
     // Force a mid-write fault so apply rolls back its one journaled write (AGENTS.md); its journal entry lingers
-    // in the append-only journal. A bare undoBatch then selects that rolled-back batch (newest journaled) and
-    // finds every entry ALREADY reversed on disk — the honest-no-op #50 claim made TRUE by the disposition.
+    // in the append-only journal. An EXPLICIT undo of that batch finds every entry ALREADY reversed on disk —
+    // the honest-no-op claim made TRUE by the disposition. (The batch is no longer the DEFAULT target: #50's
+    // terminal state now skips a fully rolled-back batch there — asserted at the end.)
     wBlueprint("first.md", "# Executor\n");
     wBlueprint("victim.md", "never lands\n");
     mkdirSync(join(projectRoot, ".claude", "agents"), { recursive: true });
@@ -901,12 +954,139 @@ describe("provision apply — FOLD2 honest no-op (undo disposition → alreadyRe
     expect(outcome.rolledBack).toBe(true);
     expect(existsProject("AGENTS.md")).toBe(false); // the journaled write was reversed by rollback
 
-    const undoResult = undoBatch(projectRoot, dataDir); // selects the rolled-back batch (newest journaled)
+    const undoResult = undoBatch(projectRoot, dataDir, outcome.batchId); // explicitly, by id
     expect(undoResult.batchId).toBe(outcome.batchId);
     expect(undoResult.alreadyReversed).toEqual([join(projectRoot, "AGENTS.md")]); // honest no-op
     expect(undoResult.reversed).toEqual([]); // NOT falsely reported as a real reversal
     expect(undoResult.superseded).toEqual([]);
     expect(undoResult.failed).toEqual([]);
+    expect(undoBatch(projectRoot, dataDir).batchId).toBeNull(); // …and it is NOT the default target (#50)
+  });
+});
+
+// Issue #50: a failed apply rolls back in-process, but its (already-reversed) entries STAY in the append-only
+// journal — so before the durable batch terminal state, that rolled-back batch was the newest JOURNALED batch and
+// captured the DEFAULT undo target, leaving the operator's last successful run un-undone unless they knew its
+// batch id. Default selection now skips a batch recorded `rolled-back`; explicit selection still reaches it.
+describe("issue #50 — default undo targets the newest COMMITTED batch", () => {
+  /** Batch A (committed, creates AGENTS.md) then batch B (writes CLAUDE.md, then faults and fully rolls back). */
+  function committedThenRolledBack(): { a: ReturnType<typeof apply>; b: ReturnType<typeof apply> } {
+    wBlueprint("first.md", "# Executor\n");
+    wBlueprint("second.md", "# Architect\n");
+    wBlueprint("victim.md", "never lands\n");
+    const a = apply({
+      manifest: { schemaVersion: 1, roles: [{ name: "executor", harness: "codex", files: [{ transform: "copy", source: "first.md", destination: "AGENTS.md" }] }] },
+      blueprintRoot,
+      projectRoot,
+      dataDir,
+    });
+    mkdirSync(join(projectRoot, ".claude", "agents"), { recursive: true });
+    chmodSync(join(projectRoot, ".claude", "agents"), 0o500); // owner r-x: the second row of batch B faults
+    const b = apply({
+      manifest: {
+        schemaVersion: 1,
+        roles: [
+          { name: "architect", harness: "claude-code", files: [{ transform: "copy", source: "second.md", destination: "CLAUDE.md" }] },
+          { name: "stray", harness: "claude-code", files: [{ transform: "copy", source: "victim.md", destination: ".claude/agents/victim.md" }] },
+        ],
+      },
+      blueprintRoot,
+      projectRoot,
+      dataDir,
+    });
+    expect(b.rolledBack).toBe(true);
+    expect(b.rollbackFailures ?? []).toEqual([]); // a COMPLETE rollback — the precondition for the durable status
+    expect(existsProject("CLAUDE.md")).toBe(false); // batch B left nothing on disk
+    return { a, b };
+  }
+
+  test("a failed + fully rolled-back batch is skipped by DEFAULT selection; the last committed batch is undone", () => {
+    const { a } = committedThenRolledBack();
+    expect(existsProject("AGENTS.md")).toBe(true);
+
+    const out = undoBatch(projectRoot, dataDir); // no batch id — the operator's plain `undo`
+    expect(out.batchId).toBe(a.batchId); // NOT the rolled-back batch B
+    expect(out.reversed).toEqual([join(projectRoot, "AGENTS.md")]);
+    expect(existsProject("AGENTS.md")).toBe(false); // the last SUCCESSFUL apply is what got undone
+  });
+
+  test("an EXPLICIT batch id still reaches a rolled-back batch (honest no-op, unchanged contract)", () => {
+    const { b } = committedThenRolledBack();
+
+    const out = undoBatch(projectRoot, dataDir, b.batchId);
+    expect(out.batchId).toBe(b.batchId);
+    expect(out.alreadyReversed).toEqual([join(projectRoot, "CLAUDE.md")]); // reversed by the abort, honestly reported
+    expect(out.reversed).toEqual([]);
+    expect(existsProject("AGENTS.md")).toBe(true); // batch A untouched by an explicit undo of B
+  });
+
+  test("a PARTIALLY rolled-back batch (a rollback undo that itself failed) stays eligible — fail-safe", () => {
+    // Terminal state is recorded `rolled-back` ONLY when every reversal succeeded. Here one file is still on
+    // disk despite `rolledBack: true`, so the batch must remain the DEFAULT undo target — recording it
+    // rolled-back would strand that file, undoable only by someone who knew the batch id.
+    wBlueprint("first.md", "# Executor\n");
+    wBlueprint("second.md", "never lands\n");
+    const flaky: ProvisionEngine = {
+      mergeConfig: (t, p, o) => mergeConfig(t, p, o),
+      writeTextFile: (t, c, o) => {
+        if (t.endsWith(".cursor/agents/reviewer.md")) {
+          appendFileSync(join(projectRoot, "AGENTS.md"), "external drift\n"); // diverge → its rollback undo refuses
+          throw new Error("genuine mid-write fault");
+        }
+        return writeTextFile(t, c, o);
+      },
+    };
+    const outcome = apply(
+      {
+        manifest: {
+          schemaVersion: 1,
+          roles: [
+            { name: "executor", harness: "codex", files: [{ transform: "copy", source: "first.md", destination: "AGENTS.md" }] },
+            { name: "reviewer", harness: "cursor", files: [{ transform: "copy", source: "second.md", destination: ".cursor/agents/reviewer.md" }] },
+          ],
+        },
+        blueprintRoot,
+        projectRoot,
+        dataDir,
+      },
+      { engine: flaky },
+    );
+    expect(outcome.rollbackFailures).toHaveLength(1);
+    expect(existsProject("AGENTS.md")).toBe(true); // still applied despite rolledBack:true
+
+    expect(newestBatchForProject(projectRoot, dataDir)?.batchId).toBe(outcome.batchId); // still the default target
+  });
+
+  test("an UNKNOWN terminal state (no status record — a pre-U6 journal) leaves the batch eligible", () => {
+    // The non-negotiable degrade path: a missing/erased status file must reproduce exactly the pre-#50 behavior,
+    // never make `undo` find nothing. Simulated by deleting the status record after a successful apply.
+    wBlueprint("first.md", "# Executor\n");
+    const a = apply({
+      manifest: { schemaVersion: 1, roles: [{ name: "executor", harness: "codex", files: [{ transform: "copy", source: "first.md", destination: "AGENTS.md" }] }] },
+      blueprintRoot,
+      projectRoot,
+      dataDir,
+    });
+    rmSync(batchStatusPath(dataDir), { force: true });
+
+    const out = undoBatch(projectRoot, dataDir);
+    expect(out.batchId).toBe(a.batchId);
+    expect(out.reversed).toEqual([join(projectRoot, "AGENTS.md")]);
+  });
+
+  test("a torn / malformed status line is skipped like a torn journal line (untrusted input, validated on read)", () => {
+    wBlueprint("first.md", "# Executor\n");
+    const a = apply({
+      manifest: { schemaVersion: 1, roles: [{ name: "executor", harness: "codex", files: [{ transform: "copy", source: "first.md", destination: "AGENTS.md" }] }] },
+      blueprintRoot,
+      projectRoot,
+      dataDir,
+    });
+    // A half-written line + a schema-invalid line + a line claiming an unknown status: none may disturb selection.
+    appendFileSync(batchStatusPath(dataDir), `{"batchId":"${a.batchId}","status":"rolled-b\n`);
+    appendFileSync(batchStatusPath(dataDir), `${JSON.stringify({ batchId: a.batchId, projectRoot, status: "vaporized", ts: 1 })}\n`);
+
+    expect(newestBatchForProject(projectRoot, dataDir)?.batchId).toBe(a.batchId);
   });
 });
 
@@ -938,6 +1118,46 @@ describe("provision apply — FOLD3 journal-ordering supersession (ABA content c
     expect(undoResult.failed).toEqual([]);
     expect(existsProject(dest)).toBe(true); // the newest batch's file survives untouched
     expect(rProject(dest)).toBe("A\n");
+  });
+});
+
+describe("issue #50 follow-on — a fully rolled-back later batch no longer supersedes", () => {
+  test("explicit undo of an older batch succeeds when the later same-path batch was rolled back (was: over-refused)", () => {
+    // Supersession refuses an entry whose path a LATER batch also wrote — fail closed, so an old undo can never
+    // clobber newer state. But a later batch that FULLY rolled back holds no live state to clobber: every one of
+    // its journaled writes was reversed. Pre-fix that batch still counted as a writer, so the older batch's undo
+    // was refused with an honest-but-wrong "superseded" and the operator could not unwind it at all.
+    wBlueprint("a.json", JSON.stringify({ shared: { k: "A" } }));
+    wBlueprint("b.json", JSON.stringify({ shared: { k: "B" } }));
+    wBlueprint("victim.md", "never lands\n");
+    const a = apply({
+      manifest: { schemaVersion: 1, roles: [{ name: "r", harness: "claude-code", files: [{ transform: "config-merge", source: "a.json", destination: ".mcp.json" }] }] },
+      blueprintRoot,
+      projectRoot,
+      dataDir,
+    });
+    mkdirSync(join(projectRoot, ".claude", "agents"), { recursive: true });
+    chmodSync(join(projectRoot, ".claude", "agents"), 0o500);
+    const b = apply({
+      manifest: {
+        schemaVersion: 1,
+        roles: [
+          { name: "r2", harness: "claude-code", files: [{ transform: "config-merge", source: "b.json", destination: ".mcp.json" }] },
+          { name: "stray", harness: "claude-code", files: [{ transform: "copy", source: "victim.md", destination: ".claude/agents/victim.md" }] },
+        ],
+      },
+      blueprintRoot,
+      projectRoot,
+      dataDir,
+    });
+    expect(b.rolledBack).toBe(true);
+    expect(b.rollbackFailures ?? []).toEqual([]);
+    expect((parseJsonProject(".mcp.json").shared as Record<string, unknown>).k).toBe("A"); // B's write was reversed
+
+    const undone = undoBatch(projectRoot, dataDir, a.batchId);
+    expect(undone.superseded).toEqual([]); // B is rolled back ⇒ not a live writer of this path
+    expect(undone.reversed).toEqual([join(projectRoot, ".mcp.json")]);
+    expect(existsProject(".mcp.json")).toBe(false); // A created it ⇒ undo deletes it
   });
 });
 

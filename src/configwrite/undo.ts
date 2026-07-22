@@ -6,7 +6,7 @@
  * is therefore a requirement. Entries are append-only; `undo` is idempotent via filesystem-state checks,
  * so a double-undo — or an undo after the target was already cleaned up by hand — never throws.
  */
-import { appendFileSync, chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync } from "node:fs";
+import { appendFileSync, chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
 import * as z from "zod";
@@ -101,8 +101,9 @@ export type UndoDisposition = "reversed" | "noop";
  * rather than clobber it. Idempotent: a target already restored to its backup (or an already-deleted
  * created file) is a no-op — reported as `"noop"` (vs `"reversed"` for a real change), so a caller need
  * not re-derive from filesystem state whether anything actually happened. Throws loudly on an unknown id,
- * a missing backup, or a diverged target — an undo that cannot faithfully restore must never silently
- * pretend to have worked.
+ * a missing backup, a diverged target, or a presence lookup that could not be resolved (see `present` —
+ * ENOENT alone means absent) — an undo that cannot faithfully restore must never silently pretend to have
+ * worked.
  */
 export function undo(id: string, dataDir?: string): UndoDisposition {
   const resolved = resolveDataDir(dataDir);
@@ -110,7 +111,7 @@ export function undo(id: string, dataDir?: string): UndoDisposition {
   const entry = listUndo(resolved).findLast((e) => e.id === id);
   if (!entry) throw new Error(`configwrite.undo: no journal entry for id '${id}'`);
 
-  const currentHash = existsSync(entry.targetPath) ? hashContent(readFileSync(entry.targetPath)) : null;
+  const currentHash = present(entry.targetPath) ? hashContent(readFileSync(entry.targetPath)) : null;
 
   if (entry.created) {
     // The mutation CREATED the target → undo deletes it. Already gone ⇒ idempotent no-op. Only delete if
@@ -124,7 +125,7 @@ export function undo(id: string, dataDir?: string): UndoDisposition {
   }
 
   // The target pre-existed → restore its original bytes.
-  if (!entry.backupPath || !existsSync(entry.backupPath)) {
+  if (!entry.backupPath || !present(entry.backupPath)) {
     throw new Error(`configwrite.undo: backup missing for id '${id}' (${entry.backupPath ?? "null"})`);
   }
   if (currentHash === null) {
@@ -138,6 +139,40 @@ export function undo(id: string, dataDir?: string): UndoDisposition {
   }
   restoreAtomically(entry.backupPath, entry.targetPath, entry.mode);
   return "reversed";
+}
+
+/**
+ * Fail-closed presence for the two files `undo` reads: the target and its backup (#51.3).
+ *
+ * `existsSync` reads `false` for BOTH a genuine ENOENT and an INDETERMINATE lookup (EACCES on an unreadable
+ * parent, EIO, ENOTDIR, …), and `undo` turns absence into a benign verdict — the created-file branch reports
+ * `"noop"` ("already deleted"), which `runs.ts` buckets as `alreadyReversed`. So a created target still sitting
+ * on disk behind an inaccessible parent dir was reported as a clean, completed cleanup that never happened, and
+ * a missing-backup diagnosis was pinned on a backup that may well be there. ENOENT ONLY may mean absent;
+ * anything else propagates (the caller — `runs.ts`, or an installer's best-effort rollback — routes a throw to
+ * `failed`, which is the honest bucket for "I could not determine, let alone perform, the reversal").
+ *
+ * This mirrors the engine's `statTarget` discipline (guarded lookup, ENOENT-only absence) but deliberately uses
+ * `stat`, NOT `lstat`: unlike the engine — which refuses to WRITE through a symlink and so must see the link
+ * itself — undo only ever READS these paths with `readFileSync`, which FOLLOWS symlinks. A presence check that
+ * did not follow would disagree with the very read it guards (an lstat-present dangling symlink would hand
+ * `readFileSync` an ENOENT it cannot classify). Following keeps the check and the read describing one file, and
+ * changes nothing about which symlinks are refused — that guard lives at write time, where it belongs.
+ *
+ * The journal's own `existsSync` checks (`recordUndo`'s torn-tail probe, `listUndo`'s missing-journal
+ * short-circuit) are deliberately NOT converted: they read our own file in our own 0700 data dir, and an
+ * indeterminate result there already fails loudly one step later (the append throws; a journal that reads as
+ * empty makes `undo` throw "no journal entry for id"). Converting them would trade a graceful empty read for a
+ * throw in `listUndo`, whose callers (the installers' uninstall paths) rely on it being total.
+ */
+function present(path: string): boolean {
+  try {
+    statSync(path);
+    return true;
+  } catch (err) {
+    if (typeof err === "object" && err !== null && (err as { code?: unknown }).code === "ENOENT") return false;
+    throw err; // EACCES / EIO / ENOTDIR / … — indeterminate, never silently "absent"
+  }
 }
 
 /**

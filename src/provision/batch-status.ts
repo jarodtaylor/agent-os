@@ -167,13 +167,33 @@ export function isFullyReversed(batchId: string, projectRoot: string, statuses: 
 }
 
 /**
- * Does this batch still hold an applied-but-unjournaled write? A batch whose `committed` record carries the
- * `stranded` flag can never be honestly retired as `undone`: `undo` reverses only JOURNALED entries, so the
- * survivor is still live no matter how cleanly the visible half reversed. Root-matched like `isFullyReversed`,
- * and false for every unknown/absent record — the fail-safe direction (an unknown batch stays eligible and
- * still superseding, it just is not affirmatively retired).
+ * What we can AFFIRMATIVELY say about whether this batch left anything live — deliberately three-valued.
+ *
+ *   - `clean`    — an affirmative, root-matched record exists and does NOT carry the stranded flag.
+ *   - `stranded` — an affirmative, root-matched record says an applied-but-unjournaled write survived.
+ *   - `unknown`  — no record, a root mismatch, or a record that never landed.
+ *
+ * WHY THREE VALUES AND NOT A BOOLEAN (gate round 3). The two questions this module answers have OPPOSITE safe
+ * defaults, and collapsing `unknown` into either one is wrong for the other:
+ *
+ *   - "may I SKIP this batch for default undo?" — unknown ⇒ **skip nothing**, stay eligible. Hiding a batch we
+ *     know nothing about could strand a live file with no way to reach it. (`isFullyReversed`.)
+ *   - "may I RETIRE this batch as undone?" — unknown ⇒ **refuse**. Retiring means asserting the batch holds
+ *     nothing live, and we cannot assert that from an absent record.
+ *
+ * A boolean `hasStrandedWrite` answered the second question with the first question's default, so a missing
+ * record read as "not stranded" and the batch was retired anyway. Both paths that produce a missing record are
+ * ordinary, not adversarial: `apply`'s abort path deliberately writes NO status when a survivor exists, and
+ * every status write is best-effort by design and can simply fail to land.
  */
-export function hasStrandedWrite(batchId: string, projectRoot: string, statuses: ReadonlyMap<string, BatchStatusRecord>): boolean {
+export type BatchCleanliness = "clean" | "stranded" | "unknown";
+
+export function batchCleanliness(
+  batchId: string,
+  projectRoot: string,
+  statuses: ReadonlyMap<string, BatchStatusRecord>,
+): BatchCleanliness {
   const record = statuses.get(batchId);
-  return record !== undefined && record.stranded === true && record.projectRoot === canonicalProjectRoot(projectRoot);
+  if (record === undefined || record.projectRoot !== canonicalProjectRoot(projectRoot)) return "unknown";
+  return record.stranded === true ? "stranded" : "clean";
 }

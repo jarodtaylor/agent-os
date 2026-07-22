@@ -1653,3 +1653,86 @@ describe("gate round 2 finding 3 — a batch with an unjournaled survivor is nev
     expect(readBatchStatuses(dataDir).get(clean.batchId!)?.status).toBe("undone");
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Gate round 3: the round-2 stranded guard keyed on an AFFIRMATIVE stranded record, so a MISSING record read
+// as "not stranded" and the batch was retired anyway. Both ways a record goes missing are ordinary, not
+// adversarial — hence two regressions, one per path.
+// ─────────────────────────────────────────────────────────────────────────────
+describe("gate round 3 — an unknown survivor state never permits retirement", () => {
+  /** An engine whose write for `landsUnjournaled` lands the bytes with NO journal entry (what production
+   *  leaves when the rename succeeds and the journal append fails), and whose write for `hardFails` throws. */
+  const mixedEngine = (landsUnjournaled: string, hardFails?: string): ProvisionEngine => ({
+    mergeConfig,
+    writeTextFile: (t, c, o) => {
+      if (t.endsWith(landsUnjournaled)) {
+        mkdirSync(dirname(t), { recursive: true });
+        writeFileSync(t, c);
+        throw new AppliedButUnjournaledError(t, null, new Error("injected journal failure"));
+      }
+      if (hardFails && t.endsWith(hardFails)) throw new Error("injected hard write failure");
+      return writeTextFile(t, c, o);
+    },
+  });
+
+  test("a mixed batch that later ABORTS is not retired — the abort path writes no status at all", () => {
+    // apply's abort path deliberately records NOTHING when a survivor exists (round 1's own fix), so this
+    // batch has no record by construction. Pre-fix, `undo` read that absence as "not stranded" and retired it.
+    wBlueprint("a.md", "alpha\n");
+    wBlueprint("b.md", "stranded survivor\n");
+    wBlueprint("c.md", "never lands\n");
+    const outcome = apply(
+      {
+        manifest: {
+          schemaVersion: 1,
+          roles: [
+            { name: "executor", harness: "codex", files: [{ transform: "copy", source: "a.md", destination: "AGENTS.md" }] },
+            { name: "qa", harness: "cursor", files: [{ transform: "copy", source: "b.md", destination: ".cursor/agents/qa.md" }] },
+            { name: "architect", harness: "claude-code", files: [{ transform: "copy", source: "c.md", destination: ".claude/agents/architect.md" }] },
+          ],
+        },
+        blueprintRoot,
+        projectRoot,
+        dataDir,
+      },
+      { engine: mixedEngine(".cursor/agents/qa.md", ".claude/agents/architect.md") },
+    );
+
+    expect(outcome.rolledBack).toBe(true);
+    expect(existsProject(".cursor/agents/qa.md")).toBe(true); // the survivor is live
+    expect(readBatchStatuses(dataDir).has(outcome.batchId!)).toBe(false); // …and there is NO record
+
+    undoBatch(projectRoot, dataDir);
+    // Unknown survivor state must refuse retirement, so the batch stays reachable and its trace survives.
+    expect(readBatchStatuses(dataDir).get(outcome.batchId!)?.status).toBeUndefined();
+    expect(newestBatchForProject(projectRoot, dataDir)?.batchId).toBe(outcome.batchId!);
+  });
+
+  test("a mixed batch whose status APPEND FAILED is not retired either", () => {
+    // The other ordinary path to a missing record: status writes are best-effort. Simulated by erasing the
+    // record after the apply, which is indistinguishable from the append never landing.
+    wBlueprint("a.md", "alpha\n");
+    wBlueprint("b.md", "stranded survivor\n");
+    const outcome = apply(
+      {
+        manifest: {
+          schemaVersion: 1,
+          roles: [
+            { name: "executor", harness: "codex", files: [{ transform: "copy", source: "a.md", destination: "AGENTS.md" }] },
+            { name: "qa", harness: "cursor", files: [{ transform: "copy", source: "b.md", destination: ".cursor/agents/qa.md" }] },
+          ],
+        },
+        blueprintRoot,
+        projectRoot,
+        dataDir,
+      },
+      { engine: mixedEngine(".cursor/agents/qa.md") },
+    );
+    expect(readBatchStatuses(dataDir).get(outcome.batchId!)?.stranded).toBe(true);
+    rmSync(batchStatusPath(dataDir), { force: true }); // the append never landed
+
+    undoBatch(projectRoot, dataDir);
+    expect(readBatchStatuses(dataDir).get(outcome.batchId!)?.status).toBeUndefined();
+    expect(existsProject(".cursor/agents/qa.md")).toBe(true);
+  });
+});

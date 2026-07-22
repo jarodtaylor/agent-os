@@ -13,7 +13,7 @@
  * writer forever. That write is best-effort and cannot fail an undo that already succeeded.
  */
 import { listUndo, undo, type UndoEntry } from "../configwrite/index";
-import { hasStrandedWrite, isFullyReversed, readBatchStatuses, recordBatchStatus } from "./batch-status";
+import { batchCleanliness, isFullyReversed, readBatchStatuses, recordBatchStatus } from "./batch-status";
 import { canonicalProjectRoot, errorText } from "./internal";
 
 /** Canonicalize a project root before comparison. Apply canonicalizes at ingress so NEW entries store a canonical
@@ -175,8 +175,14 @@ export function undoBatch(projectRoot: string, dataDir?: string, batchId?: strin
   //                    survivor is live, hide it from every future bare `undo`, and erase the last durable
   //                    trace of it (gate round 2, finding 3). Only `apply` knew, so `apply` stamped it.
   // Anything unretired stays UNKNOWN: default-selectable and still superseding — the fail-safe side.
-  const stranded = hasStrandedWrite(batch.batchId, batch.projectRoot, readBatchStatuses(dataDir));
-  if (buckets.failed.length === 0 && buckets.superseded.length === 0 && !stranded) {
+  //   - anything but an AFFIRMATIVE `clean` record. Retiring asserts the batch holds nothing live, and an
+  //     absent record cannot support that claim — `apply`'s abort path deliberately writes no status when a
+  //     survivor exists, and every status write is best-effort and can simply fail to land, so "no record"
+  //     is ordinary rather than adversarial (gate round 3). Unknown therefore refuses retirement, which is
+  //     the opposite default from `isFullyReversed`'s "unknown stays eligible" — the two questions have
+  //     opposite safe sides, and a single boolean answered this one with the wrong default.
+  const cleanliness = batchCleanliness(batch.batchId, batch.projectRoot, readBatchStatuses(dataDir));
+  if (buckets.failed.length === 0 && buckets.superseded.length === 0 && cleanliness === "clean") {
     recordBatchStatus(dataDir, batch.batchId, batch.projectRoot, "undone");
   }
   return { batchId: batch.batchId, ...buckets };

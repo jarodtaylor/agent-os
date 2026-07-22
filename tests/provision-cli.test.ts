@@ -17,7 +17,7 @@ import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { parse as parseToml } from "smol-toml";
 import { dirname, join, resolve } from "node:path";
-import { applyJson, applyText, restoreBlueprintBackup, runCli } from "../src/provision/cli";
+import { applyJson, applyText, restoreBlueprintBackup, RUN_STATE_FILENAME, runCli } from "../src/provision/cli";
 import { readKnownProjects } from "../src/provision/registry";
 
 // Every fixture lives under a temp root; `dataDir` is injected so no test can touch the real data dir.
@@ -1028,5 +1028,52 @@ describe("a no-op apply advertises no batch (gate finding 4)", () => {
     if (again.json.verb !== "undo") throw new Error("unreachable");
     expect(again.exitCode).toBe(0);
     expect(again.json.batchId).toBeNull();
+  });
+});
+
+describe("gate round 2 finding 4 — an aborted init withdraws the run file it created", () => {
+  // Reaching the abort window needs a failure AFTER the swap and the scaffold. A name CONFLICT will not do it:
+  // the preflight catches that before anything is written (my first attempt at this test did exactly that and
+  // was vacuous — it passed with the withdrawal removed). A read-only data dir does: the preflight's registry
+  // READ still succeeds, and `registerProject`'s append then fails at write time.
+  const failRegistration = (): number => {
+    mkdirSync(dataDir, { recursive: true });
+    const mode = statSync(dataDir).mode;
+    chmodSync(dataDir, 0o500);
+    return mode;
+  };
+
+  test("a registration failure leaves no RUN_STATE.md behind on a project that had none", () => {
+    const fresh = join(root, "fresh-project");
+    mkdirSync(fresh, { recursive: true });
+    const mode = failRegistration();
+    let refused;
+    try {
+      refused = runCli(["init", "--project", fresh], { cwd: projectRoot, dataDir });
+    } finally {
+      chmodSync(dataDir, mode);
+    }
+
+    expect(refused.exitCode).toBe(1);
+    // The scaffold DID run (it precedes registration), so this is the withdrawal, not an absence of work.
+    expect(existsSync(join(fresh, RUN_STATE_FILENAME))).toBe(false);
+  });
+
+  test("an operator's PRE-EXISTING run file is never withdrawn by an abort", () => {
+    // Scoped to what this transaction created — R12 says an existing run file is lived history, not ours to
+    // remove, failure or not.
+    const fresh = join(root, "has-run-state");
+    mkdirSync(fresh, { recursive: true });
+    writeFileSync(join(fresh, RUN_STATE_FILENAME), "operator's lived history\n");
+    const mode = failRegistration();
+    let refused;
+    try {
+      refused = runCli(["init", "--project", fresh], { cwd: projectRoot, dataDir });
+    } finally {
+      chmodSync(dataDir, mode);
+    }
+
+    expect(refused.exitCode).toBe(1);
+    expect(readFileSync(join(fresh, RUN_STATE_FILENAME), "utf8")).toBe("operator's lived history\n");
   });
 });

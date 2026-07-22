@@ -30,7 +30,7 @@
  * `process.exit`, no ambient cwd, an injectable `dataDir` — so the suite drives every verb in-process and one
  * spawn test proves the `package.json` wiring. The `import.meta.main` block below is the only I/O adapter.
  */
-import { copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, realpathSync, renameSync, rmSync, rmdirSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, rmdirSync, statSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { basename, dirname, join, posix, resolve } from "node:path";
 import type { Manifest, Runtime } from "../contract/index";
@@ -556,7 +556,23 @@ function runInit(rawProject: string, args: ParsedArgs, dataDir: string): CliRun 
    * happen. Same honesty `apply` owes through `rollbackFailures` — a reversal that itself failed is surfaced
    * with what is still on disk and where, rather than being absorbed by the wording of the failure it followed.
    */
+  // Set once `scaffoldRunState` reports it CREATED the run file, so `abort` can withdraw exactly that file and
+  // nothing else. Null whenever the run file predated this run or was never written.
+  let scaffolded: { path: string; content: string } | null = null;
+
   const abort = (error: string): CliRun => {
+    // Withdraw a run file THIS transaction created, before restoring the blueprint. Scoped hard: only when we
+    // created it (never one that predated the run — R12 says an existing run file is the operator's) and only
+    // while it still holds exactly the bytes we wrote, so a run file the operator has already started editing
+    // is left alone. Without this, a registration failure rolled the blueprint back but left the new RUN_STATE.md
+    // standing, and since `init` treats any present run file as authoritative it would never be repaired.
+    if (scaffolded !== null) {
+      try {
+        if (readFileSync(scaffolded.path, "utf8") === scaffolded.content) rmSync(scaffolded.path, { force: true });
+      } catch {
+        // Unreadable or already gone — leave it; the blueprint restore below is the load-bearing half.
+      }
+    }
     if (!backup) return initFailure(args, error, projectRoot);
     const failure = restoreBlueprintBackup(blueprintRoot, backup);
     return initFailure(
@@ -577,6 +593,7 @@ function runInit(rawProject: string, args: ParsedArgs, dataDir: string): CliRun 
 
   const runState = scaffoldRunState(projectRoot, blueprintRoot);
   if (!runState.ok) return abort(runState.error);
+  if (runState.state === "created") scaffolded = { path: join(projectRoot, RUN_STATE_FILENAME), content: runState.content };
 
   const registration = registerProject(dataDir, { name, projectRoot, blueprintRoot });
   if (registration.kind !== "registered") {
@@ -730,7 +747,12 @@ function copyTree(from: string, to: string): number {
   return count;
 }
 
-type RunStateResult = { ok: true; state: "created" | "present" | "skipped" } | { ok: false; error: string };
+/** `content` is present only on `"created"` — the exact bytes written, so an aborting transaction can withdraw
+ *  the file it made while leaving one the operator has since edited strictly alone. */
+type RunStateResult =
+  | { ok: true; state: "created"; content: string }
+  | { ok: true; state: "present" | "skipped" }
+  | { ok: false; error: string };
 
 /**
  * Scaffold `RUN_STATE.md` ONCE (R12). Present ⇒ left strictly alone, which is what makes a `--force` re-init
@@ -779,7 +801,7 @@ function scaffoldRunState(projectRoot: string, blueprintRoot: string): RunStateR
   } catch (err) {
     return { ok: false, error: `scaffolding '${target}' failed: ${errorText(err)}` };
   }
-  return { ok: true, state: "created" };
+  return { ok: true, state: "created", content: seed.content };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

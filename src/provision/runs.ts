@@ -30,13 +30,16 @@ export interface ProvisionBatch {
 function groupBatches(entries: readonly UndoEntry[]): ProvisionBatch[] {
   const order: string[] = [];
   const byId = new Map<string, ProvisionBatch>();
-  // A batchId that ever appears under two different canonical roots is QUARANTINED — excluded from the result
-  // ENTIRELY, not merely trimmed of its conflicting rows. Fail CLOSED on the untrusted/corrupt journal the module
-  // header warns about: a legitimate batch's entries all carry one ingress-canonicalized root, so a cross-root
-  // reuse is corruption/tampering. Trimming alone was insufficient (bot review PR #52 + its post-PR gate): the
-  // batch would keep its FIRST root's entries, and `newestBatchForProject`, selecting by a raw-journal batchId
-  // hit under the OTHER root, would still resolve to that batch and undo the first project's real files. Removing
-  // the whole batch means NEITHER project can reach it, by explicit id or by default selection.
+  // A batchId that appears under two different canonical roots is dropped ENTIRELY (best-effort defense-in-depth,
+  // bot review PR #52). THREAT-MODEL SCOPE (decision #45): this is CORRUPTION-tolerance, NOT a security boundary.
+  // A legitimate journal cannot reach here — every `apply()` stamps a fresh `randomUUID` batchId under one
+  // ingress-canonicalized root and each `targetPath` is a `posix.join(projectRoot, PortableRelPath)` descendant by
+  // construction, so no cross-root batchId, duplicate entry-id, or path mismatch exists without DIRECT WRITES to
+  // the 0600/0700 undo journal. An attacker who can write semantically-valid malicious entries there already owns
+  // the data dir (and thus the user's real configs) — "attacker-owns-HOME", explicitly out of scope. So this
+  // guard, and the residual crafted-journal undo paths the gate names (duplicate-id redirection, projectRoot not
+  // constraining targetPath, quarantined-newest fallback), are best-effort only; full journal-integrity hardening
+  // is deferred to its own unit IF the threat model ever expands to a hostile data dir (issue tracked).
   const quarantined = new Set<string>();
   for (const entry of entries) {
     if (!entry.batchId || !entry.projectRoot) continue;
@@ -75,11 +78,11 @@ export function readBatches(dataDir?: string): ProvisionBatch[] {
  * with the U6 CLI undo verb; do NOT change the selection logic before then.
  */
 export function newestBatchForProject(projectRoot: string, dataDir?: string): ProvisionBatch | null {
-  // Select ONLY from the VALIDATED grouping (quarantined batches already removed), matching the target root, and
-  // take the last in first-appearance order = newest. Selecting a raw-journal batchId first and resolving it
-  // afterwards was the bypass the post-PR gate caught: a corrupted project-B row could name a batchId whose
-  // grouped batch belongs to project A, so default undo reversed A's files. Here a batch's own `projectRoot` (a
-  // single canonical root, since a cross-root batchId is quarantined out) is the only thing that can match.
+  // Select from the grouping (quarantined batches removed), matching the target root, newest by first-appearance.
+  // On any LEGITIMATE journal this is identical to the pre-quarantine behavior — nothing is ever quarantined
+  // (see `groupBatches`). The residual crafted-journal behaviors the gate names (a poisoned-newest silently
+  // falling back to an older batch; supersession losing a quarantined later-writer) are reachable only by direct
+  // writes to the data dir — attacker-owns-HOME, out of decision #45 — and are best-effort, not guaranteed.
   const target = canonicalRoot(projectRoot);
   const matching = groupBatches(listUndo(dataDir)).filter((batch) => batch.projectRoot === target);
   return matching.length > 0 ? matching[matching.length - 1]! : null;

@@ -1035,9 +1035,13 @@ describe("gate round-4 fold — equivalent project-root spellings select the rig
   });
 });
 
-describe("bot review + post-PR gate (PR #52) — corrupt-journal cross-project undo is fail-closed", () => {
-  test("a batchId appearing under two roots is QUARANTINED out of readBatches entirely", () => {
-    // The journal is untrusted (module header): craft one with two entries sharing a batchId but two roots.
+// Best-effort defense-in-depth against a CORRUPTED journal (bot review PR #52), NOT a security guarantee: a
+// legitimate journal can never produce a cross-root batchId (unique randomUUID + one canonical root per apply),
+// so these craft the journal directly — which in reality is attacker-owns-HOME, out of decision #45's threat
+// model. The quarantine is documented as such; deeper crafted-journal integrity is a deferred, out-of-scope unit.
+describe("bot review + post-PR gate (PR #52) — corrupt-journal quarantine (best-effort defense-in-depth)", () => {
+  test("a batchId appearing under two roots is quarantined out of readBatches entirely", () => {
+    // Craft an untrusted journal with two entries sharing a batchId but two roots (impossible without direct writes).
     mkdirSync(dataDir, { recursive: true });
     const base = { backupPath: null, created: true, mode: null, format: "text", ts: 1 };
     const mine = { ...base, id: "e1", targetPath: `${projectRoot}/CLAUDE.md`, postHash: "h1", batchId: "shared", projectRoot };

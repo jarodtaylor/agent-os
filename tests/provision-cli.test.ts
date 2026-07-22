@@ -690,3 +690,75 @@ describe("init withdraws a directory it created when it then refuses", () => {
     expect(existsSync(fresh)).toBe(true);
   });
 });
+
+describe("no-echo regression net over LIVE destination content (redaction lens)", () => {
+  const CANARY = "sk-ant-canary-DO-NOT-ECHO-0123456789";
+
+  test("a secret living in a provisioned surface never reaches any verb's text or --json", () => {
+    // The one class of bytes the front-gate is STRUCTURALLY unable to protect: the gate scans the blueprint,
+    // but a live destination can hold anything — including the operator's own real credentials in a config we
+    // merge into. Every verb reads those bytes; none may echo them.
+    cli(["init"]);
+    cli(["apply"]);
+    writeProject(".claude/agents/architect.md", `hand edited\n${CANARY}\n`);
+    writeProject(".cursor/mcp.json", JSON.stringify({ mcpServers: { theirs: { command: "x", env: { TOKEN: CANARY } } } }));
+
+    for (const argv of [["plan"], ["status"], ["apply"], ["undo"]]) {
+      const run = cli(argv);
+      const seen = `${run.text}\n${JSON.stringify(run.json)}`;
+      expect(seen).not.toContain(CANARY);
+      expect(seen).not.toContain("sk-ant"); // a truncated or partially-quoted leak fails too
+    }
+  });
+
+  test("a MALFORMED live config routes through the parse-error path without echoing its bytes", () => {
+    cli(["init"]);
+    writeProject(".cursor/mcp.json", `{ not valid json at all ${CANARY}`);
+
+    for (const argv of [["plan"], ["status"], ["apply"]]) {
+      const run = cli(argv);
+      const seen = `${run.text}\n${JSON.stringify(run.json)}`;
+      expect(seen).not.toContain(CANARY);
+      expect(seen).not.toContain("sk-ant");
+    }
+  });
+
+  test("applyJson drops the engine's free-form unjournaled error rather than passing it through", () => {
+    // `unjournaled.error` is the one free-form engine string reaching this newly-exported surface. The warning
+    // is built from paths only — asserted so a future edit cannot start interpolating it.
+    const json = applyJson(
+      {
+        batchId: "b1",
+        applied: [
+          {
+            targetPath: "/p/AGENTS.md",
+            action: "overwrite" as const,
+            created: false,
+            undoId: null,
+            unjournaled: { backupPath: "/data/b.bak", error: `journal append failed near ${CANARY}` },
+          },
+        ],
+        noops: [],
+        failed: [],
+        rolledBack: false,
+      },
+      "/p",
+    );
+    expect(JSON.stringify(json)).not.toContain(CANARY);
+    expect(json.warnings[0]).toContain("/p/AGENTS.md");
+  });
+});
+
+describe("undo refuses an explicit batch id that matches nothing", () => {
+  test("a typo'd --batch is an error, not a silent success", () => {
+    cli(["init"]);
+    cli(["apply"]);
+    const run = cli(["undo", "--batch", "not-a-real-batch-id"]);
+    expect(run.exitCode).toBe(1);
+    if (run.json.verb !== "undo") throw new Error("unreachable");
+    expect(run.json.ok).toBe(false);
+    expect(run.text).toContain("not-a-real-batch-id");
+    // …and the real batch is untouched, so the operator can still undo it once they use the right id.
+    expect(cli(["undo"]).exitCode).toBe(0);
+  });
+});

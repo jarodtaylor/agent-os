@@ -1,8 +1,9 @@
 ---
 title: A harness's config schema is an undocumented contract — verify surfaces live, defer what you can't
 date: 2026-07-16
+last_updated: 2026-07-22
 category: docs/solutions/conventions
-module: src/scan (inventory scanners); any harness-surface scanner or installer
+module: src/scan (inventory scanners); src/provision (render/apply pipeline); any harness-surface scanner or installer
 problem_type: convention
 component: tooling
 severity: medium
@@ -12,8 +13,10 @@ applies_when:
   - Assuming a discovery ROOT path (a skills dir, a config file) from a cursory `ls` or from memory rather than from a verified live instance
   - Deciding whether to ship a plausible-but-unverified surface or defer it
   - A cross-model or adversarial reviewer flags that a scanned surface does not match the live machine
-tags: [harness-integration, undocumented-contract, config-schema, verify-against-live, enabled-flag, discovery-roots, defer-unverified, ship-verified-core, scanner, inventory, observe, codex, claude-code, agents-convention]
-related_components: [scan, capture, install, contract]
+  - Authoring or reviewing a role file, config patch, or any other structured source a provisioning/render pipeline will write verbatim into a harness's own config format — the destination's required keys are as unverified as a scanner's read side
+  - The pipeline moving that content is deliberately content-blind (a secret-scanning or portability boundary that must not parse what it moves) — schema validation there did not survive the design that made it safe
+tags: [harness-integration, undocumented-contract, config-schema, verify-against-live, enabled-flag, discovery-roots, defer-unverified, ship-verified-core, scanner, inventory, observe, codex, claude-code, agents-convention, content-blind-pipeline, provisioning, schema-assertion, render, secret-scanning-boundary]
+related_components: [scan, capture, install, contract, provision]
 ---
 
 ## Context
@@ -29,14 +32,19 @@ For any scanner or installer that reads a harness's config, treat the config sch
 3. **Verify discovery ROOTS against a live instance + current docs, not an assumed path.** A skills/config dir you *expect* may be empty or a decoy; the real one may be a shared cross-tool convention (`~/.agents/...`) that blurs per-runtime attribution. A reviewer's *alternative* root is also just a guess until you verify it.
 4. **A shallow live probe yields false ABSENCES as readily as false presences — never encode "does not exist" from one.** An empty dir + a `--help` with no matching subcommand is not evidence a surface doesn't exist; verify a surface's *existence* against the harness's authoritative docs before writing an absence finding. And for *control* surfaces (CLI flags, key sequences, pane protocols), reading `--help` is not verification at all — **drive the surface live** before encoding it.
 5. **Ship the verified core; defer what you can't verify — with a detailed issue.** A plausible-but-wrong scanner (false absences, disabled-shown-as-active) is worse than a documented gap. Each defer gets an issue naming *what*, *why*, and the *build trigger*.
+6. **When the pipeline that moves this content is deliberately content-blind, re-add the schema check explicitly at the boundary where the destination is known.** A render/apply pipeline that treats file bytes as opaque (by design — see "Why This Matters") cannot itself fail on a wrong key name; nothing downstream will either, because the bytes it wrote are exactly the bytes it was given. Add a test that, for every manifest row landing on a known structured surface, parses the rendered source and asserts the harness's documented required keys are present. Two rules make the assertion trustworthy rather than decorative:
+   - **Assert the row set is non-empty first** (e.g. `expect(rows.length).toBeGreaterThan(0)`) — a schema check gated behind a `.filter(...)` that silently returns zero rows passes vacuously the day the shipped source stops producing that row, and a vacuous pass is indistinguishable from a real one in CI output.
+   - **Verify by mutation**, not just by reading green: reintroduce the wrong key locally and confirm the same assertion turns red. A test that has never been watched to fail is unverified.
 
 ## Why This Matters
 
 The inventory drives cross-runtime **parity** decisions (F4: "present in harness A, absent in B → propagate"). A scanner that misreports — a disabled server shown as active, or 0 skills where 13 exist — makes every downstream parity/provision action unsafe on data that *looks* authoritative. And the misreads are silent: the code compiles, the tests pass against the fixtures you wrote, and the live scan even *looks* plausible — because today nothing happens to be disabled and the empty root happens to match your assumption. The bug ships and waits for the first time reality diverges from the assumption.
 
+**Content-blind pipelines lose schema validation as a side effect of a choice made for an unrelated, good reason.** U10 U6's provisioning `copy` transform (`src/provision/render.ts`) moves a source file's bytes to its destination without parsing them — `content: source.content`, untouched. That opacity is deliberate and correct: the front-gate's secret-scanning and machine-path checks must not interpret what they move, because interpreting is itself a place a scan can be fooled (an escaped secret that only resolves once something parses the file). Nobody chose to drop schema validation — it fell out as an unnamed side effect of a choice made to keep the secret boundary honest. The result: a wrong required key in a shipped source file lands on disk, applies cleanly, and fails nothing, at any layer, forever — 671/671 green is not evidence the bytes moved are the bytes the destination harness will accept, only that the pipeline faithfully moved *some* bytes. The countermeasure is not "make the pipeline less blind" (that reintroduces the exact risk the opacity was protecting against) — it is asserting the schema explicitly at the one place that still knows the destination's shape: a test scoped to that harness's config format, as in guidance step 6.
+
 ## When to Apply
 
-Every harness-surface scanner or installer — the whole future roster (Hermes, Cursor, Antigravity, OpenCode, Grok Build) rides this same spine (a per-harness module owns the format knowledge; fixtures pin the observed shape). Apply it hardest when enumerating named entries (skills/servers/plugins), resolving a discovery root, or when a cross-model reviewer says the scan does not match the machine.
+Every harness-surface scanner or installer — the whole future roster (Hermes, Cursor, Antigravity, OpenCode, Grok Build) rides this same spine (a per-harness module owns the format knowledge; fixtures pin the observed shape). Apply it hardest when enumerating named entries (skills/servers/plugins), resolving a discovery root, or when a cross-model reviewer says the scan does not match the machine. Apply the mutation-verified schema-assertion countermeasure (guidance step 6) specifically whenever a *write* path — a provisioning render, an installer, any pipeline authoring a structured source another harness will parse — is content-blind by design; that is exactly the condition under which "all tests green" stops being evidence about the destination's schema.
 
 ## Examples
 
@@ -70,4 +78,24 @@ const out = await runScanners(ctx, [
 expect(out.map((i) => i.name)).toEqual(["survivor"]);
 ```
 
-Evidence: the U9 branch `feat/u9-inventory-scanners` (the `feat(scan)` + `fix(adversarial)` commits; PR pending); defer issues #35 (project scope), #36 (Codex skills / holistic root verification), #37 (degradation metadata).
+**5. The seed blueprint's Codex executor role shipped `instructions`; the live key is `developer_instructions`.** U10 U6's seed template (`templates/blueprint-seed/roles/executor/agent.toml`) authored its Codex role's system prompt under `instructions = """..."""`. The real per-agent config key, verified against a live install at `~/.codex/agents/tldraw-offline.toml`, is `developer_instructions`. The consequence was silent: Codex would load the executor role with no system prompt at all — the entire behavioral contract (run-state protocol, hand-off rules) never reached the model, and nothing anywhere signaled the loss. This is a write-side instance of the same trap example 3 shows on the read side (Codex skill discovery): the harness's config shape is unverified until checked against a live instance, whichever direction the data flows.
+
+A review lens scoped to "does the rendered surface actually load in its target harness?" is what caught it — not a broader review, and not documentation (Codex's own docs on custom agent config were consulted and still didn't surface this key by name; only the live file did). The countermeasure landed as `tests/provision-cli.test.ts`'s `"seed template renders surfaces the target harness will actually accept"` block: it globs the manifest for every `.codex/agents/*.toml` row, asserts that row set is non-empty (`expect(rows.length).toBeGreaterThan(0)`) so the check cannot pass vacuously if the seed ever stops shipping that row, then parses each source and asserts `developer_instructions` is present and non-empty. Reintroducing `instructions` locally turns the assertion red, confirming the test would have caught U6's own mistake.
+
+```ts
+// tests/provision-cli.test.ts — the schema check the content-blind copy transform can no longer perform itself
+const rows = manifest.roles
+  .flatMap((role) => role.files)
+  .filter((file) => file.destination.startsWith(".codex/agents/") && file.destination.endsWith(".toml"));
+expect(rows.length).toBeGreaterThan(0); // guard the guard — a vacuous pass looks identical to a real one
+
+for (const row of rows) {
+  const parsed = parseToml(readFileSync(join(SEED_ROOT, row.source!), "utf8")) as Record<string, unknown>;
+  expect(Object.keys(parsed).sort()).toEqual(expect.arrayContaining(["description", "developer_instructions", "name"]));
+  expect(typeof parsed.developer_instructions).toBe("string");
+}
+```
+
+Full record: PR for `feat/u10-u6-cli-seed-template`, commit `2880586` ("fix(review): drift means divergence, init refuses before writing, Codex seed key").
+
+Evidence: the U9 branch `feat/u9-inventory-scanners` (the `feat(scan)` + `fix(adversarial)` commits; PR pending); defer issues #35 (project scope), #36 (Codex skills / holistic root verification), #37 (degradation metadata). U10 U6 branch `feat/u10-u6-cli-seed-template`, commit `2880586`.

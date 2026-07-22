@@ -813,10 +813,31 @@ function runUndo(rawProject: string, args: ParsedArgs, dataDir: string): CliRun 
   const projectRoot = resolved.root;
 
   const outcome: UndoOutcome = undoBatch(projectRoot, dataDir, args.batch ?? undefined);
+
+  // An EXPLICIT `--batch` id that matched nothing must not read as a successful undo. `undoBatch` returns
+  // all-empty buckets when the id matches no batch, and since every real batch has at least one journal entry,
+  // all-four-empty means exactly "no batch was selected". Without this a typo'd id exits 0 with `ok: true` and
+  // every bucket empty — the operator, and any automation gating on the exit code, reads a no-op as a completed
+  // reversal of the run they named.
+  //
+  // Scoped to the explicit form ON PURPOSE. A BARE `undo` on a project with no batches stays an honest exit-0
+  // no-op (pinned by its own test): the operator asked "reverse whatever is outstanding" and the truthful answer
+  // is "nothing was". Naming an id that does not exist is a different act — a claim about a specific run that
+  // turned out to be false, and the only way the operator learns their id was wrong.
+  const unmatchedBatch =
+    args.batch !== null &&
+    outcome.reversed.length === 0 &&
+    outcome.alreadyReversed.length === 0 &&
+    outcome.superseded.length === 0 &&
+    outcome.failed.length === 0;
+  const unmatchedError = unmatchedBatch
+    ? `no provision batch '${args.batch}' for project '${projectRoot}' — check the batch id reported by the \`apply\` that created it`
+    : null;
+
   const json: CliJson = {
     verb: "undo",
-    ok: outcome.failed.length === 0,
-    errors: outcome.failed.map((f) => `${f.path}: ${f.error}`),
+    ok: outcome.failed.length === 0 && unmatchedError === null,
+    errors: unmatchedError ? [unmatchedError] : outcome.failed.map((f) => `${f.path}: ${f.error}`),
     project: projectRoot,
     batchId: outcome.batchId,
     reversed: outcome.reversed,
@@ -824,7 +845,7 @@ function runUndo(rawProject: string, args: ParsedArgs, dataDir: string): CliRun 
     superseded: outcome.superseded,
     failed: outcome.failed,
   };
-  return render(args, json, undoText(outcome), json.ok ? EXIT_OK : EXIT_FAILED);
+  return render(args, json, unmatchedError ?? undoText(outcome), json.ok ? EXIT_OK : EXIT_FAILED);
 }
 
 function undoText(outcome: UndoOutcome): string {

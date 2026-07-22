@@ -10,7 +10,7 @@ import { appendFileSync, chmodSync, copyFileSync, existsSync, mkdirSync, readFil
 import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
 import * as z from "zod";
-import { ConfigFormat, hashContent, journalPath, resolveDataDir } from "./internal";
+import { ConfigFormat, hashContent, isNotFoundError, journalPath, resolveDataDir } from "./internal";
 
 /**
  * One reversible mutation. Validated on read (KTD3: validate anything externally sourced) because the
@@ -170,7 +170,7 @@ function present(path: string): boolean {
     statSync(path);
     return true;
   } catch (err) {
-    if (typeof err === "object" && err !== null && (err as { code?: unknown }).code === "ENOENT") return false;
+    if (isNotFoundError(err)) return false;
     throw err; // EACCES / EIO / ENOTDIR / … — indeterminate, never silently "absent"
   }
 }

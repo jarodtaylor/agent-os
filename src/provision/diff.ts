@@ -27,6 +27,11 @@ export type DiffError =
       role: string;
       harness: Runtime;
       destination: string;
+      /** WHY the destination could not be read, when the reader knew (`unreadable-destination` only). Carried
+       *  because the three causes have completely different remedies — remove the symlink, shrink the file,
+       *  fix the permissions — and "unreadable-destination" alone sends the operator hunting. Still a fixed
+       *  enum, never a message derived from bytes, so KTD5 is untouched. */
+      blockedBy?: BlockedReason;
     }
   | {
       problem: "malformed-destination" | "invalid-config-destination" | "malformed-rendered";
@@ -38,10 +43,15 @@ export type DiffError =
 
 export type DiffResult = { ok: true; rows: DiffRow[] } | { ok: false; error: DiffError };
 
+/** Why a present destination could not be safely read. A fixed enum, not a message: `symlink` (provisioning
+ *  never reads or writes through an indirection it did not describe), `oversized` (past the shared 16 MiB read
+ *  bound), `non-regular` (a directory/FIFO/device), `unreadable` (permissions or any other lookup failure). */
+export type BlockedReason = "symlink" | "oversized" | "non-regular" | "unreadable";
+
 /** A live destination read retains raw bytes for KTD8's opaque-text identity check. */
 export type DestinationRead =
   | { ok: true; content: string; bytes: Uint8Array }
-  | { ok: false; reason: "absent" | "blocked" };
+  | { ok: false; reason: "absent" | "blocked"; blockedBy?: BlockedReason };
 
 export type DestinationReader = (destination: string) => DestinationRead;
 
@@ -51,7 +61,7 @@ export function diffRendered(files: readonly RenderedFile[], readDestination: De
 
   for (const file of files) {
     const live = readDestination(file.destination);
-    if (!live.ok && live.reason === "blocked") return failure(file, "unreadable-destination");
+    if (!live.ok && live.reason === "blocked") return failure(file, "unreadable-destination", live.blockedBy);
 
     if (!live.ok) {
       if (file.transform === "scaffold" && file.content === null) return failure(file, "stale-scaffold");
@@ -132,8 +142,12 @@ function row(file: RenderedFile, action: PlanAction): DiffRow {
 function failure(
   file: RenderedFile,
   problem: "unreadable-destination" | "stale-scaffold",
+  blockedBy?: BlockedReason,
 ): { ok: false; error: DiffError } {
-  return { ok: false, error: { problem, role: file.role, harness: file.harness, destination: file.destination } };
+  const error: DiffError = { problem, role: file.role, harness: file.harness, destination: file.destination };
+  // Omitted entirely rather than set to `undefined` when the reader did not say, so a consumer never has to
+  // distinguish "absent" from "explicitly unknown".
+  return { ok: false, error: blockedBy ? { ...error, blockedBy } : error };
 }
 
 function configFailure(

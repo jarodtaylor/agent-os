@@ -86,15 +86,22 @@ export const realBlueprintIo: BlueprintIo = { readFileBounded };
  */
 export function readDestinationBounded(
   absPath: string,
-): { ok: true; content: string; bytes: Uint8Array } | { ok: false; reason: "absent" | "blocked" } {
+):
+  | { ok: true; content: string; bytes: Uint8Array }
+  | { ok: false; reason: "absent" | "blocked"; blockedBy?: "symlink" | "oversized" | "non-regular" | "unreadable" } {
   try {
     const stat = lstatSync(absPath);
-    if (stat.isSymbolicLink() || !stat.isFile()) return { ok: false, reason: "blocked" };
-    if (stat.size > MAX_BLUEPRINT_BYTES) return { ok: false, reason: "blocked" };
+    // Each refusal names WHICH one it is: the remedies are completely different (remove the link, shrink the
+    // file, fix the mode), and a bare "unreadable" sends the operator hunting. A symlinked destination is the
+    // one that actually happens — `AGENTS.md` symlinked to `CLAUDE.md` is a common multi-harness convention,
+    // and the seed provisions BOTH of those paths.
+    if (stat.isSymbolicLink()) return { ok: false, reason: "blocked", blockedBy: "symlink" };
+    if (!stat.isFile()) return { ok: false, reason: "blocked", blockedBy: "non-regular" };
+    if (stat.size > MAX_BLUEPRINT_BYTES) return { ok: false, reason: "blocked", blockedBy: "oversized" };
     const bytes = readFileSync(absPath);
     return { ok: true, content: bytes.toString("utf8"), bytes };
   } catch (err) {
-    return { ok: false, reason: isNotFound(err) ? "absent" : "blocked" };
+    return isNotFound(err) ? { ok: false, reason: "absent" } : { ok: false, reason: "blocked", blockedBy: "unreadable" };
   }
 }
 

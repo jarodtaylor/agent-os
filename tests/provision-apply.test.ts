@@ -15,7 +15,7 @@ import { dirname, join } from "node:path";
 import { parse as parseToml } from "smol-toml";
 import { apply, type ProvisionEngine } from "../src/provision/apply";
 import { readBatches, newestBatchForProject, undoBatch } from "../src/provision/runs";
-import { batchStatusPath } from "../src/provision/batch-status";
+import { batchStatusPath, readBatchStatuses } from "../src/provision/batch-status";
 import { TARGETS } from "../src/provision/targets";
 import { AppliedButUnjournaledError, mergeConfig, writeTextFile } from "../src/configwrite/index";
 import type { Manifest } from "../src/contract/index";
@@ -415,6 +415,13 @@ describe("provision apply — error regimes", () => {
     expect(existsProject(".cursor/agents/reviewer.md")).toBe(true); // write2 un-undoable ⇒ SURVIVES the rollback
     expect(rProject(".cursor/agents/reviewer.md")).toBe("unjournaled survivor\n");
     expect(existsProject(".claude/agents/victim.md")).toBe(false); // write3 never landed
+
+    // …and the DURABLE record must not claim otherwise. The status file is the only account of this batch that
+    // outlives the process, so recording "rolled-back" here would assert the batch left nothing while
+    // `.cursor/agents/reviewer.md` is demonstrably still on disk. An unjournaled survivor is live state exactly
+    // like a failed rollback, so the batch stays UNKNOWN — hence still default-selectable, the fail-safe side.
+    expect(readBatchStatuses(dataDir).has(outcome.batchId)).toBe(false);
+    expect(newestBatchForProject(projectRoot, dataDir)?.batchId).toBe(outcome.batchId);
   });
 
   test("a later same-path write in the batch is REFUSED after an applied-but-unjournaled write (#51.2 poisoned path)", () => {

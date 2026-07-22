@@ -41,7 +41,7 @@ import {
 } from "../configwrite/index";
 import type { Manifest, Runtime } from "../contract/index";
 import { recordBatchStatus } from "./batch-status";
-import { diffRendered, type DestinationReader, type DiffError, type PlanAction } from "./diff";
+import { diffRendered, type BlockedReason, type DestinationReader, type DiffError, type PlanAction } from "./diff";
 import { canonicalProjectRoot, containsSecret, errorText, isNotFound, readDestinationBounded, readFileBounded } from "./internal";
 import { isPlainRecord, parseConfigValue, renderBlueprint, type RenderError, type RenderedFile, type RenderIo } from "./render";
 import {
@@ -364,11 +364,22 @@ export function apply(input: ApplyInput, options: ApplyOptions = {}): ApplyOutco
       // on disk. `rollbackFailures` names any target whose reversal itself failed (still on disk, not honest to
       // drop) so `rolledBack: true` never overclaims.
       const rollbackFailures = rollbackLifo(rollback, dataDir);
-      // Durable terminal state (issue #50), recorded ONLY on a COMPLETE rollback: with every journaled write
-      // reversed, this batch holds no live state, so default `undo` must skip it and reach the last committed
-      // run instead. A PARTIAL rollback is left UNKNOWN on purpose — a file is still on disk despite
-      // `rolledBack: true`, and only staying the default target keeps it reachable by a plain `undo`.
-      if (rollbackFailures.length === 0) recordBatchStatus(dataDir, batchId, projectRoot, "rolled-back");
+      // Durable terminal state (issue #50), recorded ONLY when this batch provably left NOTHING live on disk —
+      // then and only then may default `undo` skip it and reach the last committed run instead.
+      //
+      // TWO ways a batch still holds live state after an abort, and both must suppress the record. The status
+      // file is the ONLY durable account of how a batch ended (`applied[].unjournaled` lives in the in-process
+      // return value and a console line, both gone at exit), so a `rolled-back` record written over live state
+      // is the one artifact that survives asserting the opposite of what the disk holds:
+      //   1. a rollback `undo()` that itself FAILED — its target is still applied; and
+      //   2. an applied-but-UNJOURNALED write — it never had an undo id, so it was never in the rollback list
+      //      and reversal never even attempted it. Same disk state as (1), reached by a different route, and
+      //      the original condition missed it because such a write is not a `rollbackFailure`.
+      // Leaving the batch UNKNOWN keeps it default-selectable and still superseding — the fail-safe direction
+      // this module commits to everywhere. The cost is the pre-#50 no-op for this one narrow case (a bare
+      // `undo` picks it and honestly reports `alreadyReversed`), which is exactly the trade case (1) accepts.
+      const stranded = applied.some((w) => w.unjournaled);
+      if (rollbackFailures.length === 0 && !stranded) recordBatchStatus(dataDir, batchId, projectRoot, "rolled-back");
       const outcome: ApplyOutcome = {
         batchId,
         applied: applied.filter((w) => w.undoId === null),
@@ -521,6 +532,19 @@ function renderErrorText(error: RenderError): string {
   return "source" in error ? `render ${error.problem} for ${where} from '${error.source}'` : `render ${error.problem} for ${where}`;
 }
 
+/** Operator-facing remedy per blocked cause — fixed strings selected by a fixed enum, never derived from bytes. */
+const BLOCKED_REMEDY: Readonly<Record<BlockedReason, string>> = {
+  symlink: "it is a symlink — provisioning never reads or writes through an indirection; replace it with a real file",
+  oversized: "it is larger than the 16 MiB read bound",
+  "non-regular": "it is not a regular file (a directory, FIFO, or device)",
+  unreadable: "it could not be read (check its permissions)",
+};
+
 function diffErrorText(error: DiffError): string {
-  return `diff ${error.problem} for role '${error.role}' (${error.harness}) → '${error.destination}'`;
+  const where = `diff ${error.problem} for role '${error.role}' (${error.harness}) → '${error.destination}'`;
+  // Name the CAUSE when the reader knew it. A blocked destination aborts the whole run, so "unreadable-destination"
+  // alone leaves the operator with no idea that removing one symlink unblocks every other surface. Fixed strings
+  // selected by a fixed enum — no bytes, so the no-content-echo rule is untouched.
+  const remedy = "blockedBy" in error && error.blockedBy ? ` — ${BLOCKED_REMEDY[error.blockedBy]}` : "";
+  return `${where}${remedy}`;
 }

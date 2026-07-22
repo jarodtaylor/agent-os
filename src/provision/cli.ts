@@ -30,13 +30,14 @@
  * `process.exit`, no ambient cwd, an injectable `dataDir` — so the suite drives every verb in-process and one
  * spawn test proves the `package.json` wiring. The `import.meta.main` block below is the only I/O adapter.
  */
-import { copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, realpathSync, renameSync, rmSync, rmdirSync, statSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { basename, dirname, join, posix, resolve } from "node:path";
 import type { Manifest, Runtime } from "../contract/index";
 import { resolveDataDir } from "../paths";
 import { apply, type ApplyOutcome } from "./apply";
 import { loadBlueprint } from "./blueprint";
-import { diffRendered, type DiffError, type DiffRow } from "./diff";
+import { diffRendered, type BlockedReason, type DiffError, type DiffRow } from "./diff";
 import { containsSecret, errorText, hasMachineAbsolutePath, isNotFound, readDestinationBounded, readFileBounded } from "./internal";
 import { renderBlueprint, type RenderError, type RenderIo } from "./render";
 import { isLogicalProjectName, lookupProject, registerProject } from "./registry";
@@ -269,7 +270,10 @@ function usage(error: string): CliRun {
 // Project-root resolution (issue #51.1) — the one realpath, at the boundary
 // ─────────────────────────────────────────────────────────────────────────────
 
-type RootResolution = { ok: true; root: string } | { ok: false; error: string };
+/** `created` is true only when THIS run's mkdir brought the root into being (init's absent-path branch), so a
+ *  later refusal can withdraw a directory the operator never asked for. Always false for the read verbs, which
+ *  create nothing. */
+type RootResolution = { ok: true; root: string; created: boolean } | { ok: false; error: string };
 
 /** Canonicalize an EXISTING project root. Absent is a refusal pointing at `init` — no verb but `init` may
  *  bring a project into being, so a typo can never silently provision a fresh empty directory. */
@@ -298,13 +302,14 @@ function resolveRootForInit(raw: string): RootResolution {
     } catch (createErr) {
       return { ok: false, error: `project root '${raw}' could not be created: ${errorText(createErr)}` };
     }
+    return canonicalize(raw, true);
   }
   return canonicalize(raw);
 }
 
-function canonicalize(raw: string): RootResolution {
+function canonicalize(raw: string, created = false): RootResolution {
   try {
-    return { ok: true, root: realpathSync(raw) };
+    return { ok: true, root: realpathSync(raw), created };
   } catch (err) {
     return { ok: false, error: `project root '${raw}' could not be resolved: ${errorText(err)}` };
   }
@@ -375,8 +380,21 @@ function renderErrorText(error: RenderError): string {
   return "source" in error ? `render ${error.problem} for ${where} from '${error.source}'` : `render ${error.problem} for ${where}`;
 }
 
+/** Operator-facing remedy per blocked cause — fixed strings selected by a fixed enum, never derived from bytes. */
+const BLOCKED_REMEDY: Readonly<Record<BlockedReason, string>> = {
+  symlink: "it is a symlink — provisioning never reads or writes through an indirection; replace it with a real file",
+  oversized: "it is larger than the 16 MiB read bound",
+  "non-regular": "it is not a regular file (a directory, FIFO, or device)",
+  unreadable: "it could not be read (check its permissions)",
+};
+
 function diffErrorText(error: DiffError): string {
-  return `diff ${error.problem} for role '${error.role}' (${error.harness}) → '${error.destination}'`;
+  const where = `diff ${error.problem} for role '${error.role}' (${error.harness}) → '${error.destination}'`;
+  // Name the CAUSE when the reader knew it. A blocked destination aborts the whole run, so "unreadable-destination"
+  // alone leaves the operator with no idea that removing one symlink unblocks every other surface. Fixed strings
+  // selected by a fixed enum — no bytes, so the no-content-echo rule is untouched.
+  const remedy = "blockedBy" in error && error.blockedBy ? ` — ${BLOCKED_REMEDY[error.blockedBy]}` : "";
+  return `${where}${remedy}`;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -419,6 +437,29 @@ function runInit(rawProject: string, args: ParsedArgs, dataDir: string): CliRun 
   const blueprintRoot = blueprintRootFor(projectRoot);
   const name = args.name ?? basename(projectRoot);
 
+  /**
+   * Refuse, withdrawing a project directory THIS run created (step 2 mkdirs before the checks below can run,
+   * because `realpath` throws on a path that does not exist yet). Without this, a mistyped `--project` plus any
+   * later refusal left a stray empty directory at the wrong path and never mentioned it — and the contract this
+   * function states is that nothing is written until every refusal has had its chance.
+   *
+   * Removal is doubly guarded: only a root this run created, and — via `rmdirSync` — only while it is still
+   * EMPTY. `rmdirSync` is the right primitive precisely because it REFUSES a non-empty directory itself, so the
+   * guard cannot lose a race with something landing inside between a check and a delete; an operator-supplied
+   * path is the last thing to recursively delete on a guess. A directory that survives is named in the message
+   * rather than silently abandoned.
+   */
+  const refuse = (error: string): CliRun => {
+    if (!resolved.created) return initFailure(args, error, projectRoot);
+    try {
+      rmdirSync(projectRoot);
+      return initFailure(args, error, projectRoot);
+    } catch {
+      // Non-empty, or removal failed — keep it, and say so rather than leaving a stray directory unmentioned.
+      return initFailure(args, `${error} (the directory '${projectRoot}' was created and left in place)`, projectRoot);
+    }
+  };
+
   // (3a) Name SHAPE preflight (KTD11). `registerProject` re-checks this at write time, but that runs at step
   //      (5) — after the seed is copied and the run file scaffolded — so an unusable name used to leave a
   //      SEEDED BUT UNREGISTERED project that no verb can recover: U7 can never resolve it, and re-running
@@ -427,10 +468,8 @@ function runInit(rawProject: string, args: ParsedArgs, dataDir: string): CliRun 
   //      carries a trailing space fails the trim rule). The check belongs in the preflight, which is what this
   //      function's contract promises: nothing is written until every refusal has had its chance.
   if (!isLogicalProjectName(name)) {
-    return initFailure(
-      args,
+    return refuse(
       `'${name}' is not a usable logical project name (no path separators, no NUL, no leading/trailing whitespace, 1–128 chars) — re-run with --name <other>`,
-      projectRoot,
     );
   }
 
@@ -438,29 +477,48 @@ function runInit(rawProject: string, args: ParsedArgs, dataDir: string): CliRun 
   //      rebind every U7 lookup for the first one, so it is refused here — before any file is touched.
   const existing = lookupProject(name, dataDir);
   if (existing.kind === "found" && existing.record.projectRoot !== projectRoot) {
-    return initFailure(
-      args,
+    return refuse(
       `the project name '${name}' is already registered to '${existing.record.projectRoot}' — re-run with --name <other> to register this one under a different logical name`,
-      projectRoot,
     );
   }
 
   // (4) An existing blueprint is the operator's hand-tuned source of truth: never replaced implicitly.
-  if (existsSync(blueprintRoot)) {
-    if (!args.force) {
-      return initFailure(args, `a blueprint already exists at '${blueprintRoot}' — re-run with --force to replace it`, projectRoot);
-    }
-    const removal = removeBlueprintDir(blueprintRoot);
-    if (removal) return initFailure(args, removal, projectRoot);
+  const blueprintExists = existsSync(blueprintRoot);
+  if (blueprintExists && !args.force) {
+    return refuse(`a blueprint already exists at '${blueprintRoot}' — re-run with --force to replace it`);
   }
 
-  // (5) Write: copy the seed, scaffold the run file once, register the project.
+  // (5) Write: STAGE the seed into a sibling temp dir, and only swap it in once the copy is COMPLETE.
+  //
+  // `--force` is the one mutation in this system with no backup, no journal and no undo — every other write
+  // goes through the config-write engine precisely so it is reversible. Deleting first and copying second meant
+  // any ordinary I/O fault (ENOSPC, EIO, a killed process) left a half-populated blueprint and NO copy of the
+  // operator's hand-tuned original anywhere on the machine — and recovery was doubly blocked, since a plain
+  // `init` then refuses because `blueprint/` exists, leaving only `--force` again: the same destructive path.
+  // Staging shrinks the window from "the whole copy" to one POSIX rename. Same temp-then-rename discipline as
+  // `configwrite`'s `restoreAtomically`.
+  const staging = `${blueprintRoot}.${randomUUID()}.tmp`;
   let blueprintFiles: number;
   try {
-    mkdirSync(blueprintRoot, { recursive: true });
-    blueprintFiles = copyTree(SEED_ROOT, blueprintRoot);
+    mkdirSync(staging, { recursive: true });
+    blueprintFiles = copyTree(SEED_ROOT, staging);
   } catch (err) {
+    rmSync(staging, { recursive: true, force: true });
     return initFailure(args, `copying the seed blueprint into '${blueprintRoot}' failed: ${errorText(err)}`, projectRoot);
+  }
+  if (blueprintExists) {
+    // Keeps its own lstat symlink/non-directory guard — this is still the only thing that removes the original.
+    const removal = removeBlueprintDir(blueprintRoot);
+    if (removal) {
+      rmSync(staging, { recursive: true, force: true });
+      return initFailure(args, removal, projectRoot);
+    }
+  }
+  try {
+    renameSync(staging, blueprintRoot);
+  } catch (err) {
+    rmSync(staging, { recursive: true, force: true });
+    return initFailure(args, `installing the seed blueprint at '${blueprintRoot}' failed: ${errorText(err)}`, projectRoot);
   }
 
   const runState = scaffoldRunState(projectRoot, blueprintRoot);

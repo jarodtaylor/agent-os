@@ -1,9 +1,11 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   realpathSync,
   rmSync,
   statSync,
@@ -600,5 +602,91 @@ describe("init preflight refuses before writing", () => {
     expect(existsSync(p("blueprint"))).toBe(false);
     expect(existsSync(p("RUN_STATE.md"))).toBe(false);
     expect(readKnownProjects(dataDir).size).toBe(0);
+  });
+});
+
+describe("init --force stages before it destroys (the blueprint has no undo)", () => {
+  test("a failed copy leaves the operator's existing blueprint intact", () => {
+    cli(["init"]);
+    writeProject("blueprint/HAND-TUNED.md", "weeks of tuning\n");
+    const before = readProject("blueprint/manifest.json");
+
+    // Make the staging copy fail: a read-only project root refuses the sibling temp dir `--force` stages into.
+    // The original blueprint/ must survive untouched — it is the one thing here no undo can bring back.
+    const mode = statSync(projectRoot).mode;
+    chmodSync(projectRoot, 0o500);
+    let forced;
+    try {
+      forced = cli(["init", "--force"]);
+    } finally {
+      chmodSync(projectRoot, mode);
+    }
+
+    expect(forced.exitCode).toBe(1);
+    expect(readProject("blueprint/HAND-TUNED.md")).toBe("weeks of tuning\n");
+    expect(readProject("blueprint/manifest.json")).toBe(before);
+  });
+
+  test("a successful --force still replaces the blueprint and leaves no staging directory behind", () => {
+    cli(["init"]);
+    writeProject("blueprint/HAND-TUNED.md", "replaced by --force\n");
+
+    expect(cli(["init", "--force"]).exitCode).toBe(0);
+    expect(existsSync(p("blueprint/HAND-TUNED.md"))).toBe(false); // genuinely replaced, not merged
+    expect(existsSync(p("blueprint/manifest.json"))).toBe(true);
+    expect(readdirSync(projectRoot).filter((e) => e.includes(".tmp"))).toEqual([]);
+  });
+});
+
+describe("a blocked destination names its cause (adversarial: symlinked AGENTS.md)", () => {
+  test("plan/status/apply all say SYMLINK, not just 'unreadable-destination'", () => {
+    // `AGENTS.md` symlinked to `CLAUDE.md` is a mainstream multi-harness convention, and the seed provisions
+    // BOTH paths — so this is a layout a real operator arrives with. The run still aborts (provisioning must
+    // never write through an indirection), but the message has to name the one file and the one remedy.
+    cli(["init"]);
+    cli(["apply"]);
+    rmSync(p("AGENTS.md"));
+    symlinkSync(p("CLAUDE.md"), p("AGENTS.md"));
+
+    for (const verb of ["plan", "status", "apply"]) {
+      const run = cli([verb]);
+      expect(run.exitCode).toBe(1);
+      expect(run.text).toContain("AGENTS.md");
+      expect(run.text).toContain("symlink");
+    }
+  });
+});
+
+describe("init withdraws a directory it created when it then refuses", () => {
+  test("a refused --name on a NEW project path leaves no stray directory behind", () => {
+    // `init` must mkdir before it can realpath (realpath throws on a path that does not exist), so the refusals
+    // that follow run with the directory already created. A typo'd --project plus a bad name would otherwise
+    // leave an empty directory at the wrong path, unmentioned.
+    const fresh = join(root, "typo-target");
+    const refused = runCli(["init", "--project", fresh, "--name", "a/b"], { cwd: projectRoot, dataDir });
+    expect(refused.exitCode).toBe(1);
+    expect(existsSync(fresh)).toBe(false);
+  });
+
+  test("a directory that already existed is never removed by a refusal", () => {
+    // Only a root THIS run created may be withdrawn — an operator's existing directory is untouchable.
+    const existing = join(root, "operators-own");
+    mkdirSync(existing, { recursive: true });
+    const refused = runCli(["init", "--project", existing, "--name", "a/b"], { cwd: projectRoot, dataDir });
+    expect(refused.exitCode).toBe(1);
+    expect(existsSync(existing)).toBe(true);
+  });
+
+  test("a created-but-non-empty root is kept and the message says so", () => {
+    // The guard is "created AND still empty". If anything landed inside, keep it and be honest rather than
+    // recursively deleting a path the operator supplied.
+    const fresh = join(root, "raced-target");
+    const refused = runCli(["init", "--project", fresh, "--name", "ok-name"], { cwd: projectRoot, dataDir });
+    expect(refused.exitCode).toBe(0); // sanity: that name is fine, so this run SUCCEEDS and seeds the project
+
+    // Now a second init with a bad name against the same (now non-empty, and pre-existing) root.
+    const second = runCli(["init", "--project", fresh, "--name", "a/b"], { cwd: projectRoot, dataDir });
+    expect(second.exitCode).toBe(1);
+    expect(existsSync(fresh)).toBe(true);
   });
 });

@@ -38,7 +38,7 @@ import {
 } from "../configwrite/index";
 import type { Manifest, Runtime } from "../contract/index";
 import { diffRendered, type DestinationRead, type DestinationReader, type DiffError, type PlanAction } from "./diff";
-import { containsSecret, errorText, isNotFound, readFileBounded } from "./internal";
+import { canonicalProjectRoot, containsSecret, errorText, isNotFound, readFileBounded } from "./internal";
 import { isPlainRecord, parseConfigValue, renderBlueprint, type RenderError, type RenderedFile, type RenderIo } from "./render";
 import {
   checkTargetCompatibility,
@@ -123,7 +123,14 @@ export interface ApplyOutcome {
  * writes real paths under `dataDir`'s journal.
  */
 export function apply(input: ApplyInput, options: ApplyOptions = {}): ApplyOutcome {
-  const { manifest, blueprintRoot, projectRoot, dataDir } = input;
+  const { manifest, blueprintRoot, dataDir } = input;
+  // Lexically canonicalize the project root at ingress (gate round 4): the raw spelling is what gets stamped
+  // into each undo entry's `projectRoot`, and batch SELECTION (`newestBatchForProject`/`undoBatch`) matches it
+  // by equality — so applying under `/p/` then undoing under `/p` would miss the batch (and default undo could
+  // reverse an OLDER `/p` batch, leaving the latest applied). `posix.normalize` collapses the trailing-slash /
+  // `.`/`..` spellings; the write paths are unaffected (`posix.join` already normalizes its result). Symlink-root
+  // aliases still need realpath at the U6 registry ingress (issue #51) — this closes only the lexical case.
+  const projectRoot = canonicalProjectRoot(input.projectRoot);
   const engine = options.engine ?? REAL_ENGINE;
   const batchId = randomUUID();
 

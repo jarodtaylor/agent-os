@@ -8,7 +8,13 @@
  * the journal (the KTD2 fresh-process guarantee).
  */
 import { listUndo, undo, type UndoEntry } from "../configwrite/index";
-import { errorText } from "./internal";
+import { canonicalProjectRoot, errorText } from "./internal";
+
+/** Canonicalize a project root before comparison. Apply canonicalizes at ingress so NEW entries store a canonical
+ *  root, but comparisons canonicalize BOTH sides so a legacy un-normalized journal (or a caller passing a
+ *  different spelling to lookup than to apply) still matches (gate round 4). Symlink-root aliases remain deferred
+ *  (issue #51) — this is lexical, not a realpath. */
+const canonicalRoot = canonicalProjectRoot;
 
 /** One provision run: the journal entries sharing a `batchId`, kept OLDEST-FIRST (journal order), so a caller
  *  reverses them newest-first for LIFO. */
@@ -59,8 +65,9 @@ export function readBatches(dataDir?: string): ProvisionBatch[] {
 export function newestBatchForProject(projectRoot: string, dataDir?: string): ProvisionBatch | null {
   const entries = listUndo(dataDir);
   let lastBatchId: string | null = null;
+  const target = canonicalRoot(projectRoot);
   for (const entry of entries) {
-    if (entry.projectRoot === projectRoot && entry.batchId) lastBatchId = entry.batchId;
+    if (entry.projectRoot !== undefined && canonicalRoot(entry.projectRoot) === target && entry.batchId) lastBatchId = entry.batchId;
   }
   if (lastBatchId === null) return null;
   return groupBatches(entries).find((batch) => batch.batchId === lastBatchId) ?? null;
@@ -105,7 +112,7 @@ export interface UndoOutcome {
  */
 export function undoBatch(projectRoot: string, dataDir?: string, batchId?: string): UndoOutcome {
   const batch = batchId
-    ? readBatches(dataDir).find((candidate) => candidate.batchId === batchId && candidate.projectRoot === projectRoot) ?? null
+    ? readBatches(dataDir).find((candidate) => candidate.batchId === batchId && canonicalRoot(candidate.projectRoot) === canonicalRoot(projectRoot)) ?? null
     : newestBatchForProject(projectRoot, dataDir);
   if (!batch) return { batchId: batchId ?? null, reversed: [], alreadyReversed: [], superseded: [], failed: [] };
   return { batchId: batch.batchId, ...undoEntries(batch.entries, dataDir) };

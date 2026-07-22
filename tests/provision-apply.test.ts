@@ -1006,3 +1006,31 @@ describe("gate round-3 folds — disk-independent validity + alias-proof superse
     void b2;
   });
 });
+
+describe("gate round-4 fold — equivalent project-root spellings select the right undo batch", () => {
+  test("apply under '/p/' then default undo under '/p' reverses THAT batch, not an older one", () => {
+    wBlueprint("src/one.md", "one\n");
+    wBlueprint("src/two.md", "two\n");
+    const mk = (src: string, dest: string): Manifest => ({
+      schemaVersion: 1,
+      roles: [{ name: "r", harness: "claude-code", files: [{ transform: "copy", source: src, destination: dest }] }],
+    });
+    // Older batch under the bare root writes CLAUDE.md; newer batch under the TRAILING-SLASH root writes AGENTS.md
+    // (a codex surface — use its own role). Distinct destinations so supersession never enters.
+    apply({ manifest: mk("src/one.md", "CLAUDE.md"), blueprintRoot, projectRoot, dataDir });
+    const newer = apply({
+      manifest: { schemaVersion: 1, roles: [{ name: "r2", harness: "codex", files: [{ transform: "copy", source: "src/two.md", destination: "AGENTS.md" }] }] },
+      blueprintRoot,
+      projectRoot: `${projectRoot}/`,
+      dataDir,
+    });
+    expect(existsProject("CLAUDE.md")).toBe(true);
+    expect(existsProject("AGENTS.md")).toBe(true);
+    // Default undo under the BARE root must select the NEWEST batch (applied under '/p/') and reverse it —
+    // pre-fold it missed on strict-equality and reversed the older CLAUDE.md batch instead.
+    const out = undoBatch(projectRoot, dataDir);
+    expect(out.batchId).toBe(newer.batchId);
+    expect(existsProject("AGENTS.md")).toBe(false); // the newest batch's created file was removed
+    expect(existsProject("CLAUDE.md")).toBe(true); // the older batch stays applied
+  });
+});

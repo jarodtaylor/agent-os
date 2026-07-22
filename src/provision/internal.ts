@@ -7,7 +7,21 @@
  * regular-file guard + the same 16 MiB ceiling — so all three read boundaries stay identically disciplined.
  */
 import { readFileSync, statSync } from "node:fs";
+import { posix } from "node:path";
 import { classify } from "../capture/secret-classify";
+
+/**
+ * Canonical form of an absolute project root, for BOTH storing it in an undo entry and comparing two roots for
+ * equality (gate round 4). `posix.normalize` collapses `.`/`..`/duplicate-slashes but KEEPS a trailing slash, so
+ * it alone leaves `/p` and `/p/` distinct — we additionally drop a trailing slash (except the filesystem root
+ * `/`). Result: `/p`, `/p/`, and `/p/x/..` all canonicalize to one string, so a batch applied under one spelling
+ * is found by an undo under another. Lexical ONLY — a symlinked root is a different string this cannot fold, so
+ * realpath canonicalization at the U6 registry ingress stays deferred (issue #51).
+ */
+export function canonicalProjectRoot(root: string): string {
+  const normalized = posix.normalize(root);
+  return normalized.length > 1 && normalized.endsWith("/") ? normalized.slice(0, -1) : normalized;
+}
 
 /** Same 16 MiB ceiling as `src/scan/internal.ts` / `src/codex-credential.ts` — generous for real blueprint
  *  files (KBs), bounding the OOM surface of a pathological oversized one. */

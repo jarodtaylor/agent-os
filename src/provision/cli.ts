@@ -1023,7 +1023,11 @@ function runUndo(rawProject: string, args: ParsedArgs, dataDir: string): CliRun 
 }
 
 function undoText(outcome: UndoOutcome): string {
-  if (outcome.batchId === null) return "Nothing to undo: this project has no reversible provision batch.";
+  if (outcome.batchId === null) {
+    // A refusal before any batch was selected (lost terminal-state history) must not read as "nothing to undo".
+    if (outcome.failed.length > 0) return ["Undo refused:", ...outcome.failed.map(({ path, error }) => `  FAILED    ${path}: ${error}`)].join("\n");
+    return "Nothing to undo: this project has no reversible provision batch.";
+  }
   const lines = [
     `Batch ${outcome.batchId}: reversed ${outcome.reversed.length}, already reversed ${outcome.alreadyReversed.length}.`,
     ...outcome.reversed.map((path) => `  reversed  ${path}`),

@@ -1505,6 +1505,39 @@ describe("gate finding 3 — a fully successful undo records `undone`, so histor
     expect(rProject(SHARED_DEST)).toBe("x0\n"); // pre-fix: "y\n"
     expect(readBatchStatuses(dataDir).get(b.batchId!)?.status).toBe("undone");
   });
+
+  test("gate round 7: terminal-state history that EXISTS but cannot be read refuses undo — never resurrects", () => {
+    // Same walk-back as above, then the history becomes unreadable (here: a directory, which hits the same
+    // non-regular guard an oversized file does). Pre-fix that read as "no records", so a bare `undo` re-selected
+    // the spent B, matched its postHash on disk, and re-applied y while reporting success.
+    const mk = (): Manifest => ({
+      schemaVersion: 1,
+      roles: [{ name: "architect", harness: "claude-code", files: [{ transform: "copy", source: "shared.md", destination: SHARED_DEST }] }],
+    });
+    wProject(SHARED_DEST, "x0\n");
+    wBlueprint("shared.md", "y\n");
+    const a = apply({ manifest: mk(), blueprintRoot, projectRoot, dataDir });
+    wBlueprint("shared.md", "x0\n");
+    const b = apply({ manifest: mk(), blueprintRoot, projectRoot, dataDir });
+    undoBatch(projectRoot, dataDir, b.batchId!);
+    undoBatch(projectRoot, dataDir, a.batchId!);
+    expect(rProject(SHARED_DEST)).toBe("x0\n");
+
+    rmSync(batchStatusPath(dataDir));
+    mkdirSync(batchStatusPath(dataDir));
+
+    const bare = undoBatch(projectRoot, dataDir);
+    expect(bare.reversed).toEqual([]);
+    expect(bare.failed).toHaveLength(1);
+    expect(bare.failed[0]!.error).toContain("cannot be read");
+    expect(rProject(SHARED_DEST)).toBe("x0\n"); // pre-fix: "y\n"
+    expect(undoBatch(projectRoot, dataDir, b.batchId!).failed).toHaveLength(1); // explicit is refused too
+    expect(rProject(SHARED_DEST)).toBe("x0\n");
+
+    // An ABSENT history is the per-batch-unknown case, not lost history: undo proceeds (legacy journals).
+    rmSync(batchStatusPath(dataDir), { recursive: true });
+    expect(undoBatch(projectRoot, dataDir).failed.every((f) => !f.error.includes("cannot be read"))).toBe(true);
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

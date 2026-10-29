@@ -13,12 +13,18 @@
  * keeps the crash story identical to the journal's (append-only, one self-contained line per record, torn tails
  * isolated by leading with a newline, malformed lines skipped on read).
  *
- * THE FAIL-SAFE INVARIANT, non-negotiable: an UNKNOWN status — no record at all (a pre-U6 journal, a hard crash
- * between the last write and this append, a deleted/corrupt status file) — leaves the batch ELIGIBLE for default
- * selection, i.e. degrades to exactly the pre-#50 behavior. Only an affirmative, well-formed, root-matching
- * fully-reversed record (`rolled-back` or `undone`) removes a batch from default selection. A missing status file
- * can therefore never make `undo` find nothing, and `recordBatchStatus` is best-effort (it can never fail an
- * apply — or an undo — that already succeeded; an operation's outcome must not hinge on a metadata line landing).
+ * THE FAIL-SAFE INVARIANT has TWO cases, which an earlier version conflated (gate round 7):
+ *   - PER-BATCH unknown — no record for THIS batch (a pre-U6 journal, a hard crash between the last write and
+ *     this append, a torn/corrupt line) — leaves the batch ELIGIBLE for default selection. Only an affirmative,
+ *     well-formed, root-matching fully-reversed record (`rolled-back` or `undone`) removes a batch from it.
+ *   - WHOLE-HISTORY unknown — the file EXISTS but cannot be read (oversized past the read bound, non-regular,
+ *     unreadable) — REFUSES undo outright (`batchHistoryReadable`). Treating it as "no records" is not a
+ *     degradation to pre-#50: `undone` records are what let an operator walk back B then A over one path, and
+ *     losing them all re-exposes the spent B, whose `postHash` now matches disk again, so its backup would be
+ *     re-applied — resurrecting a reverted change while reporting success.
+ * An ABSENT file is the per-batch case for every batch (nothing was ever recorded), so it stays eligible.
+ * `recordBatchStatus` is best-effort (it can never fail an apply — or an undo — that already succeeded; an
+ * operation's outcome must not hinge on a metadata line landing).
  */
 import { join } from "node:path";
 import * as z from "zod";
@@ -110,10 +116,18 @@ export function recordBatchStatus(
  * a read that `undo` depends on. A missing file yields an empty map: unknown everywhere ⇒ eligible everywhere.
  *
  * The read goes through the layer's BOUNDED reader (`readFileBounded`) so a FIFO at this path cannot block
- * `undo` forever and an oversized one cannot be loaded whole. Every refusal collapses to the SAME empty map,
- * which keeps the fail-safe pointing the one direction it must: a status file we could not read leaves every
- * batch unknown and therefore ELIGIBLE, never hidden from a plain `undo`.
+ * `undo` forever and an oversized one cannot be loaded whole. Every refusal collapses to the SAME empty map here;
+ * the mutating caller (`undoBatch`) must first ask `batchHistoryReadable`, because a present-but-unreadable file
+ * is lost history, not absent history (see the module docstring). Read-only consumers (drift) may use the empty
+ * map as-is — "everything still live" over-reports, which is their safe direction.
  */
+/** False iff the terminal-state file EXISTS but cannot be read (oversized, non-regular, unreadable) — lost
+ *  history, which `undoBatch` must refuse on. Absent ⇒ true: nothing was ever recorded, the per-batch case. */
+export function batchHistoryReadable(dataDir?: string): boolean {
+  const read = readFileBounded(batchStatusPath(resolveDataDir(dataDir)));
+  return read.ok || read.reason === "absent";
+}
+
 export function readBatchStatuses(dataDir?: string): Map<string, BatchStatusRecord> {
   const path = batchStatusPath(resolveDataDir(dataDir));
   const out = new Map<string, BatchStatusRecord>();

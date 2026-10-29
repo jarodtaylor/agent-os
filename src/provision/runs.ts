@@ -13,7 +13,8 @@
  * writer forever. That write is best-effort and cannot fail an undo that already succeeded.
  */
 import { listUndo, undo, type UndoEntry } from "../configwrite/index";
-import { batchCleanliness, isFullyReversed, readBatchStatuses, recordBatchStatus } from "./batch-status";
+import { resolveDataDir } from "../paths";
+import { batchCleanliness, batchHistoryReadable, batchStatusPath, isFullyReversed, readBatchStatuses, recordBatchStatus } from "./batch-status";
 import { canonicalProjectRoot, errorText } from "./internal";
 
 /** Canonicalize a project root before comparison. Apply canonicalizes at ingress so NEW entries store a canonical
@@ -184,6 +185,13 @@ export interface UndoOutcome {
  * Best-effort, like every other status write: a dropped record leaves the batch unknown, never fails the undo.
  */
 export function undoBatch(projectRoot: string, dataDir?: string, batchId?: string): UndoOutcome {
+  // Lost terminal-state history refuses BEFORE selection or any disk touch: without it a spent batch looks live
+  // and its backup could be re-applied over the state a later undo restored (see `batch-status.ts`). Fixed text
+  // and a fixed path — no file content.
+  if (!batchHistoryReadable(dataDir)) {
+    const error = "batch terminal-state history exists but cannot be read — refusing to undo (a spent batch could be re-applied)";
+    return { batchId: batchId ?? null, reversed: [], alreadyReversed: [], superseded: [], failed: [{ path: batchStatusPath(resolveDataDir(dataDir)), error }] };
+  }
   // `!== undefined`, not truthiness: an explicitly supplied empty id must match nothing, never fall back to the
   // default selection and reverse whatever batch happens to be newest (gate round 6).
   const batch = batchId !== undefined

@@ -250,7 +250,9 @@ function parseArgs(argv: readonly string[]): { ok: true; args: ParsedArgs } | { 
         // Every remaining allowed flag takes a value; a missing one must not swallow the NEXT flag as its
         // argument (`--project --json` would silently provision a directory named "--json").
         const value = rest[++i];
-        if (value === undefined || value.startsWith("--")) return { ok: false, error: `'${flag}' needs a value` };
+        // An EMPTY value is refused too: `--batch "$BATCH_ID"` with the variable unset must not read as "no batch
+        // named" and silently undo the newest one.
+        if (value === undefined || value === "" || value.startsWith("--")) return { ok: false, error: `'${flag}' needs a value` };
         if (flag === "--project") args.project = value;
         else if (flag === "--name") args.name = value;
         else args.batch = value;

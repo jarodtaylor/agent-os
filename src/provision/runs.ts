@@ -184,7 +184,9 @@ export interface UndoOutcome {
  * Best-effort, like every other status write: a dropped record leaves the batch unknown, never fails the undo.
  */
 export function undoBatch(projectRoot: string, dataDir?: string, batchId?: string): UndoOutcome {
-  const batch = batchId
+  // `!== undefined`, not truthiness: an explicitly supplied empty id must match nothing, never fall back to the
+  // default selection and reverse whatever batch happens to be newest (gate round 6).
+  const batch = batchId !== undefined
     ? readBatches(dataDir).find((candidate) => candidate.batchId === batchId && canonicalRoot(candidate.projectRoot) === canonicalRoot(projectRoot)) ?? null
     : newestBatchForProject(projectRoot, dataDir);
   if (!batch) return { batchId: batchId ?? null, reversed: [], alreadyReversed: [], superseded: [], failed: [] };

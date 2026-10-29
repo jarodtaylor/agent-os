@@ -360,6 +360,19 @@ describe("plan / apply / status / undo", () => {
     expect(readProject("AGENTS.md")).toBe(bAgents); // the newer batch's state survives
   });
 
+  test("an EMPTY --batch is a usage error and never falls back to undoing the newest batch", () => {
+    cli(["apply"]);
+    const agents = readProject("AGENTS.md");
+    const undone = cli(["undo", "--batch", ""]);
+    expect(undone.exitCode).not.toBe(0);
+    expect(undone.json.ok).toBe(false);
+    expect(readProject("AGENTS.md")).toBe(agents);
+    // the batch is still live — a bare undo still finds and reverses it
+    const bare = cli(["undo"]);
+    if (bare.json.verb !== "undo") throw new Error("unreachable");
+    expect(bare.json.reversed.length).toBeGreaterThan(0);
+  });
+
   test("undo with nothing to undo is an honest no-op, not a failure", () => {
     const undone = cli(["undo"]);
     expect(undone.exitCode).toBe(0);

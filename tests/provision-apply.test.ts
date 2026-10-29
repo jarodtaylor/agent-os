@@ -166,6 +166,10 @@ describe("provision apply — AE1 happy path", () => {
     expect(batches[0]!.entries).toHaveLength(9);
     expect(batches[0]!.entries.every((e) => e.projectRoot === projectRoot)).toBe(true);
 
+    // An explicit EMPTY id matches nothing — it must never fall back to the default (newest) selection.
+    expect(undoBatch(projectRoot, dataDir, "")).toMatchObject({ batchId: "", reversed: [], alreadyReversed: [] });
+    for (const dest of AE1_DESTS) expect(existsProject(dest)).toBe(true);
+
     // Full undo restores exact prior state — every created file deleted.
     const undoResult = undoBatch(projectRoot, dataDir);
     expect(undoResult.reversed).toHaveLength(9);

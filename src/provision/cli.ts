@@ -30,7 +30,7 @@
  * `process.exit`, no ambient cwd, an injectable `dataDir` — so the suite drives every verb in-process and one
  * spawn test proves the `package.json` wiring. The `import.meta.main` block below is the only I/O adapter.
  */
-import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, rmdirSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, rmdirSync, statSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { basename, dirname, join, posix, resolve } from "node:path";
 import type { Manifest, Runtime } from "../contract/index";
@@ -817,11 +817,31 @@ function scaffoldRunState(projectRoot: string, blueprintRoot: string): RunStateR
   if (containsSecret(seed.content) || hasMachineAbsolutePath(seed.content)) {
     return { ok: false, error: `'${RUN_STATE_SEED_RELATIVE}' failed the secret/portability gate — refusing to scaffold ${RUN_STATE_FILENAME}` };
   }
+  // `wx` (exclusive create): a file that appeared since the lstat is never clobbered, and a successful open
+  // proves THIS call created the file — so a write that then fails (ENOSPC, EIO) withdraws it. A truncated run
+  // file left behind would read as authoritative on retry and never be repaired (gate round 10).
+  let fd: number | undefined;
   try {
     mkdirSync(dirname(target), { recursive: true });
-    writeFileSync(target, seed.content);
+    fd = openSync(target, "wx");
+    writeFileSync(fd, seed.content);
   } catch (err) {
+    if (fd !== undefined) {
+      try {
+        rmSync(target, { force: true });
+      } catch {
+        // Could not withdraw — the error below still fails the run; nothing more to do here.
+      }
+    }
     return { ok: false, error: `scaffolding '${target}' failed: ${errorText(err)}` };
+  } finally {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {
+        // A close failure after a completed write changes nothing about what is on disk.
+      }
+    }
   }
   return { ok: true, state: "created", content: seed.content };
 }

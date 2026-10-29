@@ -83,6 +83,13 @@ export function registerProject(
   if (!isLogicalProjectName(name)) return { kind: "invalid-name", name };
 
   const resolved = resolveDataDir(dataDir);
+  // The conflict check below trusts an empty map as "name is free", which only an ABSENT registry can prove. One
+  // that exists but cannot be read (e.g. a write-only mode mistake) could hide this name's binding, and the append
+  // would still land — silently rebinding it (gate round 8). Lookups stay fail-closed on the empty map as-is.
+  const history = readFileBounded(knownProjectsPath(resolved));
+  if (!history.ok && history.reason === "blocked") {
+    return { kind: "write-failed", name, error: "the known-projects registry exists but cannot be read — refusing to register (an existing binding could be overwritten)" };
+  }
   const existing = readKnownProjects(resolved).get(name);
   if (existing && existing.projectRoot !== projectRoot) return { kind: "conflict", name, existing };
 

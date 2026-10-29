@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import {
   appendFileSync,
+  chmodSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -54,6 +55,23 @@ describe("known-projects registry", () => {
     registerProject(dataDir, record("agent-os", "/p/agent-os"));
     const missing = lookupProject("not-registered", dataDir);
     expect(missing).toEqual({ kind: "unknown", name: "not-registered" });
+  });
+
+  // Root can read a 0200 file, so the condition this pins cannot be built under uid 0.
+  test.skipIf(process.getuid?.() === 0)("an existing but UNREADABLE registry refuses registration — never a silent rebind", () => {
+    registerProject(dataDir, record("api", "/p/one/api"));
+    const path = knownProjectsPath(dataDir);
+    const before = readFileSync(path, "utf8");
+    chmodSync(path, 0o200); // write-only: the read fails, an append would still land
+    try {
+      const outcome = registerProject(dataDir, record("api", "/p/two/api"));
+      expect(outcome.kind).toBe("write-failed");
+    } finally {
+      chmodSync(path, 0o600);
+    }
+    expect(readFileSync(path, "utf8")).toBe(before); // nothing appended
+    const found = lookupProject("api", dataDir);
+    expect(found.kind === "found" && found.record.projectRoot).toBe("/p/one/api");
   });
 
   test("re-registering the same project root is idempotent (re-init)", () => {
@@ -196,14 +214,15 @@ describe("provision sidecars are read under bounds, never blocking", () => {
   test("writing to a FIFO sidecar is refused, not blocked, and reported to the caller", () => {
     // The write half of the same hazard: `appendFileSync` on a FIFO blocks opening it for write until a reader
     // appears. The append refuses a non-regular target before any open-for-write, and `registerProject` surfaces
-    // that as a typed `write-failed` — a load-bearing write must never fail silently.
+    // that as a typed `write-failed` — a load-bearing write must never fail silently. Since gate round 8 the
+    // refusal lands one step earlier, at the unreadable-history guard (a FIFO is non-regular, so `blocked`).
     const fifo = knownProjectsPath(dataDir);
     execFileSync("mkfifo", [fifo]);
     try {
       const outcome = registerProject(dataDir, record("agent-os", "/p/agent-os"));
       expect(outcome.kind).toBe("write-failed");
       if (outcome.kind !== "write-failed") throw new Error("unreachable");
-      expect(outcome.error).toMatch(/not a regular file/);
+      expect(outcome.error).toMatch(/cannot be read/);
     } finally {
       rmSync(fifo, { force: true });
     }

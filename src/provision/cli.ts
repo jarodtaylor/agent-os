@@ -41,7 +41,7 @@ import { diffRendered, type BlockedReason, type DiffError, type DiffRow } from "
 import { containsSecret, errorText, hasMachineAbsolutePath, isNotFound, readDestinationBounded, readFileBounded } from "./internal";
 import { renderBlueprint, type RenderError, type RenderIo } from "./render";
 import { isLogicalProjectName, lookupProject, registerProject } from "./registry";
-import { undoBatch, type UndoOutcome } from "./runs";
+import { liveProvisionedTargets, undoBatch, type UndoOutcome } from "./runs";
 
 /** The blueprint directory inside a project. A fixed convention (R1: "a plain directory plus a manifest,
  *  living in the project repo") so `init`, the CLI verbs, and the registry can never disagree about where a
@@ -210,9 +210,9 @@ export function runCli(argv: readonly string[], ctx: CliContext): CliRun {
     case "init":
       return runInit(rawProject, args, dataDir);
     case "plan":
-      return runPlan(rawProject, args);
+      return runPlan(rawProject, args, dataDir);
     case "status":
-      return runStatus(rawProject, args);
+      return runStatus(rawProject, args, dataDir);
     case "apply":
       return runApply(rawProject, args, dataDir);
     case "undo":
@@ -361,7 +361,7 @@ type Surveyed = { ok: true; rows: DiffRow[] } | { ok: false; error: string };
  * it re-renders internally from the current blueprint (KTD7), which is what closes the stale-plan TOCTOU. So
  * this is a second CALL SITE of the same pure core, not a second implementation of it.
  */
-function survey(projectRoot: string, blueprintRoot: string): Surveyed {
+function survey(projectRoot: string, blueprintRoot: string, dataDir: string): Surveyed {
   const gated = gate(blueprintRoot);
   if (!gated.ok) return gated;
 
@@ -372,7 +372,13 @@ function survey(projectRoot: string, blueprintRoot: string): Surveyed {
   const rendered = renderBlueprint(gated.manifest, io);
   if (!rendered.ok) return { ok: false, error: renderErrorText(rendered.error) };
 
-  const diffed = diffRendered(rendered.files, (destination) => readDestinationBounded(posix.join(projectRoot, destination)));
+  // The journal tells a deleted provisioned surface (drift) from one nothing ever wrote (not drift) — see `diff.ts`.
+  const live = liveProvisionedTargets(projectRoot, dataDir);
+  const diffed = diffRendered(
+    rendered.files,
+    (destination) => readDestinationBounded(posix.join(projectRoot, destination)),
+    (destination) => live.has(posix.join(projectRoot, destination)),
+  );
   if (!diffed.ok) return { ok: false, error: diffErrorText(diffed.error) };
   return { ok: true, rows: diffed.rows };
 }
@@ -808,14 +814,14 @@ function scaffoldRunState(projectRoot: string, blueprintRoot: string): RunStateR
 // plan / status — the two read verbs over one survey
 // ─────────────────────────────────────────────────────────────────────────────
 
-function runPlan(rawProject: string, args: ParsedArgs): CliRun {
+function runPlan(rawProject: string, args: ParsedArgs, dataDir: string): CliRun {
   const resolved = resolveExistingRoot(rawProject);
   if (!resolved.ok) {
     return render(args, { verb: "plan", ok: false, errors: [resolved.error], project: null, rows: [], changes: 0 }, resolved.error, EXIT_FAILED);
   }
   const projectRoot = resolved.root;
 
-  const surveyed = survey(projectRoot, blueprintRootFor(projectRoot));
+  const surveyed = survey(projectRoot, blueprintRootFor(projectRoot), dataDir);
   if (!surveyed.ok) {
     return render(args, { verb: "plan", ok: false, errors: [surveyed.error], project: projectRoot, rows: [], changes: 0 }, surveyed.error, EXIT_FAILED);
   }
@@ -832,14 +838,14 @@ function runPlan(rawProject: string, args: ParsedArgs): CliRun {
  * definition, so listing them would train the operator to ignore the report). Drift is informational, so a
  * drifted project still exits 0 — a non-zero exit is reserved for a run that could not answer the question.
  */
-function runStatus(rawProject: string, args: ParsedArgs): CliRun {
+function runStatus(rawProject: string, args: ParsedArgs, dataDir: string): CliRun {
   const resolved = resolveExistingRoot(rawProject);
   if (!resolved.ok) {
     return render(args, { verb: "status", ok: false, errors: [resolved.error], project: null, rows: [], drifted: 0 }, resolved.error, EXIT_FAILED);
   }
   const projectRoot = resolved.root;
 
-  const surveyed = survey(projectRoot, blueprintRootFor(projectRoot));
+  const surveyed = survey(projectRoot, blueprintRootFor(projectRoot), dataDir);
   if (!surveyed.ok) {
     return render(args, { verb: "status", ok: false, errors: [surveyed.error], project: projectRoot, rows: [], drifted: 0 }, surveyed.error, EXIT_FAILED);
   }

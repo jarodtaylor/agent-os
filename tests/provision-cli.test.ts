@@ -206,7 +206,8 @@ describe("plan / apply / status / undo", () => {
     // The regression this locks: `drift` used to mean "this row would write", so a freshly-`init`ed project
     // reported every tracked surface as drifted and `--json`'s `drifted` count was non-zero before a single
     // byte had been provisioned. A machine consumer gating on `drifted > 0` got a false positive on the most
-    // common first run. Drift now means DIVERGENCE — a live surface that exists and disagrees.
+    // common first run. Drift now means DIVERGENCE — a live surface that disagrees, or one a still-live batch
+    // provisioned that has since gone missing; nothing here was ever provisioned, so absence is not drift.
     const status = cli(["status"]);
     expect(status.exitCode).toBe(0);
     if (status.json.verb !== "status") throw new Error("unreachable");
@@ -243,6 +244,32 @@ describe("plan / apply / status / undo", () => {
     const status = cli(["status"]);
     if (status.json.verb !== "status") throw new Error("unreachable");
     expect(status.json.drifted).toBe(0);
+  });
+
+  test("status reports a DELETED provisioned surface as drift (adversarial: missing ≠ matching)", () => {
+    // Pre-fix a `create` row was never drift, so deleting a tracked file after apply left `status` claiming every
+    // tracked surface matched. A surface a still-live batch wrote and that is now absent IS divergence.
+    cli(["apply"]);
+    rmSync(p("AGENTS.md"));
+
+    const status = cli(["status"]);
+    expect(status.exitCode).toBe(0);
+    if (status.json.verb !== "status") throw new Error("unreachable");
+    expect(status.json.drifted).toBe(1);
+    expect(status.json.rows.find((r) => r.drift)).toMatchObject({ destination: "AGENTS.md", action: "create", drift: true });
+    expect(status.text).not.toContain("No drift");
+    expect(existsSync(p("AGENTS.md"))).toBe(false); // read-only: status never recreates it
+  });
+
+  test("after apply → undo, the absent surfaces are NOT drift — an undone batch provisioned nothing live", () => {
+    cli(["apply"]);
+    expect(cli(["undo"]).exitCode).toBe(0);
+    expect(existsSync(p("AGENTS.md"))).toBe(false);
+
+    const status = cli(["status"]);
+    if (status.json.verb !== "status") throw new Error("unreachable");
+    expect(status.json.drifted).toBe(0);
+    expect(status.json.rows.find((r) => r.destination === "AGENTS.md")).toMatchObject({ action: "create", drift: false });
   });
 
   test("KTD8: a scaffold row appears in plan but is excluded from the drift report", () => {

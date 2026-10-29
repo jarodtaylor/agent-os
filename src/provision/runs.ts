@@ -88,7 +88,7 @@ export function readBatches(dataDir?: string): ProvisionBatch[] {
  * FAIL-SAFE: only an affirmative, well-formed, root-matching fully-reversed record excludes a batch — an UNKNOWN
  * state (a pre-U6 journal, a crash before the record landed, a partial rollback that left a file on disk, an undo
  * that only partly succeeded) stays eligible, reproducing exactly the pre-#50 selection. `undoBatch` with an
- * explicit id still reaches ANY batch, fully-reversed ones included.
+ * explicit id still reaches ANY batch, fully-reversed ones included — as a non-mutating no-op (gate round 4).
  */
 export function newestBatchForProject(projectRoot: string, dataDir?: string): ProvisionBatch | null {
   // Recency is the batch of the LAST journal ENTRY for `target` — NOT the last batch in `groupBatches`
@@ -107,6 +107,26 @@ export function newestBatchForProject(projectRoot: string, dataDir?: string): Pr
     if (batch?.projectRoot === target && !isFullyReversed(batch.batchId, batch.projectRoot, statuses)) return batch;
   }
   return null;
+}
+
+/**
+ * Every absolute `targetPath` a still-LIVE batch of this project journaled — the read side's "was this surface
+ * ever provisioned (and not since unwound)?" answer, which lets the pure diff call a MISSING tracked surface drift
+ * without doing journal I/O itself. Built over `groupBatches`, so a cross-root (quarantined) batch never counts,
+ * and matched on the batch's canonical root. A batch is excluded only by an AFFIRMATIVE fully-reversed record
+ * (`rolled-back`/`undone`); unknown, committed, and partial states all count as live. That is the fail-safe side
+ * for THIS question: a wrongly-live batch over-reports drift on a missing file (the operator re-applies, which
+ * recreates it), whereas a wrongly-spent one would hide a deleted surface behind "every tracked surface matches".
+ */
+export function liveProvisionedTargets(projectRoot: string, dataDir?: string): Set<string> {
+  const target = canonicalRoot(projectRoot);
+  const statuses = readBatchStatuses(dataDir);
+  const live = new Set<string>();
+  for (const batch of groupBatches(listUndo(dataDir))) {
+    if (batch.projectRoot !== target || isFullyReversed(batch.batchId, batch.projectRoot, statuses)) continue;
+    for (const entry of batch.entries) live.add(entry.targetPath);
+  }
+  return live;
 }
 
 /** The result of an undo verb, four honest per-target buckets (one entry's outcome never aborts the rest —
@@ -140,8 +160,12 @@ export interface UndoOutcome {
  * DEFAULT vs EXPLICIT selection (issue #50): the default targets the newest batch that still holds live state —
  * a fully rolled-back or already-undone run is skipped, so a bare `undoBatch(projectRoot, dataDir)` unwinds the
  * last apply that actually left state behind rather than no-op'ing on a spent one. An EXPLICIT `batchId` still
- * reaches ANY batch, including a spent one, whose entries then report in `alreadyReversed` (an honest no-op —
- * FOLD 2). A batch whose terminal state is unknown, or whose rollback/undo was only PARTIAL, remains
+ * reaches ANY batch, but a batch with an affirmative fully-reversed record (`rolled-back`/`undone`) is a
+ * NON-MUTATING no-op: its entries are reported in `alreadyReversed` without `undo` ever running, and no status is
+ * recorded. Re-running a spent batch's entries is not harmless — once a LATER undo has put disk back to this
+ * batch's `postHash` (X→y by A, y→x0 by B; undo B, undo A, then undo B again), `undo` would happily re-apply its
+ * backup over that later state, resurrecting a change while every batch still claims `undone` (gate round 4).
+ * A batch whose terminal state is unknown, or whose rollback/undo was only PARTIAL, still executes and remains
  * default-selectable — that is what keeps a file stranded by a failed reversal reachable without its batch id.
  *
  * RECORDING `undone` (gate finding 3). A fully successful undo appends the durable `undone` terminal state, which
@@ -164,6 +188,11 @@ export function undoBatch(projectRoot: string, dataDir?: string, batchId?: strin
     ? readBatches(dataDir).find((candidate) => candidate.batchId === batchId && canonicalRoot(candidate.projectRoot) === canonicalRoot(projectRoot)) ?? null
     : newestBatchForProject(projectRoot, dataDir);
   if (!batch) return { batchId: batchId ?? null, reversed: [], alreadyReversed: [], superseded: [], failed: [] };
+  // A spent batch never touches disk again (see "DEFAULT vs EXPLICIT" above). Newest-first, as `undoEntries` reports.
+  if (isFullyReversed(batch.batchId, batch.projectRoot, readBatchStatuses(dataDir))) {
+    const alreadyReversed = batch.entries.map((entry) => entry.targetPath).reverse();
+    return { batchId: batch.batchId, reversed: [], alreadyReversed, superseded: [], failed: [] };
+  }
   const buckets = undoEntries(batch.entries, dataDir);
   // Retire the batch as `undone` only when NOTHING it produced is still live. Three ways something can be:
   //   - `failed`     — the entry was not reversed; its file is still on disk.

@@ -55,9 +55,16 @@ export type DestinationRead =
 
 export type DestinationReader = (destination: string) => DestinationRead;
 
-/** Diff in manifest/render order, returning the first content-free read/parse failure. */
-export function diffRendered(files: readonly RenderedFile[], readDestination: DestinationReader): DiffResult {
+/** Diff in manifest/render order, returning the first content-free read/parse failure. `wasProvisioned` answers
+ *  whether a still-live provision batch wrote a destination (see `row`); it is injected so this module stays pure,
+ *  and defaults to "never", which keeps every `create` row non-drift for a caller with no journal to consult. */
+export function diffRendered(
+  files: readonly RenderedFile[],
+  readDestination: DestinationReader,
+  wasProvisioned: (destination: string) => boolean = () => false,
+): DiffResult {
   const rows: DiffRow[] = [];
+  const row = (file: RenderedFile, action: PlanAction): DiffRow => diffRow(file, action, wasProvisioned);
 
   for (const file of files) {
     const live = readDestination(file.destination);
@@ -119,23 +126,29 @@ function parseLiveConfig(
 }
 
 /**
- * DRIFT MEANS DIVERGENCE, NOT "WOULD WRITE". Only `overwrite` and `merge` describe a live surface that EXISTS
- * and disagrees with the blueprint — the two actions a drift report is actually about. A `create` row means the
- * destination is ABSENT (never provisioned), which is not drift: without this restriction, `status` on a
- * freshly-`init`ed project reports every tracked row as drifted and its `drifted` count is non-zero before a
- * single byte was ever written — a false positive on the most common first run, and one that lies to a machine
- * consumer reading `--json`, not just to the table.
+ * DRIFT MEANS DIVERGENCE FROM PROVISIONED STATE, NOT "WOULD WRITE". A row drifts in exactly two cases:
+ *   - `overwrite`/`merge` — a live surface EXISTS and disagrees with the blueprint.
+ *   - `create` of a surface a still-LIVE batch provisioned (`wasProvisioned`) — it was written and has since gone
+ *     missing. Deleting a tracked `AGENTS.md` after an apply is divergence just as much as editing it is; without
+ *     this case `status` reported "every tracked surface matches" over a hole.
+ * An absent destination that nothing ever provisioned — a freshly-`init`ed project, or one whose every writer was
+ * undone or rolled back — is still NOT drift: otherwise `status` on the most common first run reports every
+ * tracked row drifted and a non-zero `drifted` count before a single byte was written, a false positive that lies
+ * to a machine consumer reading `--json`, not just to the table. The journal is what tells the two absences
+ * apart, so the caller supplies it as a predicate and this module stays pure.
  *
  * The narrowing lives HERE rather than in the CLI's rendering because `DiffRow.drift` is the one shared field
  * every consumer reads — `plan`, `status`, and the U7 `provision_status` MCP tool all build their output from
  * it. Fixing only the CLI's summary would leave the field itself lying to the next consumer.
  *
- * `scaffold` needs no separate guard now: a scaffold row is create-once, so `diffRendered` short-circuits it to
- * `scaffold-skip` (present) or emits `create` (absent) — it can never reach `overwrite`/`merge`. Its exclusion
- * from drift (KTD8) therefore falls out of the action check instead of being asserted twice.
+ * `scaffold` rows never drift (KTD8): a scaffold row is create-once, so `diffRendered` short-circuits it to
+ * `scaffold-skip` (present) or emits `create` (absent) — it can never reach `overwrite`/`merge`, and the `create`
+ * case excludes it explicitly, since a deleted scaffold is the operator's to remove and `apply` simply re-seeds it.
  */
-function row(file: RenderedFile, action: PlanAction): DiffRow {
-  const drift = (action === "overwrite" || action === "merge") && file.driftTracked;
+function diffRow(file: RenderedFile, action: PlanAction, wasProvisioned: (destination: string) => boolean): DiffRow {
+  const diverged = action === "overwrite" || action === "merge";
+  const vanished = action === "create" && file.transform !== "scaffold" && wasProvisioned(file.destination);
+  const drift = file.driftTracked && (diverged || vanished);
   return { role: file.role, harness: file.harness, destination: file.destination, action, drift };
 }
 

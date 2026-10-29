@@ -1445,10 +1445,10 @@ describe("gate finding 3 — a fully successful undo records `undone`, so histor
     expect(rProject(SHARED_DEST)).toBe("B\n"); // B's state untouched
   });
 
-  test("an `undone` batch is skipped by DEFAULT selection but keeps its order index (it can still be superseded)", () => {
-    // The asymmetry `supersessionIndex` documents for `rolled-back` must hold for `undone` too: dropped from
-    // `writersByPath` (it holds no live state) but KEPT in `orderByBatch`, so a LATER live batch still supersedes
-    // ITS entries — an explicit undo of it under newer state stays a fail-closed refusal, never a hash mismatch.
+  test("an `undone` batch is skipped by DEFAULT selection, and an explicit undo of it under newer state is a no-op", () => {
+    // Under newer live state, an explicit undo of a spent batch must never clobber that state. Since gate round 4
+    // a fully-reversed batch short-circuits BEFORE supersession is even consulted: its entries report in
+    // `alreadyReversed` and `undo` never runs (the stronger guarantee — see the round-4 resurrection test).
     const { a, b } = twoBatchesOneDest();
     expect(undoBatch(projectRoot, dataDir).batchId).toBe(b.batchId); // B → `undone`
 
@@ -1466,9 +1466,40 @@ describe("gate finding 3 — a fully successful undo records `undone`, so histor
     expect(newestBatchForProject(projectRoot, dataDir)?.batchId).toBe(c.batchId!); // B is skipped, C selected
 
     const out = undoBatch(projectRoot, dataDir, b.batchId!);
-    expect(out.superseded).toHaveLength(1); // C supersedes B's entry — refused, not attempted
+    expect(out.reversed).toEqual([]);
+    expect(out.superseded).toEqual([]);
+    expect(out.alreadyReversed).toEqual([join(projectRoot, SHARED_DEST)]); // B spent — reported, not attempted
     expect(rProject(SHARED_DEST)).toBe("C\n");
     expect(a.batchId).not.toBeNull();
+  });
+
+  test("gate round 4: re-running an explicit undo of a retired batch never resurrects its change", () => {
+    // X exists (x0) → A sets y → B sets x0 back. Undo B (disk y), undo A (disk x0): both retired `undone`. Disk
+    // now matches B's postHash again, so pre-fix an explicit retry of B re-applied B's backup (y) — a resurrected
+    // change that no bare `undo` could ever find again, since every batch still claimed `undone`.
+    const mk = (): Manifest => ({
+      schemaVersion: 1,
+      roles: [{ name: "architect", harness: "claude-code", files: [{ transform: "copy", source: "shared.md", destination: SHARED_DEST }] }],
+    });
+    wProject(SHARED_DEST, "x0\n");
+    wBlueprint("shared.md", "y\n");
+    const a = apply({ manifest: mk(), blueprintRoot, projectRoot, dataDir });
+    wBlueprint("shared.md", "x0\n");
+    const b = apply({ manifest: mk(), blueprintRoot, projectRoot, dataDir });
+
+    expect(undoBatch(projectRoot, dataDir, b.batchId!).reversed).toHaveLength(1);
+    expect(rProject(SHARED_DEST)).toBe("y\n");
+    expect(undoBatch(projectRoot, dataDir, a.batchId!).reversed).toHaveLength(1);
+    expect(rProject(SHARED_DEST)).toBe("x0\n");
+
+    const retry = undoBatch(projectRoot, dataDir, b.batchId!);
+    expect(retry.batchId).toBe(b.batchId);
+    expect(retry.reversed).toEqual([]);
+    expect(retry.superseded).toEqual([]);
+    expect(retry.failed).toEqual([]);
+    expect(retry.alreadyReversed).toEqual([join(projectRoot, SHARED_DEST)]);
+    expect(rProject(SHARED_DEST)).toBe("x0\n"); // pre-fix: "y\n"
+    expect(readBatchStatuses(dataDir).get(b.batchId!)?.status).toBe("undone");
   });
 });
 

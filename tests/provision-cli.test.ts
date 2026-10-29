@@ -342,6 +342,24 @@ describe("plan / apply / status / undo", () => {
     expect(existsSync(p("RUN_STATE.md"))).toBe(true);
   });
 
+  test("an explicit undo whose entry is superseded by a later batch FAILS the run — a refusal is not a reversal", () => {
+    const first = cli(["apply"]);
+    if (first.json.verb !== "apply") throw new Error("unreachable");
+    writeProject("AGENTS.md", "hand-edited between applies\n");
+    const second = cli(["apply"]); // batch B rewrites AGENTS.md, superseding batch A's entry for it
+    if (second.json.verb !== "apply") throw new Error("unreachable");
+    expect(second.json.batchId).not.toBe(first.json.batchId);
+    const bAgents = readProject("AGENTS.md");
+
+    const undone = cli(["undo", "--batch", first.json.batchId!]);
+    expect(undone.exitCode).not.toBe(0);
+    if (undone.json.verb !== "undo") throw new Error("unreachable");
+    expect(undone.json.ok).toBe(false);
+    expect(undone.json.superseded.map((s) => s.path).some((path) => path.endsWith("AGENTS.md"))).toBe(true);
+    expect(undone.json.errors.some((e) => e.includes("AGENTS.md"))).toBe(true);
+    expect(readProject("AGENTS.md")).toBe(bAgents); // the newer batch's state survives
+  });
+
   test("undo with nothing to undo is an honest no-op, not a failure", () => {
     const undone = cli(["undo"]);
     expect(undone.exitCode).toBe(0);

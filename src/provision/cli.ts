@@ -1002,10 +1002,14 @@ function runUndo(rawProject: string, args: ParsedArgs, dataDir: string): CliRun 
     ? `no provision batch '${args.batch}' for project '${projectRoot}' — check the batch id reported by the \`apply\` that created it`
     : null;
 
+  // A superseded entry was REFUSED, not reversed, so the run the operator named is still (partly) live — that is
+  // not a completed undo, and automation gating on the exit code must not read it as one (gate round 5). Only a
+  // bare `undo` can never hit this: its newest-live selection has no later live writer by construction.
+  const refusals = [...outcome.superseded, ...outcome.failed];
   const json: CliJson = {
     verb: "undo",
-    ok: outcome.failed.length === 0 && unmatchedError === null,
-    errors: unmatchedError ? [unmatchedError] : outcome.failed.map((f) => `${f.path}: ${f.error}`),
+    ok: refusals.length === 0 && unmatchedError === null,
+    errors: unmatchedError ? [unmatchedError] : refusals.map((f) => `${f.path}: ${f.error}`),
     project: projectRoot,
     batchId: outcome.batchId,
     reversed: outcome.reversed,
@@ -1022,8 +1026,8 @@ function undoText(outcome: UndoOutcome): string {
     `Batch ${outcome.batchId}: reversed ${outcome.reversed.length}, already reversed ${outcome.alreadyReversed.length}.`,
     ...outcome.reversed.map((path) => `  reversed  ${path}`),
   ];
-  // Superseded entries are a REFUSAL, not a failure: a later batch owns those files now, so reversing this
-  // one would clobber it. Named individually because the operator's next move differs per file.
+  // Superseded entries are a REFUSAL (a later batch owns those files now, so reversing this one would clobber
+  // it) — labelled apart from FAILED because the operator's next move differs, though both fail the run.
   for (const { path, error } of outcome.superseded) lines.push(`  SUPERSEDED ${path}: ${error}`);
   for (const { path, error } of outcome.failed) lines.push(`  FAILED    ${path}: ${error}`);
   return lines.join("\n");

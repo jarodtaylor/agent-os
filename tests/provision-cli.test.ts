@@ -1115,6 +1115,10 @@ describe("gate round 2 finding 4 — an aborted init withdraws the run file it c
     expect(refused.exitCode).toBe(1);
     // The scaffold DID run (it precedes registration), so this is the withdrawal, not an absence of work.
     expect(existsSync(join(fresh, RUN_STATE_FILENAME))).toBe(false);
+    // Gate round 9: the just-installed blueprint is withdrawn too, so once the cause is fixed a PLAIN retry
+    // succeeds — before, it refused on "blueprint exists" and recovery needed `--force`.
+    expect(existsSync(join(fresh, "blueprint"))).toBe(false);
+    expect(runCli(["init", "--project", fresh], { cwd: projectRoot, dataDir }).exitCode).toBe(0);
   });
 
   test("an operator's PRE-EXISTING run file is never withdrawn by an abort", () => {

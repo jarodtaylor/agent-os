@@ -567,6 +567,8 @@ function runInit(rawProject: string, args: ParsedArgs, dataDir: string): CliRun 
   // Set once `scaffoldRunState` reports it CREATED the run file, so `abort` can withdraw exactly that file and
   // nothing else. Null whenever the run file predated this run or was never written.
   let scaffolded: { path: string; content: string } | null = null;
+  // Set once the staged seed is renamed into place on a project that had NO blueprint, so `abort` can withdraw it.
+  let installedFresh = false;
 
   const abort = (error: string): CliRun => {
     // Withdraw a run file THIS transaction created, before restoring the blueprint. Scoped hard: only when we
@@ -581,7 +583,18 @@ function runInit(rawProject: string, args: ParsedArgs, dataDir: string): CliRun 
         // Unreadable or already gone — leave it; the blueprint restore below is the load-bearing half.
       }
     }
-    if (!backup) return initFailure(args, error, projectRoot);
+    if (!backup) {
+      // FRESH init: there is no prior blueprint to restore, but the one THIS transaction installed must go too, or
+      // a plain retry refuses on "blueprint exists" and recovery needs `--force` (gate round 9). Safe to remove
+      // whole: it was installed moments ago in this same synchronous run, so no operator edit can be inside it.
+      if (!installedFresh) return initFailure(args, error, projectRoot);
+      try {
+        rmSync(blueprintRoot, { recursive: true, force: true });
+      } catch (err) {
+        return initFailure(args, `${error} — AND withdrawing the just-installed blueprint at '${blueprintRoot}' failed (${errorText(err)}): remove it by hand before re-running 'init'`, projectRoot);
+      }
+      return initFailure(args, `${error} — the just-installed blueprint was withdrawn; fix the cause and re-run 'init'`, projectRoot);
+    }
     const failure = restoreBlueprintBackup(blueprintRoot, backup);
     return initFailure(
       args,
@@ -598,6 +611,7 @@ function runInit(rawProject: string, args: ParsedArgs, dataDir: string): CliRun 
     discardStaging();
     return abort(`installing the seed blueprint at '${blueprintRoot}' failed: ${errorText(err)}`);
   }
+  installedFresh = !blueprintExists;
 
   const runState = scaffoldRunState(projectRoot, blueprintRoot);
   if (!runState.ok) return abort(runState.error);

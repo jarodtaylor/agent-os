@@ -18,8 +18,8 @@ import { canonicalProjectRoot, errorText } from "./internal";
 
 /** Canonicalize a project root before comparison. Apply canonicalizes at ingress so NEW entries store a canonical
  *  root, but comparisons canonicalize BOTH sides so a legacy un-normalized journal (or a caller passing a
- *  different spelling to lookup than to apply) still matches (gate round 4). Symlink-root aliases remain deferred
- *  (issue #51) — this is lexical, not a realpath. */
+ *  different spelling to lookup than to apply) still matches (gate round 4). This is lexical, not a realpath —
+ *  symlink-root aliases are folded upstream at the CLI ingress (`cli.ts`, issue #51.1). */
 const canonicalRoot = canonicalProjectRoot;
 
 /** One provision run: the journal entries sharing a `batchId`, kept OLDEST-FIRST (journal order), so a caller
@@ -242,10 +242,9 @@ function undoEntries(entries: readonly UndoEntry[], dataDir?: string): Omit<Undo
  *     targetPath]` key embedded the UNnormalized root spelling, so those aliases produced distinct keys and a
  *     later write could miss supersession → ABA clobber). The project scoping the old key added is redundant:
  *     `targetPath` is the absolute file identity, so two batches sharing it ARE writing one file and supersession
- *     is correct regardless of which project logically "owns" it. DEFERRED (issue #51.1, symlink residual): a root
- *     reached via a SYMLINK is a different string `posix.normalize` cannot fold, so two spellings (`/link/f` vs
- *     `/real/f`) still key apart; the durable fix is canonicalizing (realpath) the project root at the U6/registry
- *     ingress, out of scope for this pure journal reader.
+ *     is correct regardless of which project logically "owns" it. Symlink roots (issue #51.1): a root reached via
+ *     a SYMLINK is a different string `posix.normalize` cannot fold (`/link/f` vs `/real/f`), so this pure reader
+ *     relies on the CLI ingress (`cli.ts`) having realpath'd the root before apply journals it.
  *  Together these answer "is a LATER, different batch also a LIVE writer of this path?" without any byte compare.
  *
  *  FULLY-REVERSED BATCHES ARE NOT WRITERS (#50, extended by gate finding 3). A batch recorded `rolled-back` (its

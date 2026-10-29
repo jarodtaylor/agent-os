@@ -26,8 +26,8 @@ import { classify } from "../capture/secret-classify";
  * equality (gate round 4). `posix.normalize` collapses `.`/`..`/duplicate-slashes but KEEPS a trailing slash, so
  * it alone leaves `/p` and `/p/` distinct — we additionally drop a trailing slash (except the filesystem root
  * `/`). Result: `/p`, `/p/`, and `/p/x/..` all canonicalize to one string, so a batch applied under one spelling
- * is found by an undo under another. Lexical ONLY — a symlinked root is a different string this cannot fold, so
- * realpath canonicalization at the U6 registry ingress stays deferred (issue #51).
+ * is found by an undo under another. Lexical ONLY — a symlinked root is a different string this cannot fold; the
+ * realpath happens once at the CLI ingress (`cli.ts`, issue #51.1), so roots reaching here are already resolved.
  */
 export function canonicalProjectRoot(root: string): string {
   const normalized = posix.normalize(root);

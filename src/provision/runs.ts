@@ -87,8 +87,8 @@ export function readBatches(dataDir?: string): ProvisionBatch[] {
  * re-picking B and reporting a no-op forever.
  *
  * FAIL-SAFE: only an affirmative, well-formed, root-matching fully-reversed record excludes a batch — an UNKNOWN
- * state (a pre-U6 journal, a crash before the record landed, a partial rollback that left a file on disk, an undo
- * that only partly succeeded) stays eligible, reproducing exactly the pre-#50 selection. `undoBatch` with an
+ * state (a pre-U6 journal, a crash before the record landed, an undo that only partly succeeded) or a `partial`
+ * rollback that left a file on disk stays eligible, reproducing exactly the pre-#50 selection. `undoBatch` with an
  * explicit id still reaches ANY batch, fully-reversed ones included — as a non-mutating no-op (gate round 4).
  */
 export function newestBatchForProject(projectRoot: string, dataDir?: string): ProvisionBatch | null {
@@ -215,9 +215,9 @@ export function undoBatch(projectRoot: string, dataDir?: string, batchId?: strin
   //                    trace of it (gate round 2, finding 3). Only `apply` knew, so `apply` stamped it.
   // Anything unretired stays UNKNOWN: default-selectable and still superseding — the fail-safe side.
   //   - anything but an AFFIRMATIVE `clean` record. Retiring asserts the batch holds nothing live, and an
-  //     absent record cannot support that claim — `apply`'s abort path deliberately writes no status when a
-  //     survivor exists, and every status write is best-effort and can simply fail to land, so "no record"
-  //     is ordinary rather than adversarial (gate round 3). Unknown therefore refuses retirement, which is
+  //     absent record cannot support that claim — a pre-U6 journal or a crash leaves none, and every status
+  //     write is best-effort and can simply fail to land, so "no record" is ordinary rather than adversarial
+  //     (gate round 3). Unknown therefore refuses retirement, which is
   //     the opposite default from `isFullyReversed`'s "unknown stays eligible" — the two questions have
   //     opposite safe sides, and a single boolean answered this one with the wrong default.
   const cleanliness = batchCleanliness(batch.batchId, batch.projectRoot, readBatchStatuses(dataDir));

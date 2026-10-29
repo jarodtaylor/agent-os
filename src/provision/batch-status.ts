@@ -42,12 +42,17 @@ import { appendJsonlRecord, canonicalProjectRoot, readFileBounded } from "./inte
  *     superseded — reversible history the operator could not walk back through (gate finding 3).
  * `rolled-back` and `undone` are the same fact from two directions — this batch holds no live state — and every
  * consumer treats them identically (`isFullyReversed`); they stay distinct only so the record says WHICH path
- * emptied the batch. A PARTIAL reversal (a rollback `undo()` that itself failed, or an undo with any `failed` or
- * `superseded` entry) is deliberately NOT recorded: leaving it unknown keeps that batch the default undo target,
- * which is the only way the stranded file stays reachable by a plain `undo`. See `apply`'s abort path and
- * `undoBatch`.
+ * emptied the batch.
+ *   - `partial` — a mid-write fault aborted the run and its rollback did NOT reverse everything (a rollback
+ *     `undo()` that itself failed, and/or an applied-but-unjournaled survivor — `stranded` says which). It is NOT
+ *     fully reversed, so it stays the default undo target and keeps superseding, exactly like an unknown batch.
+ *     It is recorded rather than left unknown for the OTHER question (PR #61 review): with no record its
+ *     cleanliness was `unknown`, so even a recovery `undo` that reversed every entry could never retire it as
+ *     `undone` — bare `undo` re-selected the spent batch forever and older same-path batches stayed superseded.
+ * An undo with any `failed` or `superseded` entry still records nothing, leaving the batch's prior state in
+ * force. See `apply`'s abort path and `undoBatch`.
  */
-export const BatchTerminalState = z.enum(["committed", "rolled-back", "undone"]);
+export const BatchTerminalState = z.enum(["committed", "rolled-back", "partial", "undone"]);
 export type BatchTerminalState = z.infer<typeof BatchTerminalState>;
 
 /** One finished batch. Validated on read (KTD3) exactly like the undo journal — it is a file that can be torn
@@ -196,9 +201,9 @@ export function isFullyReversed(batchId: string, projectRoot: string, statuses: 
  *     nothing live, and we cannot assert that from an absent record.
  *
  * A boolean `hasStrandedWrite` answered the second question with the first question's default, so a missing
- * record read as "not stranded" and the batch was retired anyway. Both paths that produce a missing record are
- * ordinary, not adversarial: `apply`'s abort path deliberately writes NO status when a survivor exists, and
- * every status write is best-effort by design and can simply fail to land.
+ * record read as "not stranded" and the batch was retired anyway. A missing record is ordinary, not adversarial:
+ * a pre-U6 journal, a crash before the append, and every status write is best-effort by design and can simply
+ * fail to land. (`apply`'s abort path now records `partial` with the stranded flag rather than nothing.)
  */
 export type BatchCleanliness = "clean" | "stranded" | "unknown";
 

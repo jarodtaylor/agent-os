@@ -19,6 +19,7 @@ import { parse as parseToml } from "smol-toml";
 import { dirname, join, resolve } from "node:path";
 import { applyJson, applyText, restoreBlueprintBackup, RUN_STATE_FILENAME, runCli } from "../src/provision/cli";
 import { readKnownProjects } from "../src/provision/registry";
+import { journalPath } from "../src/configwrite/internal";
 
 // Every fixture lives under a temp root; `dataDir` is injected so no test can touch the real data dir.
 // macOS resolves `/var` → `/private/var`, and the CLI realpaths the project root at ingress (issue #51.1),
@@ -261,6 +262,22 @@ describe("plan / apply / status / undo", () => {
     expect(existsSync(p("AGENTS.md"))).toBe(false); // read-only: status never recreates it
   });
 
+  test("an unreadable undo journal fails status/plan with a typed refusal, never a crash past --json", () => {
+    // PR #61: the shared journal reader THROWS on an unreadable file. A directory at the journal path makes the
+    // read fail deterministically (EISDIR), without depending on uid-sensitive permission bits.
+    cli(["apply"]);
+    const journal = journalPath(dataDir);
+    rmSync(journal);
+    mkdirSync(journal);
+
+    for (const verb of ["status", "plan"] as const) {
+      const run = cli([verb, "--json"]);
+      expect(run.exitCode).not.toBe(0);
+      expect(run.json.ok).toBe(false);
+      expect(run.json.errors.join("\n")).toContain("cannot be read");
+    }
+  });
+
   test("after apply → undo, the absent surfaces are NOT drift — an undone batch provisioned nothing live", () => {
     cli(["apply"]);
     expect(cli(["undo"]).exitCode).toBe(0);
@@ -307,6 +324,45 @@ describe("plan / apply / status / undo", () => {
     if (drifted.json.verb !== "status") throw new Error("unreachable");
     expect(drifted.json.drifted).toBe(0);
     expect(readProject(".claude/agents/notes.md")).toBe("the project edited its own scaffold\n");
+  });
+
+  test("plan/status refuse a blueprint apply's preflight would refuse — a dry run never advertises unappliable changes", () => {
+    // PR #61: survey ran only render + diff, so these blueprints planned as exit-0 changes that apply then
+    // refused before writing. Each case adds one invalid shape to the fixture's otherwise-valid manifest.
+    const base = readProject("blueprint/manifest.json");
+    const cases: Array<{ files: Array<Record<string, string>>; harness: string; expect: string }> = [
+      {
+        harness: "claude-code",
+        files: [
+          { transform: "copy", source: "roles/reviewer/agent.md", destination: ".claude/agents/dup.md" },
+          { transform: "copy", source: "roles/reviewer/agent.md", destination: ".claude/agents/dup.md" },
+        ],
+        expect: "non-mergeable writers",
+      },
+      {
+        harness: "cursor",
+        files: [{ transform: "copy", source: "roles/reviewer/agent.md", destination: ".cursor/mcp.json" }],
+        expect: "cannot target merge surface",
+      },
+      {
+        harness: "claude-code",
+        files: [{ transform: "copy", source: "roles/reviewer/agent.md", destination: "notes.md" }],
+        expect: "does not resolve to a known",
+      },
+    ];
+    for (const c of cases) {
+      const manifest = JSON.parse(base);
+      manifest.roles.push({ name: "invalid", harness: c.harness, files: c.files });
+      writeProject("blueprint/manifest.json", JSON.stringify(manifest));
+
+      for (const verb of ["plan", "status", "apply"] as const) {
+        const run = cli([verb, "--json"]);
+        expect(run.exitCode).not.toBe(0);
+        expect(run.json.ok).toBe(false);
+        expect(run.json.errors.join("\n")).toContain(c.expect);
+      }
+    }
+    expect(existsSync(p("AGENTS.md"))).toBe(false); // apply refused before writing anything
   });
 
   test("apply is a true no-op on the second run (R8/AE3 through the CLI)", () => {

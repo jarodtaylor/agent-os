@@ -423,8 +423,9 @@ describe("provision apply — error regimes", () => {
     // …and the DURABLE record must not claim otherwise. The status file is the only account of this batch that
     // outlives the process, so recording "rolled-back" here would assert the batch left nothing while
     // `.cursor/agents/reviewer.md` is demonstrably still on disk. An unjournaled survivor is live state exactly
-    // like a failed rollback, so the batch stays UNKNOWN — hence still default-selectable, the fail-safe side.
-    expect(readBatchStatuses(dataDir).has(outcome.batchId!)).toBe(false);
+    // like a failed rollback, so the batch records `partial` with the stranded flag (PR #61) — never fully
+    // reversed, hence still default-selectable, and stranded, hence never retirable by a later undo.
+    expect(readBatchStatuses(dataDir).get(outcome.batchId!)).toMatchObject({ status: "partial", stranded: true });
     expect(newestBatchForProject(projectRoot, dataDir)?.batchId).toBe(outcome.batchId!);
   });
 
@@ -615,6 +616,62 @@ describe("provision apply — error regimes", () => {
     expect(outcome.rollbackFailures![0]!.path).toBe(join(projectRoot, "AGENTS.md"));
     expect(outcome.applied).toEqual([]); // AGENTS.md has an undoId ⇒ dropped from applied; rollbackFailures carries it
     expect(existsProject("AGENTS.md")).toBe(true); // reversal failed ⇒ still on disk, honestly reported
+  });
+
+  test("PR #61: a partial rollback is RECORDED, so a recovery undo retires it and history walks back to the older batch", () => {
+    // Pre-fix a failed rollback recorded nothing, so its cleanliness stayed `unknown`: a recovery undo that
+    // reversed everything could never mark it `undone`, bare undo re-selected it forever, and A stayed unreachable.
+    wBlueprint("first.md", "# A\n");
+    const a = apply({
+      manifest: { schemaVersion: 1, roles: [{ name: "executor", harness: "codex", files: [{ transform: "copy", source: "first.md", destination: "AGENTS.md" }] }] },
+      blueprintRoot,
+      projectRoot,
+      dataDir,
+    });
+    expect(rProject("AGENTS.md")).toBe("# A\n");
+
+    wBlueprint("first.md", "# B\n");
+    wBlueprint("second.md", "never lands\n");
+    const flaky: ProvisionEngine = {
+      mergeConfig: (t, p, o) => mergeConfig(t, p, o),
+      writeTextFile: (t, c, o) => {
+        if (t.endsWith(".cursor/agents/reviewer.md")) {
+          appendFileSync(join(projectRoot, "AGENTS.md"), "external drift\n"); // B's rollback of AGENTS.md will refuse
+          throw new Error("genuine mid-write fault");
+        }
+        return writeTextFile(t, c, o);
+      },
+    };
+    const b = apply(
+      {
+        manifest: {
+          schemaVersion: 1,
+          roles: [
+            { name: "executor", harness: "codex", files: [{ transform: "copy", source: "first.md", destination: "AGENTS.md" }] },
+            { name: "reviewer", harness: "cursor", files: [{ transform: "copy", source: "second.md", destination: ".cursor/agents/reviewer.md" }] },
+          ],
+        },
+        blueprintRoot,
+        projectRoot,
+        dataDir,
+      },
+      { engine: flaky },
+    );
+    expect(b.rollbackFailures).toHaveLength(1);
+    expect(readBatchStatuses(dataDir).get(b.batchId!)?.status).toBe("partial");
+
+    // The operator clears the drift, so B's entry matches its postHash again; a bare undo recovers B…
+    wProject("AGENTS.md", "# B\n");
+    const recovery = undoBatch(projectRoot, dataDir);
+    expect(recovery.batchId).toBe(b.batchId);
+    expect(recovery.reversed).toEqual([join(projectRoot, "AGENTS.md")]);
+    expect(rProject("AGENTS.md")).toBe("# A\n");
+    expect(readBatchStatuses(dataDir).get(b.batchId!)?.status).toBe("undone");
+
+    // …and the next bare undo walks back to A instead of re-selecting the spent B.
+    const older = undoBatch(projectRoot, dataDir);
+    expect(older.batchId).toBe(a.batchId);
+    expect(existsProject("AGENTS.md")).toBe(false);
   });
 
   test("a render error (missing source) aborts in preflight: failed, zero writes, no journal entries", () => {
@@ -1743,9 +1800,9 @@ describe("gate round 3 — an unknown survivor state never permits retirement", 
     },
   });
 
-  test("a mixed batch that later ABORTS is not retired — the abort path writes no status at all", () => {
-    // apply's abort path deliberately records NOTHING when a survivor exists (round 1's own fix), so this
-    // batch has no record by construction. Pre-fix, `undo` read that absence as "not stranded" and retired it.
+  test("a mixed batch that later ABORTS is not retired — the abort path records it `partial` and stranded", () => {
+    // apply's abort path records `partial` with the stranded flag when a survivor exists (PR #61; before that it
+    // recorded nothing). Either way `undo` must not retire it: the survivor has no entry for `undo` to reverse.
     wBlueprint("a.md", "alpha\n");
     wBlueprint("b.md", "stranded survivor\n");
     wBlueprint("c.md", "never lands\n");
@@ -1768,11 +1825,11 @@ describe("gate round 3 — an unknown survivor state never permits retirement", 
 
     expect(outcome.rolledBack).toBe(true);
     expect(existsProject(".cursor/agents/qa.md")).toBe(true); // the survivor is live
-    expect(readBatchStatuses(dataDir).has(outcome.batchId!)).toBe(false); // …and there is NO record
+    expect(readBatchStatuses(dataDir).get(outcome.batchId!)).toMatchObject({ status: "partial", stranded: true });
 
     undoBatch(projectRoot, dataDir);
-    // Unknown survivor state must refuse retirement, so the batch stays reachable and its trace survives.
-    expect(readBatchStatuses(dataDir).get(outcome.batchId!)?.status).toBeUndefined();
+    // A stranded survivor must refuse retirement, so the batch stays reachable and its trace survives.
+    expect(readBatchStatuses(dataDir).get(outcome.batchId!)?.status).toBe("partial");
     expect(newestBatchForProject(projectRoot, dataDir)?.batchId).toBe(outcome.batchId!);
   });
 

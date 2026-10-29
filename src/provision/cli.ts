@@ -35,7 +35,7 @@ import { randomUUID } from "node:crypto";
 import { basename, dirname, join, posix, resolve } from "node:path";
 import type { Manifest, Runtime } from "../contract/index";
 import { resolveDataDir } from "../paths";
-import { apply, type ApplyOutcome } from "./apply";
+import { apply, preflightRows, type ApplyOutcome } from "./apply";
 import { loadBlueprint } from "./blueprint";
 import { diffRendered, type BlockedReason, type DiffError, type DiffRow } from "./diff";
 import { containsSecret, errorText, hasMachineAbsolutePath, isNotFound, readDestinationBounded, readFileBounded } from "./internal";
@@ -358,7 +358,7 @@ function gate(blueprintRoot: string): Gated {
 type Surveyed = { ok: true; rows: DiffRow[] } | { ok: false; error: string };
 
 /**
- * Render + diff a project's blueprint against its live surfaces — the read half of the pipeline, shared by
+ * Render + diff + preflight a project's blueprint against its live surfaces — the read half of the pipeline, shared by
  * `plan` and `status` so the two can never disagree about what "changed" means. `apply` does NOT call this:
  * it re-renders internally from the current blueprint (KTD7), which is what closes the stale-plan TOCTOU. So
  * this is a second CALL SITE of the same pure core, not a second implementation of it.
@@ -375,13 +375,27 @@ function survey(projectRoot: string, blueprintRoot: string, dataDir: string): Su
   if (!rendered.ok) return { ok: false, error: renderErrorText(rendered.error) };
 
   // The journal tells a deleted provisioned surface (drift) from one nothing ever wrote (not drift) — see `diff.ts`.
-  const live = liveProvisionedTargets(projectRoot, dataDir);
+  // An unreadable journal THROWS out of the shared reader; refuse here with the typed failure rather than crash
+  // past `--json`'s payload, and never fall back to "no history", which would hide missing-file drift (PR #61).
+  let live: Set<string>;
+  try {
+    live = liveProvisionedTargets(projectRoot, dataDir);
+  } catch {
+    return { ok: false, error: "the provisioning history (undo journal) exists but cannot be read — refusing to report drift without it" };
+  }
   const diffed = diffRendered(
     rendered.files,
     (destination) => readDestinationBounded(posix.join(projectRoot, destination)),
     (destination) => live.has(posix.join(projectRoot, destination)),
   );
   if (!diffed.ok) return { ok: false, error: diffErrorText(diffed.error) };
+  // apply's own non-mutating preflight (resolution, shape guard, secret scan, compatibility, duplicate writers):
+  // without it a dry run would advertise changes for a blueprint `apply` refuses before writing (PR #61). The
+  // failure texts are already content-free — paths, surface labels, and fixed strings only.
+  const { failures } = preflightRows(projectRoot, rendered.files, diffed.rows);
+  if (failures.length > 0) {
+    return { ok: false, error: `apply would refuse this blueprint: ${failures.map(({ path, error }) => `${path}: ${error}`).join("; ")}` };
+  }
   return { ok: true, rows: diffed.rows };
 }
 

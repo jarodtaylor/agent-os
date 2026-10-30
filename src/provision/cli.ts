@@ -36,7 +36,6 @@ import { basename, dirname, join, posix, resolve } from "node:path";
 import type { Runtime } from "../contract/index";
 import { resolveDataDir } from "../paths";
 import { apply, type ApplyOutcome } from "./apply";
-import { loadBlueprint } from "./blueprint";
 import type { DiffRow } from "./diff";
 import { containsSecret, errorText, hasMachineAbsolutePath, isNotFound, readFileBounded } from "./internal";
 import { isLogicalProjectName, lookupProject, registerProject } from "./registry";

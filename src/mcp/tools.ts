@@ -31,11 +31,32 @@ export interface McpDeps {
   dataDir?: string;
 }
 
+/** Best-effort harness label for the access log: the connected MCP client's declared name. */
+export function harnessLabelOf(server: McpServer): string {
+  return server.server.getClientVersion()?.name ?? "unknown";
+}
+
+/**
+ * The access-log write every tool makes, best-effort (decision #4): by the time it runs the tool's answer is
+ * already computed (or its write durably committed), so a log failure is reported to the process log and never
+ * turned into a failed tool call.
+ */
+export function bestEffortAccessLogger(server: McpServer, deps: McpDeps) {
+  const now = deps.now ?? Date.now;
+  return async (tool: string, project: string, sessionId: string | undefined, ts: number = now()): Promise<void> => {
+    try {
+      await deps.repo.logAccess({ sessionId, harness: harnessLabelOf(server), tool, project, ts });
+    } catch (err) {
+      console.error(`[agent-os] logAccess failed (${tool}):`, err);
+    }
+  };
+}
+
 /** Register the three Brain tools on a (per-session) `McpServer`. */
 export function registerBrainTools(server: McpServer, deps: McpDeps): void {
   const now = deps.now ?? Date.now;
-  // Best-effort harness label for the access log: the connected MCP client's declared name.
-  const harnessLabel = (): string => server.server.getClientVersion()?.name ?? "unknown";
+  const harnessLabel = (): string => harnessLabelOf(server);
+  const logAccess = bestEffortAccessLogger(server, deps);
 
   server.registerTool(
     "read_work_state",
@@ -75,13 +96,8 @@ export function registerBrainTools(server: McpServer, deps: McpDeps): void {
       // reaches the repo — never trust TS types at a write boundary.
       const handoff = Handoff.parse({ project, sessionId, machineId: deps.machineId, source, cursor, ts });
       await deps.repo.writeHandoff(handoff);
-      // logAccess is best-effort (decision #4): the handoff is already durably committed, so a log failure
-      // must not report the successful write back to the agent as a failure.
-      try {
-        await deps.repo.logAccess({ sessionId, harness: harnessLabel(), tool: "write_handoff", project, ts });
-      } catch (err) {
-        console.error("[agent-os] logAccess failed (write_handoff):", err);
-      }
+      // The handoff is already durably committed, so the (best-effort) log must not report it back as a failure.
+      await logAccess("write_handoff", project, sessionId, ts);
       return { content: [{ type: "text", text: JSON.stringify({ ok: true, project, sessionId }) }] };
     },
   );
@@ -102,18 +118,8 @@ export function registerBrainTools(server: McpServer, deps: McpDeps): void {
       // One page is hard-bounded to DEFAULT_TRAIL_CAP (U2-R6) and lossless across same-ts boundaries.
       const crumbs = await deps.repo.queryBreadcrumbs(project, since_ts, since_id, DEFAULT_TRAIL_CAP);
       const redacted = crumbs.map((b) => redact(b, Breadcrumb));
-      // logAccess is best-effort (decision #4) — never gate the already-computed page on the audit write.
-      try {
-        await deps.repo.logAccess({
-          sessionId: extra.sessionId,
-          harness: harnessLabel(),
-          tool: "query_breadcrumbs",
-          project,
-          ts: now(),
-        });
-      } catch (err) {
-        console.error("[agent-os] logAccess failed (query_breadcrumbs):", err);
-      }
+      // Never gate the already-computed page on the (best-effort) audit write.
+      await logAccess("query_breadcrumbs", project, extra.sessionId);
       return { content: [{ type: "text", text: JSON.stringify(redacted) }] };
     },
   );

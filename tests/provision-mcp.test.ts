@@ -1,10 +1,12 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { propose } from "../src/mcp/provision-tools";
+import { dbPath } from "../src/paths";
+import * as surveyModule from "../src/provision/survey";
 import { runCli } from "../src/provision/cli";
 import { createRoutes } from "../src/server/routes";
 import { generateToken, securityGate } from "../src/server/security";
@@ -126,18 +128,23 @@ describe("propose — refusals (KTD11, KTD5)", () => {
 describe("the tools over a real MCP session", () => {
   let opened: OpenedDb;
   let repo: Repo;
+  let failLogAccess: boolean;
   let server: ReturnType<typeof Bun.serve>;
   let port: number;
   let token: string;
   const clients: Client[] = [];
 
   beforeEach(() => {
-    opened = openDb(join(root, "t.db"));
+    // The store lives where production puts it — inside dataDir — so the AE5 snapshot below sees the same tree.
+    mkdirSync(dataDir, { recursive: true });
+    opened = openDb(dbPath(dataDir));
     repo = createRepo(opened.db);
+    failLogAccess = false;
+    const routed: Repo = { ...repo, logAccess: (entry) => (failLogAccess ? Promise.reject(new Error("store down")) : repo.logAccess(entry)) };
     token = generateToken();
     server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("boot", { status: 503 }) });
     port = server.port!;
-    const app = createRoutes({ repo, gate: securityGate({ token, port }), machineId: "test-machine", now: () => 1000, dataDir });
+    const app = createRoutes({ repo: routed, gate: securityGate({ token, port }), machineId: "test-machine", now: () => 1000, dataDir });
     server.reload({ fetch: app.fetch });
   });
 
@@ -174,12 +181,13 @@ describe("the tools over a real MCP session", () => {
     for (const n of names) expect(n).not.toMatch(/apply|undo|init|write.*provision|provision.*write/i);
   });
 
-  test("AE5: calling both tools leaves every project surface and the data dir byte-unchanged", async () => {
+  test("AE5: calling both tools leaves every project surface and provisioning file byte-unchanged; the only write is the audit row", async () => {
     cli(["init"]);
     cli(["apply"]);
     writeProject("CLAUDE.md", "drifted\n");
+    const notStore = (snap: Map<string, string>) => new Map([...snap].filter(([path]) => !path.startsWith(dbPath(dataDir))));
     const beforeProject = snapshot(projectRoot);
-    const beforeData = snapshot(dataDir);
+    const beforeData = notStore(snapshot(dataDir));
 
     const client = await connect();
     for (const name of ["provision_plan", "provision_status"]) {
@@ -189,7 +197,41 @@ describe("the tools over a real MCP session", () => {
     }
 
     expect(snapshot(projectRoot)).toEqual(beforeProject);
-    expect(snapshot(dataDir)).toEqual(beforeData);
+    expect(notStore(snapshot(dataDir))).toEqual(beforeData);
+    expect(opened.db.select({ tool: accessLog.tool }).from(accessLog).all()).toEqual([{ tool: "provision_plan" }, { tool: "provision_status" }]);
+  });
+
+  test("a failed audit write never fails the tool call", async () => {
+    cli(["init"]);
+    failLogAccess = true;
+    const errorLog = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const client = await connect();
+      const result = await client.callTool({ name: "provision_plan", arguments: { project: PROJECT } });
+      expect(result.isError).toBeFalsy();
+      expect(JSON.parse(textOf(result)).ok).toBe(true);
+    } finally {
+      errorLog.mockRestore();
+    }
+  });
+
+  test("an unexpected throw reaches the agent as a fixed refusal, never raw error text, and is still audited", async () => {
+    cli(["init"]);
+    const throwing = spyOn(surveyModule, "survey").mockImplementation(() => {
+      throw new Error("leaked-detail-canary");
+    });
+    const errorLog = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const client = await connect();
+      const result = await client.callTool({ name: "provision_status", arguments: { project: PROJECT } });
+      expect(result.isError).toBe(true);
+      expect(JSON.parse(textOf(result))).toMatchObject({ ok: false, refusal: "internal-error" });
+      expect(textOf(result)).not.toContain("leaked-detail-canary");
+      expect(opened.db.select({ tool: accessLog.tool }).from(accessLog).all()).toEqual([{ tool: "provision_status" }]);
+    } finally {
+      throwing.mockRestore();
+      errorLog.mockRestore();
+    }
   });
 
   test("a refusal comes back as a tool error with the typed payload, and every call is access-logged", async () => {

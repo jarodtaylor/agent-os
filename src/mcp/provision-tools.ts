@@ -21,24 +21,26 @@ import { resolveDataDir } from "../paths";
 import type { DiffRow } from "../provision/diff";
 import { lookupProject } from "../provision/registry";
 import { planView, statusView, survey } from "../provision/survey";
-import type { McpDeps } from "./tools";
+import { bestEffortAccessLogger, type McpDeps } from "./tools";
 
 type ProvisionTool = "provision_status" | "provision_plan";
 
 /** Register the two propose-only provisioning tools on a (per-session) `McpServer`. */
 export function registerProvisionTools(server: McpServer, deps: McpDeps): void {
-  const now = deps.now ?? Date.now;
-  const harnessLabel = (): string => server.server.getClientVersion()?.name ?? "unknown";
+  const logAccess = bestEffortAccessLogger(server, deps);
 
   const run = async (tool: ProvisionTool, project: string, sessionId: string | undefined) => {
-    const payload = propose(tool, project, deps.dataDir);
-    // Best-effort audit (decision #4): the answer is already computed, so a log failure must not turn it into
-    // a failed tool call.
+    let payload: ProvisionPayload;
     try {
-      await deps.repo.logAccess({ sessionId, harness: harnessLabel(), tool, project, ts: now() });
+      payload = propose(tool, project, deps.dataDir);
     } catch (err) {
-      console.error(`[agent-os] logAccess failed (${tool}):`, err);
+      // The read pipeline is built to refuse rather than throw, but an unexpected throw must not reach the agent
+      // as raw error text (the SDK would forward err.message, which no layer has vetted as content-free) or skip
+      // the audit row. The real error goes to the process log only.
+      console.error(`[agent-os] ${tool} failed:`, err);
+      payload = { ok: false, tool, project, refusal: "internal-error", error: "internal error — see the agent-os process log" };
     }
+    await logAccess(tool, project, sessionId);
     return { content: [{ type: "text" as const, text: JSON.stringify(payload) }], isError: !payload.ok };
   };
 
@@ -47,8 +49,8 @@ export function registerProvisionTools(server: McpServer, deps: McpDeps): void {
     {
       title: "Provision status",
       description:
-        "Drift report for a registered project: which provisioned surfaces no longer match the blueprint. Read-only — paths and actions only, never file contents. The operator reconciles with the provision CLI.",
-      inputSchema: { project: z.string().min(1) },
+        "Drift report for a registered project: which provisioned surfaces no longer match the blueprint. Read-only — paths and actions only, never file contents. The operator reconciles with the provision CLI. Each row is { role, harness, destination, action, drift }; `drifted` counts drifted rows, 0 means in sync. One unreadable destination makes the whole report refuse.",
+      inputSchema: { project: z.string().min(1).max(128) },
     },
     async ({ project }, extra) => run("provision_status", project, extra.sessionId),
   );
@@ -58,8 +60,8 @@ export function registerProvisionTools(server: McpServer, deps: McpDeps): void {
     {
       title: "Provision plan",
       description:
-        "Advisory plan for a registered project: what applying its blueprint would change. Read-only — paths and actions only, never file contents. Only the operator can apply.",
-      inputSchema: { project: z.string().min(1) },
+        "Advisory plan for a registered project: what applying its blueprint would change. Read-only — paths and actions only, never file contents. Only the operator can apply. Each row is { role, harness, destination, action, drift }; `changes` counts rows that would change, 0 means nothing to apply.",
+      inputSchema: { project: z.string().min(1).max(128) },
     },
     async ({ project }, extra) => run("provision_plan", project, extra.sessionId),
   );
@@ -67,7 +69,7 @@ export function registerProvisionTools(server: McpServer, deps: McpDeps): void {
 
 export type ProvisionPayload =
   | { ok: true; tool: ProvisionTool; project: string; projectRoot: string; rows: DiffRow[]; changes?: number; drifted?: number }
-  | { ok: false; tool: ProvisionTool; project: string; refusal: "unknown-project" | "survey-refused"; error: string };
+  | { ok: false; tool: ProvisionTool; project: string; refusal: "unknown-project" | "survey-refused" | "internal-error"; error: string };
 
 /** The tool body, pure of MCP plumbing so the suite can drive it directly. */
 export function propose(tool: ProvisionTool, project: string, dataDir?: string): ProvisionPayload {

@@ -46,6 +46,9 @@ A project's versioned single source of truth for its agent setup: a plain direct
 ### Role bundle
 One manifest entry mapping a role (Architect, Executor, QA, …) to its target harness, an optional model pin, and its files with transform types. Metadata is machine-readable but descriptive only — it drives file operations, never workflow sequencing.
 
+### Known-projects registry
+The one bridge from a logical project name to its Blueprint and provisioned locations on disk. A caller-supplied project name is never path-joined directly; it is only ever resolved through this registry, so an unregistered name is a refusal, not a filesystem access. Registration is explicit (it happens once, when a project is set up) and a name already bound to a different location is a conflict, never a silent rebind.
+
 ### Front-gate
 The shared validation every provisioning verb (plan, apply, status, propose) runs first: it checks the blueprint's manifest is a compatible version, then scans the blueprint's contents for secrets and machine-specific absolute paths, returning one typed result the verb branches on.
 
@@ -65,3 +68,6 @@ Divergence between a blueprint's rendered output and the live provisioned surfac
 
 ### Provision run
 One `apply` batch: the ordered set of writes it made, recorded durably so `undo` can reverse the most recent run as a unit. Only the latest run is undoable; older runs' entries are refused as superseded.
+
+### Batch terminal state
+How a Provision run ended — committed, or rolled back after a mid-write fault reversed everything it had written. The undo journal records what a batch wrote but never how it ended, so terminal state is tracked separately, durably, alongside it. Unknown is the fail-safe default: a batch with no recorded terminal state is treated as eligible for undo, exactly as if this tracking didn't exist — only an affirmative rolled-back record ever removes a batch from consideration. "Rolled back" is therefore recorded only when the batch provably left *nothing* live on disk, which rules out two cases, not one: a partial rollback (some of the reversal itself failed) and a write that landed but could not be journaled (never reversible in the first place, so reversal never attempted it). Both leave a file on disk, so both stay unknown and the batch stays reachable for a later undo attempt.

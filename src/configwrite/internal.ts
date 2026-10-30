@@ -39,3 +39,21 @@ export function journalPath(dataDir: string): string {
 export function hashContent(data: string | Buffer): string {
   return createHash("sha256").update(data).digest("hex");
 }
+
+/**
+ * "This throw means the path does not exist" — the ONE definition for `configwrite`, used by `engine.ts`'s
+ * write-time presence check and `undo.ts`'s restore-time one.
+ *
+ * GUARDED on purpose: reading `.code` off an unconstrained caught value throws a TypeError when that value is
+ * null or a primitive — from inside a `catch`, which is the one place code must not throw. Node's fs layer only
+ * ever throws Error objects, so the guard is unreachable through `lstat` today; it exists so the two presence
+ * checks are genuinely one discipline rather than one guarded and one not. The unguarded form was the house
+ * style the #51.3 bug grew out of (an `existsSync` that laundered EACCES into "already reversed"), so the
+ * pattern is worth stating once, correctly.
+ *
+ * `provision/internal.ts` exports the same predicate. That duplication is deliberate and cannot be removed:
+ * `provision` depends on `configwrite`, never the reverse, so sharing one copy would invert the module DAG.
+ */
+export function isNotFoundError(e: unknown): boolean {
+  return typeof e === "object" && e !== null && (e as { code?: unknown }).code === "ENOENT";
+}

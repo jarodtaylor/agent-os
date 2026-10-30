@@ -27,6 +27,11 @@ export type DiffError =
       role: string;
       harness: Runtime;
       destination: string;
+      /** WHY the destination could not be read, when the reader knew (`unreadable-destination` only). Carried
+       *  because the three causes have completely different remedies — remove the symlink, shrink the file,
+       *  fix the permissions — and "unreadable-destination" alone sends the operator hunting. Still a fixed
+       *  enum, never a message derived from bytes, so KTD5 is untouched. */
+      blockedBy?: BlockedReason;
     }
   | {
       problem: "malformed-destination" | "invalid-config-destination" | "malformed-rendered";
@@ -38,20 +43,32 @@ export type DiffError =
 
 export type DiffResult = { ok: true; rows: DiffRow[] } | { ok: false; error: DiffError };
 
+/** Why a present destination could not be safely read. A fixed enum, not a message: `symlink` (provisioning
+ *  never reads or writes through an indirection it did not describe), `oversized` (past the shared 16 MiB read
+ *  bound), `non-regular` (a directory/FIFO/device), `unreadable` (permissions or any other lookup failure). */
+export type BlockedReason = "symlink" | "oversized" | "non-regular" | "unreadable";
+
 /** A live destination read retains raw bytes for KTD8's opaque-text identity check. */
 export type DestinationRead =
   | { ok: true; content: string; bytes: Uint8Array }
-  | { ok: false; reason: "absent" | "blocked" };
+  | { ok: false; reason: "absent" | "blocked"; blockedBy?: BlockedReason };
 
 export type DestinationReader = (destination: string) => DestinationRead;
 
-/** Diff in manifest/render order, returning the first content-free read/parse failure. */
-export function diffRendered(files: readonly RenderedFile[], readDestination: DestinationReader): DiffResult {
+/** Diff in manifest/render order, returning the first content-free read/parse failure. `wasProvisioned` answers
+ *  whether a still-live provision batch wrote a destination (see `row`); it is injected so this module stays pure,
+ *  and defaults to "never", which keeps every `create` row non-drift for a caller with no journal to consult. */
+export function diffRendered(
+  files: readonly RenderedFile[],
+  readDestination: DestinationReader,
+  wasProvisioned: (destination: string) => boolean = () => false,
+): DiffResult {
   const rows: DiffRow[] = [];
+  const row = (file: RenderedFile, action: PlanAction): DiffRow => diffRow(file, action, wasProvisioned);
 
   for (const file of files) {
     const live = readDestination(file.destination);
-    if (!live.ok && live.reason === "blocked") return failure(file, "unreadable-destination");
+    if (!live.ok && live.reason === "blocked") return failure(file, "unreadable-destination", live.blockedBy);
 
     if (!live.ok) {
       if (file.transform === "scaffold" && file.content === null) return failure(file, "stale-scaffold");
@@ -108,16 +125,42 @@ function parseLiveConfig(
   return parsed.ok ? parsed : configFailure(file, "malformed-destination");
 }
 
-function row(file: RenderedFile, action: PlanAction): DiffRow {
-  const drift = file.transform !== "scaffold" && action !== "noop" && file.driftTracked;
+/**
+ * DRIFT MEANS DIVERGENCE FROM PROVISIONED STATE, NOT "WOULD WRITE". A row drifts in exactly two cases:
+ *   - `overwrite`/`merge` — a live surface EXISTS and disagrees with the blueprint.
+ *   - `create` of a surface a still-LIVE batch provisioned (`wasProvisioned`) — it was written and has since gone
+ *     missing. Deleting a tracked `AGENTS.md` after an apply is divergence just as much as editing it is; without
+ *     this case `status` reported "every tracked surface matches" over a hole.
+ * An absent destination that nothing ever provisioned — a freshly-`init`ed project, or one whose every writer was
+ * undone or rolled back — is still NOT drift: otherwise `status` on the most common first run reports every
+ * tracked row drifted and a non-zero `drifted` count before a single byte was written, a false positive that lies
+ * to a machine consumer reading `--json`, not just to the table. The journal is what tells the two absences
+ * apart, so the caller supplies it as a predicate and this module stays pure.
+ *
+ * The narrowing lives HERE rather than in the CLI's rendering because `DiffRow.drift` is the one shared field
+ * every consumer reads — `plan`, `status`, and the U7 `provision_status` MCP tool all build their output from
+ * it. Fixing only the CLI's summary would leave the field itself lying to the next consumer.
+ *
+ * `scaffold` rows never drift (KTD8): a scaffold row is create-once, so `diffRendered` short-circuits it to
+ * `scaffold-skip` (present) or emits `create` (absent) — it can never reach `overwrite`/`merge`, and the `create`
+ * case excludes it explicitly, since a deleted scaffold is the operator's to remove and `apply` simply re-seeds it.
+ */
+function diffRow(file: RenderedFile, action: PlanAction, wasProvisioned: (destination: string) => boolean): DiffRow {
+  const diverged = action === "overwrite" || action === "merge";
+  const vanished = action === "create" && file.transform !== "scaffold" && wasProvisioned(file.destination);
+  const drift = file.driftTracked && (diverged || vanished);
   return { role: file.role, harness: file.harness, destination: file.destination, action, drift };
 }
 
 function failure(
   file: RenderedFile,
   problem: "unreadable-destination" | "stale-scaffold",
+  blockedBy?: BlockedReason,
 ): { ok: false; error: DiffError } {
-  return { ok: false, error: { problem, role: file.role, harness: file.harness, destination: file.destination } };
+  const error: DiffError = { problem, role: file.role, harness: file.harness, destination: file.destination };
+  // Omitted entirely rather than set to `undefined` when the reader did not say, so a consumer never has to
+  // distinguish "absent" from "explicitly unknown".
+  return { ok: false, error: blockedBy ? { ...error, blockedBy } : error };
 }
 
 function configFailure(

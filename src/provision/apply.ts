@@ -16,9 +16,14 @@
  *   - a genuine throw mid-write → the mutation NEVER landed → roll back this batch's earlier writes LIFO →
  *     abort, report the file in `failed`.
  *   - an AppliedButUnjournaledError → the write LANDED with no undoId → warn, annotate the applied write as
- *     un-undoable (`applied[].unjournaled`), and CONTINUE. The rollback list is built INCREMENTALLY (each undoId
- *     pushed as its write returns), so a later error's rollback can never reverse an applied-but-unjournaled
- *     write and the report stays honest.
+ *     un-undoable (`applied[].unjournaled`), POISON that path for the rest of the batch (issue #51.2), and
+ *     CONTINUE. The rollback list is built INCREMENTALLY (each undoId pushed as its write returns), so a later
+ *     error's rollback can never reverse an applied-but-unjournaled write and the report stays honest.
+ *
+ * Every batch that JOURNALS a write records its TERMINAL STATE (`batch-status.ts`, issue #50) so a later `undo`
+ * can tell a committed run from a rolled-back one — the journal alone cannot say how a batch ended. A run that
+ * journals nothing (a preflight refusal, or an all-noop re-apply) records no state and reports a NULL `batchId`:
+ * there is no batch, so there is nothing to have a terminal state and nothing to advertise (gate finding 4).
  *
  * LIFO reversal is universal (brief pt 3): a blueprint CAN write the same destination twice (two config-merge
  * rows into one shared `.cursor/mcp.json`), forming a postHash chain X→v1→v2. `undo` is hash-checked, so v2
@@ -37,8 +42,9 @@ import {
   type MergeResult,
 } from "../configwrite/index";
 import type { Manifest, Runtime } from "../contract/index";
-import { diffRendered, type DestinationRead, type DestinationReader, type DiffError, type PlanAction } from "./diff";
-import { canonicalProjectRoot, containsSecret, errorText, isNotFound, readFileBounded } from "./internal";
+import { recordBatchStatus } from "./batch-status";
+import { diffRendered, type BlockedReason, type DestinationReader, type DiffError, type DiffRow, type PlanAction } from "./diff";
+import { canonicalProjectRoot, containsSecret, errorText, isNotFound, readDestinationBounded, readFileBounded } from "./internal";
 import { isPlainRecord, parseConfigValue, renderBlueprint, type RenderError, type RenderedFile, type RenderIo } from "./render";
 import {
   checkTargetCompatibility,
@@ -50,9 +56,11 @@ import {
 } from "./targets";
 
 /** Same 16 MiB ceiling as the shared read-boundary discipline in `src/provision/internal.ts` (and
- *  `src/scan/internal.ts` / `src/codex-credential.ts`): the two live-destination readers below stat-before-read
- *  and refuse an oversized file rather than OOM on a pathological one. Kept local — a cross-module export just
- *  for this constant would over-couple the modules. */
+ *  `src/scan/internal.ts` / `src/codex-credential.ts`): the compatibility inspector below stat-before-reads and
+ *  refuses an oversized file rather than OOM on a pathological one. Kept local — a cross-module export just for
+ *  this constant would over-couple the modules. (The live-DESTINATION read is no longer here: it moved to
+ *  `internal.ts#readDestinationBounded`, shared with the CLI so `plan`/`status` and `apply` cannot disagree
+ *  about a symlinked or oversized target.) */
 const MAX_APPLY_READ_BYTES = 16 * 1024 * 1024; // 16 MiB, matching src/provision/internal.ts
 
 /** The two engine primitives apply dispatches to, injectable so a test can wrap them to exercise the
@@ -108,7 +116,21 @@ export interface AppliedWrite {
  * reversed); on the success path `rolledBack` is false and both annotations are absent/empty.
  */
 export interface ApplyOutcome {
-  batchId: string;
+  /**
+   * The batch id, non-null IFF this run JOURNALED at least one reversible write — i.e. iff a batch exists that
+   * `undo --batch <id>` can find. `null` for a preflight failure, for an all-noop run (the routine repeat apply),
+   * and for a run whose every write was applied-but-unjournaled.
+   *
+   * WHY NULLABLE (gate finding 4): the id used to be minted unconditionally, so an all-noop apply advertised a
+   * batch with NO journal entries and told the operator to reverse it. Naming that id explicitly failed to find
+   * it, while the bare `undo` the message invited selected and reversed an OLDER real batch instead — a harmless
+   * repeated apply leading straight to an unintended rollback. An id that cannot be undone is not a value worth
+   * reporting, so the illegal state is now unrepresentable rather than documented.
+   *
+   * An ABORTED apply that DID journal keeps its id: those entries exist, and when a rollback itself failed the
+   * files are still on disk, so the id is the operator's only handle on them.
+   */
+  batchId: string | null;
   applied: AppliedWrite[];
   noops: string[];
   failed: Array<{ path: string; error: string }>;
@@ -141,19 +163,166 @@ export function apply(input: ApplyInput, options: ApplyOptions = {}): ApplyOutco
   };
   const rendered = renderBlueprint(manifest, renderIo);
   if (!rendered.ok) {
-    return preflightFailure(batchId, projectRoot, rendered.error.destination, renderErrorText(rendered.error));
+    return preflightFailure(projectRoot, rendered.error.destination, renderErrorText(rendered.error));
   }
   const files = rendered.files;
 
   // ── Preflight, phase 2: diff (pure) over the SAME files — rows co-index with files (brief pt 7) ──
-  const readDestinationBytes: DestinationReader = (destination) => readDestination(posix.join(projectRoot, destination));
+  const readDestinationBytes: DestinationReader = (destination) => readDestinationBounded(posix.join(projectRoot, destination));
   const diffed = diffRendered(files, readDestinationBytes);
   if (!diffed.ok) {
-    return preflightFailure(batchId, projectRoot, diffed.error.destination, diffErrorText(diffed.error));
+    return preflightFailure(projectRoot, diffed.error.destination, diffErrorText(diffed.error));
   }
   const rows = diffed.rows;
 
-  // ── Preflight, phase 3: resolve every row; for non-skip rows run compat → shape-guard → effective-scan ──
+  // ── Preflight, phase 3: blueprint validity + live-target compatibility (shared with `plan`/`status`) ──
+  const { targets, failures: preflightFailures } = preflightRows(projectRoot, files, rows);
+  if (preflightFailures.length > 0) {
+    // Null id for the same reason as `preflightFailure`: nothing was written, so no batch exists to reverse.
+    return { batchId: null, applied: [], noops: [], failed: preflightFailures, rolledBack: false };
+  }
+
+  // ── Write pass — nothing has been written until here; every target is proven compatible ──
+  const opts: MergeOptions = { dataDir, batchId, projectRoot };
+  const applied: AppliedWrite[] = [];
+  const noops: string[] = [];
+  // Built incrementally so a rollback can never touch an applied-but-unjournaled write (it has no undoId).
+  const rollback: Array<{ undoId: string; targetPath: string }> = [];
+  // Paths this batch wrote but could NOT journal — POISONED for the rest of the batch (issue #51.2, see the
+  // AppliedButUnjournaledError branch below for why a later write to one of these must never happen).
+  const poisoned = new Set<string>();
+
+  for (let i = 0; i < files.length; i++) {
+    const file = files[i]!;
+    const action = rows[i]!.action;
+    if (isSkip(action)) {
+      noops.push(posix.join(projectRoot, file.destination));
+      continue;
+    }
+    const target = targets[i]!; // preflight proved every write target resolves
+    const path = target.destination;
+
+    try {
+      // A path poisoned by an earlier applied-but-unjournaled write in THIS batch is refused as a genuine
+      // failure — thrown here, before any filesystem effect, so it routes through the abort+rollback branch
+      // below exactly like any other unwritable target. See that branch for the full rationale.
+      if (poisoned.has(path)) {
+        throw new Error(
+          `provision apply: refusing to write '${path}' — an earlier write to it in this batch APPLIED but could not be journaled, so this write's backup would capture that unjournaled state instead of the pre-batch bytes (a later undo would then falsely report the file fully reversed)`,
+        );
+      }
+      mkdirSync(dirname(path), { recursive: true }); // the engine writes into, but never creates, the parent dir
+      const res = writeOne(engine, file, path, opts);
+      if (res.noop) {
+        // The engine's own byte/semantic compare found nothing to change (e.g. a second same-patch row into an
+        // already-created file) — record it as a noop, not an applied write.
+        noops.push(path);
+        continue;
+      }
+      applied.push({ targetPath: path, action, created: res.created, undoId: res.undoId });
+      if (res.undoId) rollback.push({ undoId: res.undoId, targetPath: path });
+    } catch (err) {
+      if (err instanceof AppliedButUnjournaledError) {
+        // The write LANDED but its journal entry didn't record — un-undoable. Warn, annotate it, CONTINUE.
+        // `created` is derived from the error's OWN contract (backupPath===null means the write created the target).
+        //
+        // POISON THE PATH (issue #51.2). A LATER row in this same batch may legally write the SAME path — only
+        // config-merge can, since whole-file same-destination is refused by the duplicate-destination guard — and
+        // if it did, its byte-exact backup would capture THIS unjournaled mutation's result rather than the
+        // pre-batch bytes. A fresh process would then reverse only that later entry, restore the intermediate
+        // state, and report `reversed` — a claim of full reversal the batch cannot back. So the path is poisoned
+        // for the remainder of the batch and a later write to it aborts the run (the guard at the top of the write
+        // loop). ABORT rather than a per-file failure-and-continue, for three reasons: (1) apply's contract is
+        // ABORT-ALL — a row we refuse to write leaves a half-provisioned project, which is precisely the regime
+        // rollback exists for; (2) rollback stays MEANINGFUL — every OTHER journaled write in the batch is
+        // reversed, so the damage narrows to the single file already stuck on disk, which `applied[].unjournaled`
+        // names; (3) continuing would leave a shared config holding this unjournaled intermediate state with the
+        // later role's contribution silently missing — a worse end state, reported no more honestly. The refusal
+        // costs nothing in reversibility: the poisoned file is un-undoable EITHER way.
+        console.error(`[agent-os] provision apply: '${path}' applied but journaling failed (recover from backup if reverting):`, err);
+        poisoned.add(path);
+        applied.push({
+          targetPath: path,
+          action,
+          created: err.backupPath === null,
+          undoId: null,
+          unjournaled: { backupPath: err.backupPath, error: errorText(err) },
+        });
+        continue;
+      }
+      // Genuine failure: the mutation (or the mkdir before it) never landed. Roll this batch's earlier writes
+      // back LIFO and abort. `applied` becomes the un-undoable SURVIVORS only (`undoId === null`) — the reversed
+      // journaled writes are dropped, but any applied-but-unjournaled write stays, honestly, because it is still
+      // on disk. `rollbackFailures` names any target whose reversal itself failed (still on disk, not honest to
+      // drop) so `rolledBack: true` never overclaims.
+      const journaled = rollback.length > 0; // captured BEFORE the reversal — the entries survive it, in the journal
+      const rollbackFailures = rollbackLifo(rollback, dataDir);
+      // Durable terminal state (issue #50): `rolled-back` ONLY when this batch provably left NOTHING live on disk —
+      // then and only then may default `undo` skip it and reach the last committed run instead.
+      //
+      // TWO ways a batch still holds live state after an abort, and both must withhold `rolled-back`. The status
+      // file is the ONLY durable account of how a batch ended (`applied[].unjournaled` lives in the in-process
+      // return value and a console line, both gone at exit), so a `rolled-back` record written over live state
+      // is the one artifact that survives asserting the opposite of what the disk holds:
+      //   1. a rollback `undo()` that itself FAILED — its target is still applied; and
+      //   2. an applied-but-UNJOURNALED write — it never had an undo id, so it was never in the rollback list
+      //      and reversal never even attempted it. Same disk state as (1), reached by a different route, and
+      //      the original condition missed it because such a write is not a `rollbackFailure`.
+      // Such a batch records `partial` instead — NOT fully reversed, so it stays default-selectable and still
+      // superseding (the fail-safe direction this module commits to everywhere), but with an AFFIRMATIVE
+      // cleanliness: without a record a later recovery `undo` that reversed every entry could never retire it
+      // (unknown refuses retirement), so bare `undo` re-selected it forever (PR #61 review). The `stranded` flag
+      // keeps case (2) un-retirable, since its survivor has no entry for `undo` to reverse.
+      // A batch that journaled NOTHING records no state at all (gate finding 4): it has no entries for a
+      // terminal state to describe, so a row would be an orphan keyed to a batch `undo` can never find.
+      const stranded = applied.some((w) => w.unjournaled);
+      if (journaled) {
+        const fullyReversed = rollbackFailures.length === 0 && !stranded;
+        recordBatchStatus(dataDir, batchId, projectRoot, fullyReversed ? "rolled-back" : "partial", stranded);
+      }
+      const outcome: ApplyOutcome = {
+        batchId: journaled ? batchId : null,
+        applied: applied.filter((w) => w.undoId === null),
+        noops,
+        failed: [{ path, error: errorText(err) }],
+        rolledBack: true,
+      };
+      if (rollbackFailures.length > 0) outcome.rollbackFailures = rollbackFailures;
+      return outcome;
+    }
+  }
+
+  // The write pass completed. (Both this and the abort path record AFTER the outcome is settled, and
+  // best-effort — a status line that fails to land degrades selection to journal order, it never turns a
+  // successful apply into a failure.)
+  //
+  // ONLY when the pass JOURNALED something (gate finding 4). A run can complete having written nothing reversible
+  // in two ways: every row diffed to a noop — the routine repeat apply, since the fine-tune loop re-applies
+  // constantly — or every write was applied-but-unjournaled. Either way no journal entry carries this `batchId`,
+  // so `committed` would be an orphan row and the id would name a batch `undo` cannot find. Reporting it invited
+  // real harm: the operator was told "Batch <id> — reverse it with `undo`", and the bare `undo` that followed
+  // selected an OLDER real batch and reversed work they never meant to touch. `null` says what is true — nothing
+  // reversible happened — and the same rule gives preflight failures a null id (they journal nothing either).
+  const journaled = rollback.length > 0;
+  // Stamp the survivor fact NOW — this is the only moment anything knows about an applied-but-unjournaled
+  // write, since it left no journal entry for `undo` to find later.
+  if (journaled) recordBatchStatus(dataDir, batchId, projectRoot, "committed", applied.some((w) => w.unjournaled));
+  return { batchId: journaled ? batchId : null, applied, noops, failed: [], rolledBack: false };
+}
+
+
+/**
+ * Preflight, phase 3 — the NON-MUTATING validity checks over a rendered + diffed blueprint: resolve every row; for
+ * non-skip rows run compat → shape-guard → effective-scan; then the duplicate-destination guards. `apply` runs it
+ * before its write pass, and `plan`/`status` run the SAME function so a dry run can never advertise changes that
+ * `apply` would refuse (PR #61). `rows` must co-index with `files` (the diff of the same `RenderedFile[]`).
+ * `targets[i]` is the fully validated write target for a non-skip row, `null` for a skip row or a failed one.
+ */
+export function preflightRows(
+  projectRoot: string,
+  files: readonly RenderedFile[],
+  rows: readonly DiffRow[],
+): { targets: Array<ResolvedTarget | null>; failures: Array<{ path: string; error: string }> } {
   const inspection = realInspection();
   const targets: Array<ResolvedTarget | null> = new Array(files.length).fill(null);
   const preflightFailures: Array<{ path: string; error: string }> = [];
@@ -280,80 +449,7 @@ export function apply(input: ApplyInput, options: ApplyOptions = {}): ApplyOutco
       });
     }
   }
-  if (preflightFailures.length > 0) {
-    return { batchId, applied: [], noops: [], failed: preflightFailures, rolledBack: false };
-  }
-
-  // ── Write pass — nothing has been written until here; every target is proven compatible ──
-  const opts: MergeOptions = { dataDir, batchId, projectRoot };
-  const applied: AppliedWrite[] = [];
-  const noops: string[] = [];
-  // Built incrementally so a rollback can never touch an applied-but-unjournaled write (it has no undoId).
-  const rollback: Array<{ undoId: string; targetPath: string }> = [];
-
-  for (let i = 0; i < files.length; i++) {
-    const file = files[i]!;
-    const action = rows[i]!.action;
-    if (isSkip(action)) {
-      noops.push(posix.join(projectRoot, file.destination));
-      continue;
-    }
-    const target = targets[i]!; // preflight proved every write target resolves
-    const path = target.destination;
-
-    try {
-      mkdirSync(dirname(path), { recursive: true }); // the engine writes into, but never creates, the parent dir
-      const res = writeOne(engine, file, path, opts);
-      if (res.noop) {
-        // The engine's own byte/semantic compare found nothing to change (e.g. a second same-patch row into an
-        // already-created file) — record it as a noop, not an applied write.
-        noops.push(path);
-        continue;
-      }
-      applied.push({ targetPath: path, action, created: res.created, undoId: res.undoId });
-      if (res.undoId) rollback.push({ undoId: res.undoId, targetPath: path });
-    } catch (err) {
-      if (err instanceof AppliedButUnjournaledError) {
-        // The write LANDED but its journal entry didn't record — un-undoable. Warn, annotate it, CONTINUE.
-        // `created` is derived from the error's OWN contract (backupPath===null means the write created the target).
-        //
-        // DEFERRED recovery gap (gate round 3, issue #50/U6): if a LATER row in this same batch legally writes the
-        // SAME path (only config-merge can — whole-file same-dest is refused) and journals successfully, that later
-        // write's byte-exact backup captures THIS unjournaled mutation's result, not the pre-batch bytes. A fresh
-        // process then reverses only the later entry and reports it `reversed`, unaware the pre-batch state was never
-        // fully restored. Reachable only via the rare post-rename journal-failure window PLUS a same-path config-merge
-        // later in the batch. The durable fix (poison the path after an unjournaled write; refuse later same-path
-        // writes in the batch) rides with U6's write-path hardening; today the un-undoable write is at least surfaced
-        // via `applied[].unjournaled`.
-        console.error(`[agent-os] provision apply: '${path}' applied but journaling failed (recover from backup if reverting):`, err);
-        applied.push({
-          targetPath: path,
-          action,
-          created: err.backupPath === null,
-          undoId: null,
-          unjournaled: { backupPath: err.backupPath, error: errorText(err) },
-        });
-        continue;
-      }
-      // Genuine failure: the mutation (or the mkdir before it) never landed. Roll this batch's earlier writes
-      // back LIFO and abort. `applied` becomes the un-undoable SURVIVORS only (`undoId === null`) — the reversed
-      // journaled writes are dropped, but any applied-but-unjournaled write stays, honestly, because it is still
-      // on disk. `rollbackFailures` names any target whose reversal itself failed (still on disk, not honest to
-      // drop) so `rolledBack: true` never overclaims.
-      const rollbackFailures = rollbackLifo(rollback, dataDir);
-      const outcome: ApplyOutcome = {
-        batchId,
-        applied: applied.filter((w) => w.undoId === null),
-        noops,
-        failed: [{ path, error: errorText(err) }],
-        rolledBack: true,
-      };
-      if (rollbackFailures.length > 0) outcome.rollbackFailures = rollbackFailures;
-      return outcome;
-    }
-  }
-
-  return { batchId, applied, noops, failed: [], rolledBack: false };
+  return { targets, failures: preflightFailures };
 }
 
 /** One row that resolves to a shared destination. `patch` is present ONLY for a `config-merge` contributor,
@@ -443,21 +539,6 @@ function isProvisionHarness(harness: Runtime): harness is ProvisionHarness {
   return harness === "claude-code" || harness === "codex" || harness === "cursor";
 }
 
-/** Real byte-aware destination reader for the diff (KTD8 needs raw bytes for the text identity check). Mirrors
- *  the engine's lstat discipline: a symlink or non-regular node reads as `blocked`, never silently absent; an
- *  oversized file (past the shared 16 MiB read bound) is refused the same way, before it is read into memory. */
-function readDestination(absPath: string): DestinationRead {
-  try {
-    const stat = lstatSync(absPath);
-    if (stat.isSymbolicLink() || !stat.isFile()) return { ok: false, reason: "blocked" };
-    if (stat.size > MAX_APPLY_READ_BYTES) return { ok: false, reason: "blocked" };
-    const bytes = readFileSync(absPath);
-    return { ok: true, content: bytes.toString("utf8"), bytes };
-  } catch (err) {
-    return { ok: false, reason: isNotFound(err) ? "absent" : "blocked" };
-  }
-}
-
 /** Real path inspection for `checkTargetCompatibility`. `stat` maps the live node to a `TargetPathState`;
  *  a non-ENOENT lookup failure throws so the compatibility check classifies it as inspection-failed. */
 function realInspection(): TargetInspection {
@@ -488,9 +569,11 @@ function realInspection(): TargetInspection {
   };
 }
 
-function preflightFailure(batchId: string, projectRoot: string, destination: string, error: string): ApplyOutcome {
+/** A refusal BEFORE the write pass: nothing was written and nothing journaled, so there is no batch — hence the
+ *  null id (the `batchId` contract above). The minted uuid is simply discarded; it never reached a journal entry. */
+function preflightFailure(projectRoot: string, destination: string, error: string): ApplyOutcome {
   return {
-    batchId,
+    batchId: null,
     applied: [],
     noops: [],
     failed: [{ path: posix.join(projectRoot, destination), error }],
@@ -503,6 +586,19 @@ function renderErrorText(error: RenderError): string {
   return "source" in error ? `render ${error.problem} for ${where} from '${error.source}'` : `render ${error.problem} for ${where}`;
 }
 
+/** Operator-facing remedy per blocked cause — fixed strings selected by a fixed enum, never derived from bytes. */
+const BLOCKED_REMEDY: Readonly<Record<BlockedReason, string>> = {
+  symlink: "it is a symlink — provisioning never reads or writes through an indirection; replace it with a real file",
+  oversized: "it is larger than the 16 MiB read bound",
+  "non-regular": "it is not a regular file (a directory, FIFO, or device)",
+  unreadable: "it could not be read (check its permissions)",
+};
+
 function diffErrorText(error: DiffError): string {
-  return `diff ${error.problem} for role '${error.role}' (${error.harness}) → '${error.destination}'`;
+  const where = `diff ${error.problem} for role '${error.role}' (${error.harness}) → '${error.destination}'`;
+  // Name the CAUSE when the reader knew it. A blocked destination aborts the whole run, so "unreadable-destination"
+  // alone leaves the operator with no idea that removing one symlink unblocks every other surface. Fixed strings
+  // selected by a fixed enum — no bytes, so the no-content-echo rule is untouched.
+  const remedy = "blockedBy" in error && error.blockedBy ? ` — ${BLOCKED_REMEDY[error.blockedBy]}` : "";
+  return `${where}${remedy}`;
 }

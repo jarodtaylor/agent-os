@@ -38,7 +38,7 @@ import { randomUUID } from "node:crypto";
 import { basename, extname, join } from "node:path";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
-import { backupsDir, hashContent, resolveDataDir, type ConfigFormat } from "./internal";
+import { backupsDir, hashContent, isNotFoundError, resolveDataDir, type ConfigFormat } from "./internal";
 import { recordUndo, type UndoEntry } from "./undo";
 
 export interface MergeOptions {
@@ -657,7 +657,7 @@ function statTarget(path: string): "present" | "absent" {
   try {
     stat = lstatSync(path);
   } catch (err) {
-    if ((err as { code?: string }).code === "ENOENT") return "absent";
+    if (isNotFoundError(err)) return "absent";
     throw err; // EACCES / ENOTDIR / EIO / … — indeterminate, never silently "absent"
   }
   if (stat.isSymbolicLink()) {

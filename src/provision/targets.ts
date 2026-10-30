@@ -293,7 +293,8 @@ function isValidMergeConfig(format: ConfigFormat, content: string): boolean {
         parsed = parseToml(content);
         break;
       case "yaml":
-        parsed = parseYaml(content);
+        // logLevel "error": no warning (with its source line) reaches stderr; real errors still throw — see render.ts.
+        parsed = parseYaml(content, { logLevel: "error" });
         break;
       case "text":
         return false; // text has no merge semantics

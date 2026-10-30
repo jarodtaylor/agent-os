@@ -239,7 +239,9 @@ export function parseConfigValue(format: Exclude<ConfigFormat, "text">, content:
       case "toml":
         return { ok: true, value: parseToml(content) };
       case "yaml":
-        return { ok: true, value: parseYaml(content) };
+        // logLevel "error": the yaml parser otherwise prints WARNINGS (e.g. an unresolved tag) with the offending source line to
+        // stderr — a read path a live file's secret escapes on (decision #45). "error" still throws on real parse errors; "silent" would not.
+        return { ok: true, value: parseYaml(content, { logLevel: "error" }) };
       default:
         return assertNever(format);
     }

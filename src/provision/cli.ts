@@ -41,7 +41,7 @@ import type { DiffRow } from "./diff";
 import { containsSecret, errorText, hasMachineAbsolutePath, isNotFound, readFileBounded } from "./internal";
 import { isLogicalProjectName, lookupProject, registerProject } from "./registry";
 import { undoBatch, type UndoOutcome } from "./runs";
-import { gate, survey } from "./survey";
+import { gate, planView, statusView, survey } from "./survey";
 
 /** The blueprint directory inside a project. A fixed convention (R1: "a plain directory plus a manifest,
  *  living in the project repo") so `init`, the CLI verbs, and the registry can never disagree about where a
@@ -776,8 +776,7 @@ function runPlan(rawProject: string, args: ParsedArgs, dataDir: string): CliRun 
     return render(args, { verb: "plan", ok: false, errors: [surveyed.error], project: projectRoot, rows: [], changes: 0 }, surveyed.error, EXIT_FAILED);
   }
 
-  const rows = surveyed.rows;
-  const changes = rows.filter((row) => row.action !== "noop" && row.action !== "scaffold-skip").length;
+  const { rows, changes } = planView(surveyed.rows);
   const json: CliJson = { verb: "plan", ok: true, errors: [], project: projectRoot, rows, changes };
   const summary = changes === 0 ? "Nothing to change." : `${changes} of ${rows.length} rows would change.`;
   return render(args, json, `${rowTable(rows, { drift: false })}\n\n${summary}`, EXIT_OK);
@@ -800,8 +799,7 @@ function runStatus(rawProject: string, args: ParsedArgs, dataDir: string): CliRu
     return render(args, { verb: "status", ok: false, errors: [surveyed.error], project: projectRoot, rows: [], drifted: 0 }, surveyed.error, EXIT_FAILED);
   }
 
-  const rows = surveyed.rows.filter((row) => row.action !== "scaffold-skip");
-  const drifted = rows.filter((row) => row.drift).length;
+  const { rows, drifted } = statusView(surveyed.rows);
   const json: CliJson = { verb: "status", ok: true, errors: [], project: projectRoot, rows, drifted };
   const summary =
     drifted === 0

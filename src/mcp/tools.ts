@@ -26,6 +26,9 @@ export interface McpDeps {
   machineId: string;
   /** Injectable clock (tests). Defaults to `Date.now`. */
   now?: () => number;
+  /** The agent-os data dir, where the known-projects registry and undo journal live — the provisioning tools'
+   *  project resolver (KTD11). Defaults to the resolved data dir; tests inject a scratch one. */
+  dataDir?: string;
 }
 
 /** Register the three Brain tools on a (per-session) `McpServer`. */

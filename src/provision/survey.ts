@@ -88,6 +88,19 @@ export function survey(projectRoot: string, blueprintRoot: string, dataDir: stri
   return { ok: true, rows: diffed.rows };
 }
 
+/** The `plan` view of a survey: every row, and how many would change. Shared by the CLI and the MCP tool so an
+ *  operator and an agent count "changes" the same way. */
+export function planView(rows: DiffRow[]): { rows: DiffRow[]; changes: number } {
+  return { rows, changes: rows.filter((row) => row.action !== "noop" && row.action !== "scaffold-skip").length };
+}
+
+/** The `status` (drift) view: scaffold rows are excluded outright (KTD8: a create-once surface cannot drift by
+ *  definition, so listing it would train the reader to ignore the report). */
+export function statusView(rows: DiffRow[]): { rows: DiffRow[]; drifted: number } {
+  const tracked = rows.filter((row) => row.action !== "scaffold-skip");
+  return { rows: tracked, drifted: tracked.filter((row) => row.drift).length };
+}
+
 function assertNever(value: never): never {
   throw new Error(`provision survey: unhandled variant ${String(value)}`);
 }

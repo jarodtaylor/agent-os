@@ -9,17 +9,17 @@
  *
  * Every `launchctl` call goes through an injectable runner so tests never touch the real launchd domain.
  */
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { listUndo, undo, writeTextFile, type MergeResult } from "../configwrite/index";
+import { AppliedButUnjournaledError, listUndo, undo, writeTextFile, type MergeResult } from "../configwrite/index";
 import { ensureDataDir, resolveDataDir, resolvePort, SUPERVISOR_ENV } from "../paths";
 import { acquireSingleInstanceLock } from "../server/single-instance";
 import { defaultRepoRoot, errorText, type UninstallOutcome } from "./shared";
 
 export const LAUNCHD_LABEL = "com.agent-os.server";
 
-/** Runs `launchctl <args>` and reports its exit code + stderr. Injected by tests. */
+/** Runs `launchctl <args>` and reports its exit code + stderr. */
 export type Launchctl = (args: string[]) => { code: number; stderr: string };
 
 const realLaunchctl: Launchctl = (args) => {
@@ -36,7 +36,7 @@ export interface LaunchdOptions {
   dataDir?: string;
   /** Port baked into the agent's environment. Defaults to `resolvePort()` — the same port the other installers dial. */
   port?: number;
-  /** Absolute bun binary. launchd's PATH is minimal, so the plist must name it. Defaults to the bun on PATH. */
+  /** Absolute bun binary. launchd's PATH is minimal, so the plist must name it. */
   bunPath?: string;
   /** `launchctl` runner. Defaults to the real binary. */
   launchctl?: Launchctl;
@@ -83,16 +83,43 @@ export function renderPlist(v: { repoRoot: string; dataDir: string; port: number
   });
 }
 
-/** Whether the agent is currently loaded in the user's GUI domain. */
-export function isLoaded(opts: LaunchdOptions = {}): boolean {
-  const { launchctl, uid } = resolve(opts);
-  return launchctl(["print", serviceTarget(uid)]).code === 0;
+const loadedIn = ({ launchctl, uid }: { launchctl: Launchctl; uid: number }): boolean =>
+  launchctl(["print", serviceTarget(uid)]).code === 0;
+
+/** Whether the plist is installed and the agent is currently loaded in the user's GUI domain. */
+export function launchdStatus(opts: LaunchdOptions = {}): { installed: boolean; loaded: boolean } {
+  const r = resolve(opts);
+  return { installed: existsSync(plistPath(r.home)), loaded: loadedIn(r) };
 }
 
 export interface LaunchdInstallResult {
   plist: MergeResult;
   /** true when this call (re)bootstrapped the agent; false when it was already loaded with identical bytes. */
   bootstrapped: boolean;
+}
+
+/**
+ * Publish the plist through the engine. If the write lands but its undo entry doesn't (`AppliedButUnjournaledError`),
+ * nothing could later reverse it and RunAtLoad would start this failed install at the next login — so revert it here
+ * (restore the backup, or delete a plist we created), only while it still holds the bytes we wrote.
+ */
+function publishPlist(r: ReturnType<typeof resolve>): MergeResult {
+  const path = plistPath(r.home);
+  const content = renderPlist(r);
+  try {
+    return writeTextFile(path, content, { dataDir: r.dataDir });
+  } catch (err) {
+    if (!(err instanceof AppliedButUnjournaledError)) throw err;
+    let outcome = "plist reverted";
+    try {
+      if (readFileSync(path, "utf8") !== content) outcome = "plist changed since our write; left in place";
+      else if (err.backupPath) copyFileSync(err.backupPath, path);
+      else rmSync(path, { force: true });
+    } catch (revertErr) {
+      outcome = `plist NOT reverted: ${errorText(revertErr)}`;
+    }
+    throw new Error(`launchd: ${err.message} (${outcome})`, { cause: err });
+  }
 }
 
 /**
@@ -108,7 +135,7 @@ export function installLaunchd(opts: LaunchdOptions = {}): LaunchdInstallResult 
   mkdirSync(join(r.dataDir, "logs"), { recursive: true, mode: 0o700 });
   mkdirSync(join(r.home, "Library", "LaunchAgents"), { recursive: true });
 
-  const loaded = isLoaded(r);
+  const loaded = loadedIn(r);
   // An unsupervised server already holding the data dir's lock would make every launchd-spawned child exit at
   // boot, and KeepAlive would respawn it forever — a silent crash loop. Probe the lock (and release it at once)
   // unless our own agent is the holder.
@@ -120,21 +147,27 @@ export function installLaunchd(opts: LaunchdOptions = {}): LaunchdInstallResult 
     }
   }
 
-  const plist = writeTextFile(plistPath(r.home), renderPlist(r), { dataDir: r.dataDir });
+  const plist = publishPlist(r);
   if (plist.noop && loaded) return { plist, bootstrapped: false };
 
   const bootstrap = () => r.launchctl(["bootstrap", `gui/${r.uid}`, plistPath(r.home)]);
   if (loaded) r.launchctl(["bootout", serviceTarget(r.uid)]);
   const boot = bootstrap();
   if (boot.code !== 0) {
-    // Best-effort throughout — never mask the bootstrap failure we're reporting. Roll back the plist this call
-    // wrote; if we stopped a running agent to reload it, start the restored definition again rather than leave
-    // the server down.
+    // Roll back the plist this call wrote; if we stopped a running agent to reload it, start the restored definition
+    // again rather than leave the server down. Each step is guarded on its own and any failure is appended to the
+    // error, so a server left down is never silent — and the original bootstrap failure is never masked.
+    const notes: string[] = [];
     try {
       if (plist.undoId) undo(plist.undoId, r.dataDir);
-      if (loaded) bootstrap();
-    } catch {}
-    throw new Error(`launchd: bootstrap failed (exit ${boot.code}): ${boot.stderr}`);
+    } catch (err) {
+      notes.push(`plist rollback failed: ${errorText(err)}`);
+    }
+    if (loaded) {
+      const again = bootstrap();
+      if (again.code !== 0) notes.push(`previous agent NOT restarted (exit ${again.code}): ${again.stderr}`);
+    }
+    throw new Error(`launchd: bootstrap failed (exit ${boot.code}): ${boot.stderr}${notes.length > 0 ? ` — ${notes.join("; ")}` : ""}`);
   }
   return { plist, bootstrapped: true };
 }
@@ -142,14 +175,14 @@ export function installLaunchd(opts: LaunchdOptions = {}): LaunchdInstallResult 
 /**
  * Stop the agent and reverse the plist by replaying its undo journal newest-first (backup-restore), stopping at the
  * write that created it. Cross-process by design: it reads the on-disk journal, so it works days after install.
- * Per-step isolation: a refused restore (the plist was hand-edited) is reported in `failed`, never thrown.
+ * A refused restore (the plist was hand-edited) is reported in `failed`, never thrown.
  */
 export function uninstallLaunchd(opts: LaunchdOptions = {}): UninstallOutcome {
   const r = resolve(opts);
   const path = plistPath(r.home);
   const outcome: UninstallOutcome = { removed: [], failed: [], warnings: [] };
 
-  if (isLoaded(r)) {
+  if (loadedIn(r)) {
     const out = r.launchctl(["bootout", serviceTarget(r.uid)]);
     if (out.code !== 0) outcome.failed.push({ path: serviceTarget(r.uid), error: `bootout exit ${out.code}: ${out.stderr}` });
   }
@@ -180,8 +213,8 @@ if (import.meta.main) {
       process.exit(1);
     }
   } else if (cmd === "status") {
-    const home = homedir();
-    console.log(`[agent-os] plist ${existsSync(plistPath(home)) ? "installed" : "absent"}; agent ${isLoaded() ? "loaded" : "not loaded"}`);
+    const { installed, loaded } = launchdStatus();
+    console.log(`[agent-os] plist ${installed ? "installed" : "absent"}; agent ${loaded ? "loaded" : "not loaded"}`);
   } else {
     console.error("usage: bun run supervise <install|uninstall|status>");
     process.exit(2);

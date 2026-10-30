@@ -149,6 +149,32 @@ describe("installLaunchd", () => {
     expect(lc.isLoaded()).toBe(true);
   });
 
+  test("a failed reload whose restart also fails says the previous agent was not restarted", () => {
+    const lc = fakeLaunchctl();
+    installLaunchd(opts(lc.run));
+    const failing: Launchctl = (args) => (args[0] === "bootstrap" ? { code: 5, stderr: "Bootstrap failed" } : lc.run(args));
+    expect(() => installLaunchd(opts(failing, { port: 4400 }))).toThrow(/previous agent NOT restarted \(exit 5\)/);
+  });
+
+  test("a plist whose undo entry could not be journaled is reverted, so it cannot start at the next login", () => {
+    mkdirSync(join(dataDir, "undo-journal.jsonl"), { recursive: true }); // a directory where the journal file goes → append fails
+    const lc = fakeLaunchctl();
+    expect(() => installLaunchd(opts(lc.run))).toThrow(/plist reverted/);
+    expect(existsSync(plistPath(home))).toBe(false);
+    expect(lc.verbs()).toEqual([]);
+  });
+
+  test("a reinstall of an already-loaded agent skips the lock probe (its own server holds the lock)", () => {
+    const lc = fakeLaunchctl();
+    installLaunchd(opts(lc.run));
+    const release = acquireSingleInstanceLock(dataDir); // stands in for the supervised server
+    try {
+      expect(installLaunchd(opts(lc.run, { port: 4400 })).bootstrapped).toBe(true);
+    } finally {
+      release();
+    }
+  });
+
   test("refuses while an unsupervised server holds the data dir's lock, writing nothing", () => {
     mkdirSync(dataDir, { recursive: true });
     const release = acquireSingleInstanceLock(dataDir);

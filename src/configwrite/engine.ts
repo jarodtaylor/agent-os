@@ -585,7 +585,8 @@ function parseConfig(format: ConfigFormat, text: string, path: string): unknown 
       case "toml":
         return parseToml(text);
       case "yaml":
-        return parseYaml(text);
+        // logLevel "error": no warning (with its source line) reaches stderr; real errors still throw — see provision/render.ts.
+        return parseYaml(text, { logLevel: "error" });
       case "text":
         return text; // opaque whole-file: no structured parse — the decoded content passes through as-is (identity, never throws)
       default:

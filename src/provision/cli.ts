@@ -33,15 +33,14 @@
 import { closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, rmdirSync, statSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { basename, dirname, join, posix, resolve } from "node:path";
-import type { Manifest, Runtime } from "../contract/index";
+import type { Runtime } from "../contract/index";
 import { resolveDataDir } from "../paths";
-import { apply, preflightRows, type ApplyOutcome } from "./apply";
-import { loadBlueprint } from "./blueprint";
-import { diffRendered, type BlockedReason, type DiffError, type DiffRow } from "./diff";
-import { containsSecret, errorText, hasMachineAbsolutePath, isNotFound, readDestinationBounded, readFileBounded } from "./internal";
-import { renderBlueprint, type RenderError, type RenderIo } from "./render";
+import { apply, type ApplyOutcome } from "./apply";
+import type { DiffRow } from "./diff";
+import { containsSecret, errorText, hasMachineAbsolutePath, isNotFound, readFileBounded } from "./internal";
 import { isLogicalProjectName, lookupProject, registerProject } from "./registry";
-import { liveProvisionedTargets, undoBatch, type UndoOutcome } from "./runs";
+import { undoBatch, type UndoOutcome } from "./runs";
+import { gate, planView, statusView, survey } from "./survey";
 
 /** The blueprint directory inside a project. A fixed convention (R1: "a plain directory plus a manifest,
  *  living in the project repo") so `init`, the CLI verbs, and the registry can never disagree about where a
@@ -322,106 +321,6 @@ function canonicalize(raw: string, created = false): RootResolution {
 }
 
 const blueprintRootFor = (projectRoot: string): string => join(projectRoot, BLUEPRINT_DIRNAME);
-
-// ─────────────────────────────────────────────────────────────────────────────
-// The shared front-gate + render/diff core (KTD5) — plan and status both run it
-// ─────────────────────────────────────────────────────────────────────────────
-
-type Gated = { ok: true; manifest: Manifest } | { ok: false; error: string };
-
-/**
- * The KTD5 front-gate, translated from the loader's typed result into ONE operator-facing message per failure
- * mode. Every verb that reads a blueprint runs this — `status` included, which is the case the rule exists
- * for: a drift report that materialized a secret-bearing blueprint would be a read path a secret escapes on.
- * `undo` deliberately does NOT gate: it reverses journal entries and reads no blueprint, and gating it would
- * make a blueprint that later grew a secret impossible to un-apply.
- */
-function gate(blueprintRoot: string): Gated {
-  const load = loadBlueprint(blueprintRoot);
-  switch (load.kind) {
-    case "loaded":
-      return { ok: true, manifest: load.manifest };
-    case "absent":
-      return { ok: false, error: `no blueprint manifest at '${load.manifestPath}' — run \`init\` to create one` };
-    case "schema-incompatible":
-      return { ok: false, error: load.message };
-    case "secret-hit":
-      // Names the FILE, never the match: the whole point of the gate is that these bytes do not travel.
-      return { ok: false, error: `blueprint file '${load.file}' failed the secret gate — refusing to provision (its content is not shown)` };
-    case "invalid":
-      return { ok: false, error: `blueprint file '${load.file}' is invalid (${load.problem})${load.detail ? `: ${load.detail}` : ""}` };
-    default:
-      return assertNever(load);
-  }
-}
-
-type Surveyed = { ok: true; rows: DiffRow[] } | { ok: false; error: string };
-
-/**
- * Render + diff + preflight a project's blueprint against its live surfaces — the read half of the pipeline, shared by
- * `plan` and `status` so the two can never disagree about what "changed" means. `apply` does NOT call this:
- * it re-renders internally from the current blueprint (KTD7), which is what closes the stale-plan TOCTOU. So
- * this is a second CALL SITE of the same pure core, not a second implementation of it.
- */
-function survey(projectRoot: string, blueprintRoot: string, dataDir: string): Surveyed {
-  const gated = gate(blueprintRoot);
-  if (!gated.ok) return gated;
-
-  const io: RenderIo = {
-    readSource: (source) => readFileBounded(posix.join(blueprintRoot, source)),
-    readDestination: (destination) => readFileBounded(posix.join(projectRoot, destination)),
-  };
-  const rendered = renderBlueprint(gated.manifest, io);
-  if (!rendered.ok) return { ok: false, error: renderErrorText(rendered.error) };
-
-  // The journal tells a deleted provisioned surface (drift) from one nothing ever wrote (not drift) — see `diff.ts`.
-  // An unreadable journal THROWS out of the shared reader; refuse here with the typed failure rather than crash
-  // past `--json`'s payload, and never fall back to "no history", which would hide missing-file drift (PR #61).
-  let live: Set<string>;
-  try {
-    live = liveProvisionedTargets(projectRoot, dataDir);
-  } catch {
-    return { ok: false, error: "the provisioning history (undo journal) exists but cannot be read — refusing to report drift without it" };
-  }
-  const diffed = diffRendered(
-    rendered.files,
-    (destination) => readDestinationBounded(posix.join(projectRoot, destination)),
-    (destination) => live.has(posix.join(projectRoot, destination)),
-  );
-  if (!diffed.ok) return { ok: false, error: diffErrorText(diffed.error) };
-  // apply's own non-mutating preflight (resolution, shape guard, secret scan, compatibility, duplicate writers):
-  // without it a dry run would advertise changes for a blueprint `apply` refuses before writing (PR #61). The
-  // failure texts are already content-free — paths, surface labels, and fixed strings only.
-  const { failures } = preflightRows(projectRoot, rendered.files, diffed.rows);
-  if (failures.length > 0) {
-    return { ok: false, error: `apply would refuse this blueprint: ${failures.map(({ path, error }) => `${path}: ${error}`).join("; ")}` };
-  }
-  return { ok: true, rows: diffed.rows };
-}
-
-/** Content-free render/diff failure text — the same shapes `apply` reports, so a failure reads identically
- *  whichever verb surfaced it. Both consume only role/harness/destination/source/problem-code fields. */
-function renderErrorText(error: RenderError): string {
-  const where = `role '${error.role}' (${error.harness}) → '${error.destination}'`;
-  return "source" in error ? `render ${error.problem} for ${where} from '${error.source}'` : `render ${error.problem} for ${where}`;
-}
-
-/** Operator-facing remedy per blocked cause — fixed strings selected by a fixed enum, never derived from bytes. */
-const BLOCKED_REMEDY: Readonly<Record<BlockedReason, string>> = {
-  symlink: "it is a symlink — provisioning never reads or writes through an indirection; replace it with a real file",
-  oversized: "it is larger than the 16 MiB read bound",
-  "non-regular": "it is not a regular file (a directory, FIFO, or device)",
-  unreadable: "it could not be read (check its permissions)",
-};
-
-function diffErrorText(error: DiffError): string {
-  const where = `diff ${error.problem} for role '${error.role}' (${error.harness}) → '${error.destination}'`;
-  // Name the CAUSE when the reader knew it. A blocked destination aborts the whole run, so "unreadable-destination"
-  // alone leaves the operator with no idea that removing one symlink unblocks every other surface. Fixed strings
-  // selected by a fixed enum — no bytes, so the no-content-echo rule is untouched.
-  const remedy = "blockedBy" in error && error.blockedBy ? ` — ${BLOCKED_REMEDY[error.blockedBy]}` : "";
-  return `${where}${remedy}`;
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // init
@@ -876,8 +775,7 @@ function runPlan(rawProject: string, args: ParsedArgs, dataDir: string): CliRun 
     return render(args, { verb: "plan", ok: false, errors: [surveyed.error], project: projectRoot, rows: [], changes: 0 }, surveyed.error, EXIT_FAILED);
   }
 
-  const rows = surveyed.rows;
-  const changes = rows.filter((row) => row.action !== "noop" && row.action !== "scaffold-skip").length;
+  const { rows, changes } = planView(surveyed.rows);
   const json: CliJson = { verb: "plan", ok: true, errors: [], project: projectRoot, rows, changes };
   const summary = changes === 0 ? "Nothing to change." : `${changes} of ${rows.length} rows would change.`;
   return render(args, json, `${rowTable(rows, { drift: false })}\n\n${summary}`, EXIT_OK);
@@ -900,8 +798,7 @@ function runStatus(rawProject: string, args: ParsedArgs, dataDir: string): CliRu
     return render(args, { verb: "status", ok: false, errors: [surveyed.error], project: projectRoot, rows: [], drifted: 0 }, surveyed.error, EXIT_FAILED);
   }
 
-  const rows = surveyed.rows.filter((row) => row.action !== "scaffold-skip");
-  const drifted = rows.filter((row) => row.drift).length;
+  const { rows, drifted } = statusView(surveyed.rows);
   const json: CliJson = { verb: "status", ok: true, errors: [], project: projectRoot, rows, drifted };
   const summary =
     drifted === 0

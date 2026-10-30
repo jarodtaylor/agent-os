@@ -1,8 +1,9 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { Buffer } from "node:buffer";
 import type { Manifest } from "../src/contract/index";
 import { diffRendered, type DestinationRead } from "../src/provision/diff";
 import {
+  parseConfigValue,
   type ProvisionRead,
   type RenderIo,
   renderBlueprint,
@@ -589,5 +590,36 @@ describe("diffRendered — presence semantics (R8 read side, KTD8)", () => {
       },
     });
     expect(JSON.stringify(result)).not.toContain("secret");
+  });
+});
+
+describe("parseConfigValue — YAML warnings never echo a live file's line (decision #45)", () => {
+  const SECRET = "sk-ant-api03-QQQQQQQQQQQQQQQQQQQQQQQQ";
+
+  test("an unresolved tag on a secret-bearing line writes nothing to stderr or the process warning channel", () => {
+    const captured: string[] = [];
+    const stderr = spyOn(process.stderr, "write").mockImplementation((chunk: unknown) => {
+      captured.push(String(chunk));
+      return true;
+    });
+    const warn = spyOn(console, "warn").mockImplementation((...args: unknown[]) => {
+      captured.push(args.map(String).join(" "));
+    });
+    const emit = spyOn(process, "emitWarning").mockImplementation((w: unknown) => {
+      captured.push(String(w));
+    });
+    try {
+      const parsed = parseConfigValue("yaml", `value: !custom ${SECRET}\n`);
+      expect(parsed.ok).toBe(true);
+    } finally {
+      stderr.mockRestore();
+      warn.mockRestore();
+      emit.mockRestore();
+    }
+    expect(captured.join("\n")).not.toContain("sk-ant");
+  });
+
+  test("malformed YAML still fails closed", () => {
+    expect(parseConfigValue("yaml", "a: [unclosed\n")).toEqual({ ok: false });
   });
 });

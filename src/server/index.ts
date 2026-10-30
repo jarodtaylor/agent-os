@@ -51,7 +51,7 @@ const gate = securityGate({ token, codexConfigPath: codexConfigPath(), port: POR
 // machineId is this machine's federation discriminator (decision #13), stamped onto every record the MCP
 // write path persists. A persisted opaque UUID (not os.hostname(), which can carry the user's name) so it
 // doesn't bake a personal identifier into records that accumulate now and federate in v1.1 — see ../paths.
-const app = createRoutes({ repo, gate, machineId: resolveMachineId(dataDir) });
+const app = createRoutes({ repo, gate, machineId: resolveMachineId(dataDir), dataDir });
 
 // Bind loopback-only, BEFORE publishing the token. `hostname: "127.0.0.1"` because Bun.serve otherwise
 // defaults to 0.0.0.0 (all interfaces), which would expose the gate-exempt /health off-box (KTD9 is

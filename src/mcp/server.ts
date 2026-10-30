@@ -10,12 +10,15 @@
 import { randomUUID } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
+import { registerProvisionTools } from "./provision-tools";
 import { registerBrainTools, type McpDeps } from "./tools";
 
-/** Build a fresh `McpServer` with the Brain tools registered — one per session (each transport owns one). */
+/** Build a fresh `McpServer` with the Brain tools and the propose-only provisioning tools (U10 U7) registered —
+ *  one per session (each transport owns one). */
 export function createBrainMcpServer(deps: McpDeps): McpServer {
   const server = new McpServer({ name: "agent-os-brain", version: "0.1.0" });
   registerBrainTools(server, deps);
+  registerProvisionTools(server, deps);
   return server;
 }
 

@@ -43,9 +43,9 @@ import {
 } from "../configwrite/index";
 import type { Manifest, Runtime } from "../contract/index";
 import { recordBatchStatus } from "./batch-status";
-import { diffRendered, type BlockedReason, type DestinationReader, type DiffError, type DiffRow, type PlanAction } from "./diff";
+import { diffErrorText, diffRendered, type DestinationReader, type DiffRow, type PlanAction } from "./diff";
 import { canonicalProjectRoot, containsSecret, errorText, isNotFound, readDestinationBounded, readFileBounded } from "./internal";
-import { isPlainRecord, parseConfigValue, renderBlueprint, type RenderError, type RenderedFile, type RenderIo } from "./render";
+import { isPlainRecord, parseConfigValue, renderBlueprint, renderErrorText, type RenderedFile, type RenderIo } from "./render";
 import {
   checkTargetCompatibility,
   resolveTarget,
@@ -581,24 +581,3 @@ function preflightFailure(projectRoot: string, destination: string, error: strin
   };
 }
 
-function renderErrorText(error: RenderError): string {
-  const where = `role '${error.role}' (${error.harness}) → '${error.destination}'`;
-  return "source" in error ? `render ${error.problem} for ${where} from '${error.source}'` : `render ${error.problem} for ${where}`;
-}
-
-/** Operator-facing remedy per blocked cause — fixed strings selected by a fixed enum, never derived from bytes. */
-const BLOCKED_REMEDY: Readonly<Record<BlockedReason, string>> = {
-  symlink: "it is a symlink — provisioning never reads or writes through an indirection; replace it with a real file",
-  oversized: "it is larger than the 16 MiB read bound",
-  "non-regular": "it is not a regular file (a directory, FIFO, or device)",
-  unreadable: "it could not be read (check its permissions)",
-};
-
-function diffErrorText(error: DiffError): string {
-  const where = `diff ${error.problem} for role '${error.role}' (${error.harness}) → '${error.destination}'`;
-  // Name the CAUSE when the reader knew it. A blocked destination aborts the whole run, so "unreadable-destination"
-  // alone leaves the operator with no idea that removing one symlink unblocks every other surface. Fixed strings
-  // selected by a fixed enum — no bytes, so the no-content-echo rule is untouched.
-  const remedy = "blockedBy" in error && error.blockedBy ? ` — ${BLOCKED_REMEDY[error.blockedBy]}` : "";
-  return `${where}${remedy}`;
-}

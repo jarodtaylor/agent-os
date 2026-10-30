@@ -22,6 +22,9 @@ export interface RouteDeps {
   machineId: string;
   /** Injectable clock forwarded to the MCP tools + read path (tests). Defaults to `Date.now`. */
   now?: () => number;
+  /** The agent-os data dir the provisioning tools resolve projects through (KTD11). Defaults to the resolved
+   *  data dir; tests inject a scratch one. */
+  dataDir?: string;
 }
 
 /** Upper bound for the `GET /work-state` `?limit=` param — the accept regex allows arbitrarily long digit
@@ -40,10 +43,10 @@ const SessionEndRequest = z.object({
  * Chained (not sequential `app.get()` calls) so the returned value's inferred type carries the
  * full route schema — the shape U11's `hc<AppType>()` RPC client will need later.
  */
-export function createRoutes({ repo, gate, machineId, now }: RouteDeps) {
+export function createRoutes({ repo, gate, machineId, now, dataDir }: RouteDeps) {
   // One MCP handler for the process lifetime — it owns the transport-per-session map, so it must NOT be
   // rebuilt per request.
-  const mcp = createMcpHandler({ repo, machineId, now });
+  const mcp = createMcpHandler({ repo, machineId, now, dataDir });
   return new Hono()
     // Fail closed BY CONSTRUCTION: the gate runs on EVERY route via `use("*")`, and `/health` is the
     // ONE explicit exemption (liveness for launchd). This is order-independent — the content routes

@@ -8,7 +8,9 @@
 # listed below and no auto-approved edits. The job's own GITHUB_TOKEN is used
 # instead of the Claude App's contents-write token, so any credential the run can
 # reach is scoped to read code + write PR comments and expires with the job.
-# Claude sees only the PR diff, never PR comments from outsiders.
+# Claude reads the PR diff and this repo's checked-out code (built-in read tools
+# stay available; --allowedTools only pre-approves), but never PR comments, so
+# outsiders on this public repo cannot steer it.
 # Accepted risk (DECISIONS #61): anyone who can push a branch here can reach the
 # subscription token by editing this file in their PR.
 name: Claude PR review
@@ -50,7 +52,9 @@ jobs:
             REPO: ${{ github.repository }}
             PR NUMBER: ${{ github.event.pull_request.number }}
 
-            Review this pull request's diff (read it with `gh pr diff`). Look for:
+            Review this pull request's diff (read it with
+            `gh pr diff <PR NUMBER>`; the checkout is a detached HEAD, so always
+            pass the number). Look for:
             - correctness bugs and logic errors
             - security problems
             - regressions in existing behavior

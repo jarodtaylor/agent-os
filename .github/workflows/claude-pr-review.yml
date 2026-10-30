@@ -64,8 +64,13 @@ jobs:
             line it concerns. Skip style nits and preferences. Then post one
             short overall summary with
             `gh pr comment <PR NUMBER> --edit-last --create-if-none --body "..."`
-            so each push updates the same summary comment. If you find nothing
-            worth flagging, the summary says so in one line.
+            so each push updates the same summary comment.
+
+            The summary's first line is always exactly one of these, so a
+            reader can tell at a glance that the review ran and what it found:
+              **🤖 Claude review of ${{ github.event.pull_request.head.sha }}: no issues found**
+              **🤖 Claude review of ${{ github.event.pull_request.head.sha }}: N findings** (N = how many inline comments you posted)
+            Follow it with at most a few lines of summary.
 
             You are a read-only reviewer. Never edit files, commit, or push,
             even to fix something you found; describe the fix in a comment.

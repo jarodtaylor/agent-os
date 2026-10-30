@@ -3,14 +3,14 @@
 > **For humans.** Plain language, outcomes first, short on purpose. The deep/agent-grade state lives in [`START-HERE.md`](START-HERE.md) + [`DECISIONS.md`](DECISIONS.md); this page is their product-level projection.
 > **Freshness rule:** `/handoff` updates this page whenever something ships. If this page and reality ever disagree, that's a bug — flag it.
 
-_Last updated: 2026-07-22 · Status: **v0.1 "Continuity" in progress — 11 of 15 units shipped**; latest: **U10 BUILDING** — 5 of 7 provisioning sub-units merged: manifest contract + loader + front-gate (PR #44), the whole-file `text` write primitive (PR #45), the render/diff core (PR #47), the target registry + Cursor scanner (PR #46), and **apply/undo orchestration + run records — the Act half** (PR #52). Next: **U10 sub-units U6 ∥ U7** (CLI + seed template ∥ propose-only MCP tools). · Roadmap postures locked by the 2026-07-10 interview (decisions #32–#41)_
+_Last updated: 2026-10-30 · Status: **v0.1 "Continuity" in progress — 12 of 15 units shipped**; latest: **U10 provisioning COMPLETE** — the CLI + starter blueprint (PR #61) and propose-only agent tools (PR #65) finished the engine. Also: every PR is now auto-reviewed by Claude, Codex and Copilot, and PRs are capped at ~800 hand-written lines (PR #63, decision #61). Next: **U15 — always-on server**. · Roadmap postures locked by the 2026-07-10 interview (decisions #32–#41)_
 
 ## TL;DR
 
 - **Problem.** I run a dozen AI harnesses — Claude Code, Codex, Hermes, Cursor, Antigravity, and more. Each is powerful; none of them share anything. Every session starts cold, I re-explain myself constantly, and juggling terminals is heavy enough that I collapse back to just Claude Code — and lose the team.
 - **Bet.** **Connect, don't replace.** Agent OS is local-first connective tissue: one shared memory + one control surface every harness plugs into, so my agents act like a co-located team. Hard line: we never build or fork our own harness.
 - **Today.** The foundation works: **Claude Code and Codex write to one shared "where did we leave off?" memory.** A fresh Claude Code session picks up automatically — nothing pasted (ran live 2026-07-08). Codex is wired the same way; its live check lands with the always-on server (U15). No screens yet; everything so far is deliberately under the floorboards.
-- **Next (rest of v0.1).** See the whole stack in one place (every skill/MCP server/plugin across harnesses), fix gaps in one click with undo, the **first actual screen**, and an always-on server.
+- **Next (rest of v0.1).** An **always-on server** (U15), then the MVP-definition session and the **first actual screen** (U11).
 - **The headline act — the Agent Brain (real memory: wiki + long-term recall + auto-ingestion) — is designed, not built.** v0.1 is its foundation; building the Brain proper is the next big phase.
 
 ## The four tracks (the whole vision, one glance)
@@ -33,6 +33,9 @@ _Last updated: 2026-07-22 · Status: **v0.1 "Continuity" in progress — 11 of 1
 - ✅ **Marked secrets can't leak out** — every read path (agent tools, HTTP, the future UI) passes one redaction gate that masks anything marked secret. Security-reviewed; clean bill on outbound leak paths. (Scope honesty, per decision #25: the gate makes reads *non-leaky* — what's marked is what's masked.)
 - ✅ **Config safety** — Agent OS edits harness configs (hooks, MCP entries) with backup → atomic write → undo journal. It has run against the real `~/.claude` and restored it byte-perfect.
 - ✅ **See what every harness has installed** — a typed inventory of skills / MCP servers / plugins across Claude Code + Codex (the Observe half; further harnesses join as one-line registry rows as they enter rotation). *Shipped U9, PR #38.*
+- ✅ **Provision a project in one command, with undo** — a project carries one blueprint (which roles run in which harness, on which model, with which files); `init` seeds it, `plan` previews, `apply` writes Claude Code + Codex + Cursor natively in one all-or-nothing batch, `status` reports drift, `undo` reverses a batch. *Shipped U10, PRs #44–#65.*
+- ✅ **Agents can see (never change) provisioning** — two read-only agent tools show a project's drift and pending plan; only you can apply. *PR #65.*
+- ✅ **Every PR gets three independent AI reviews** — Claude (on your Max plan), Codex and Copilot, read-only, re-run on every push. *PR #63.*
 - ✅ **Locked to this machine** — the server answers only local callers holding a per-boot token; single-instance enforced at the OS level.
 
 ## Release map
@@ -48,7 +51,7 @@ _Last updated: 2026-07-22 · Status: **v0.1 "Continuity" in progress — 11 of 1
 **Recently shipped:** **U9** inventory scanners (PR #38 — the Observe half) · **#21** config-engine targeted removal (PR #34) · **#24** single-source Codex credential (PR #41 — retired the duplicate token file). *(#21/#24 are follow-up issues, not among the 15 plan units.)* Also **dogfood run 1** (below) — a validation exercise, not a v0.1 unit.
 
 **Still to build:**
-- **U10 (building — 5 of 7 sub-units in) — project provisioning:** a project carries one versioned "blueprint" (which roles run in which harness, on which model, with which files), and agent-os pushes it into Claude Code, Codex, and Cursor natively — reversibly, with a dry-run preview and a drift report. Five sub-units shipped: the manifest contract + loader + **front-gate** (PR #44), the whole-file `text` write primitive (PR #45), the **render → diff** core that turns a blueprint into typed change rows against live surfaces (PR #47), the **target registry + Cursor scanner** — build-time knowledge of each harness's surfaces plus Cursor now observable in the inventory (PR #46), and **apply/undo orchestration + run records** — the reversible **Act half** that writes a whole blueprint in one abort-all batch and can undo it (PR #52). Rescoped from the earlier "parity actions" framing by lived dogfood evidence (decision #52). The remaining two sub-units are the operator surface: a CLI + starter blueprint (U6) and propose-only MCP tools (U7).
+- **U10 ✅ — project provisioning:** a project carries one versioned "blueprint" (which roles run in which harness, on which model, with which files), and agent-os pushes it into Claude Code, Codex, and Cursor natively — reversibly, with a dry-run preview and a drift report. All seven sub-units shipped (PRs #44–#47, #52, #61, #65): the manifest contract + front-gate, the text write primitive, render → diff, the target registry + Cursor scanner, apply/undo, the operator CLI + starter blueprint, and propose-only agent tools (agents see, only you apply). Rescoped from the earlier "parity actions" framing by lived dogfood evidence (decision #52).
 - **U11 — the first screen:** projects + where-they-left-off + the inventory grid + provision buttons.
 - **U12 — roster spike:** find the read/write surfaces for Hermes / Cursor / Antigravity / OpenCode (decides their lanes).
 - **U15 — always-on:** server survives reboots/crashes (launchd); hooks re-install for keeps; the pending live Codex check runs then.
@@ -116,7 +119,7 @@ A shared task board across harnesses *and* instances, plus Hermes as the always-
 | U7 | `/handoff` rewire | One authoritative continuity record; docs render it | ✅ |
 | U8 | Codex integration | Second harness on the shared brain (capture + read + installer) | ✅ *live check pending* |
 | U9 | Inventory scanners | See every skill/MCP server/plugin across harnesses — CC + Codex now; others join as one-line registry rows as they enter rotation | ✅ *PR #38* |
-| U10 | Provisioning engine | Blueprint → native harness setup (roles/models/files), with undo | 🔨 building (5/7 — contract+loader+front-gate, text write primitive, render/diff, target registry + Cursor scanner, apply/undo + run records in; CLI + MCP tools left) |
+| U10 | Provisioning engine | Blueprint → native harness setup (roles/models/files), with undo | ✅ (7/7 — PRs #44–#47, #52, #61, #65) |
 | U11 | Thin human view | The first screen | ⏳ |
 | U12 | Roster lane spike | What's possible for Hermes / Cursor / Antigravity / OpenCode | ⏳ |
 | U15 | Always-on (launchd) | Server survives reboots; hooks installed for keeps; live Codex check | ⏳ |

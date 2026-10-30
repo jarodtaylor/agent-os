@@ -49,7 +49,7 @@ export function registerProvisionTools(server: McpServer, deps: McpDeps): void {
     {
       title: "Provision status",
       description:
-        "Drift report for a registered project: which provisioned surfaces no longer match the blueprint. Read-only — paths and actions only, never file contents. The operator reconciles with the provision CLI. Each row is { role, harness, destination, action, drift }; `drifted` counts drifted rows, 0 means in sync. One unreadable destination makes the whole report refuse.",
+        "Drift report for a registered project: which provisioned surfaces no longer match the blueprint. Read-only — paths and actions only, never file contents. The operator reconciles with the provision CLI. Each row is { role, harness, destination, action, drift }; `drifted` counts surfaces that diverged from what was last applied; 0 means no tracked drift, NOT that the project is fully provisioned (call provision_plan to see pending changes). One unreadable destination makes the whole report refuse.",
       inputSchema: { project: z.string().min(1).max(128) },
     },
     async ({ project }, extra) => run("provision_status", project, extra.sessionId),

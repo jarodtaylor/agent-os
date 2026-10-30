@@ -14,6 +14,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { listUndo, undo, writeTextFile, type MergeResult } from "../configwrite/index";
 import { ensureDataDir, resolveDataDir, resolvePort, SUPERVISOR_ENV } from "../paths";
+import { acquireSingleInstanceLock } from "../server/single-instance";
 import { defaultRepoRoot, errorText, type UninstallOutcome } from "./shared";
 
 export const LAUNCHD_LABEL = "com.agent-os.server";
@@ -107,20 +108,32 @@ export function installLaunchd(opts: LaunchdOptions = {}): LaunchdInstallResult 
   mkdirSync(join(r.dataDir, "logs"), { recursive: true, mode: 0o700 });
   mkdirSync(join(r.home, "Library", "LaunchAgents"), { recursive: true });
 
-  const plist = writeTextFile(plistPath(r.home), renderPlist(r), { dataDir: r.dataDir });
   const loaded = isLoaded(r);
+  // An unsupervised server already holding the data dir's lock would make every launchd-spawned child exit at
+  // boot, and KeepAlive would respawn it forever — a silent crash loop. Probe the lock (and release it at once)
+  // unless our own agent is the holder.
+  if (!loaded) {
+    try {
+      acquireSingleInstanceLock(r.dataDir)();
+    } catch (err) {
+      throw new Error(`launchd: an agent-os server is already running outside launchd — stop it, then install (${errorText(err)})`);
+    }
+  }
+
+  const plist = writeTextFile(plistPath(r.home), renderPlist(r), { dataDir: r.dataDir });
   if (plist.noop && loaded) return { plist, bootstrapped: false };
 
+  const bootstrap = () => r.launchctl(["bootstrap", `gui/${r.uid}`, plistPath(r.home)]);
   if (loaded) r.launchctl(["bootout", serviceTarget(r.uid)]);
-  const boot = r.launchctl(["bootstrap", `gui/${r.uid}`, plistPath(r.home)]);
+  const boot = bootstrap();
   if (boot.code !== 0) {
-    if (plist.undoId) {
-      try {
-        undo(plist.undoId, r.dataDir);
-      } catch {
-        // Rollback is best-effort — never mask the bootstrap failure we're reporting.
-      }
-    }
+    // Best-effort throughout — never mask the bootstrap failure we're reporting. Roll back the plist this call
+    // wrote; if we stopped a running agent to reload it, start the restored definition again rather than leave
+    // the server down.
+    try {
+      if (plist.undoId) undo(plist.undoId, r.dataDir);
+      if (loaded) bootstrap();
+    } catch {}
     throw new Error(`launchd: bootstrap failed (exit ${boot.code}): ${boot.stderr}`);
   }
   return { plist, bootstrapped: true };

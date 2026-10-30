@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { installLaunchd, LAUNCHD_LABEL, plistPath, renderPlist, uninstallLaunchd, type Launchctl } from "../src/install/launchd";
 import { SUPERVISOR_ENV } from "../src/paths";
 import { createRoutes } from "../src/server/routes";
+import { acquireSingleInstanceLock } from "../src/server/single-instance";
 
 // Fixture-home ONLY, and launchctl is a fake — these tests never touch ~/Library/LaunchAgents or the real launchd domain.
 const REPO = join(import.meta.dir, ".."); // the real repo, so renderPlist reads the real template
@@ -128,6 +129,37 @@ describe("installLaunchd", () => {
     const lc = fakeLaunchctl({ bootstrapFails: true });
     expect(() => installLaunchd(opts(lc.run))).toThrow(/bootstrap failed/);
     expect(existsSync(plistPath(home))).toBe(false);
+  });
+
+  test("a failed reload restores the previous plist and starts it again, so the server is not left down", () => {
+    const lc = fakeLaunchctl();
+    installLaunchd(opts(lc.run));
+    const before = readFileSync(plistPath(home));
+    let failNext = true;
+    const flaky: Launchctl = (args) => {
+      if (args[0] === "bootstrap" && failNext) {
+        failNext = false;
+        lc.calls.push(args);
+        return { code: 5, stderr: "Bootstrap failed" };
+      }
+      return lc.run(args);
+    };
+    expect(() => installLaunchd(opts(flaky, { port: 4400 }))).toThrow(/bootstrap failed/);
+    expect(readFileSync(plistPath(home)).equals(before)).toBe(true);
+    expect(lc.isLoaded()).toBe(true);
+  });
+
+  test("refuses while an unsupervised server holds the data dir's lock, writing nothing", () => {
+    mkdirSync(dataDir, { recursive: true });
+    const release = acquireSingleInstanceLock(dataDir);
+    try {
+      const lc = fakeLaunchctl();
+      expect(() => installLaunchd(opts(lc.run))).toThrow(/already running outside launchd/);
+      expect(existsSync(plistPath(home))).toBe(false);
+      expect(lc.verbs()).toEqual([]);
+    } finally {
+      release();
+    }
   });
 });
 

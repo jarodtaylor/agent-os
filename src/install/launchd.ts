@@ -27,12 +27,24 @@ const realLaunchctl: Launchctl = (args) => {
   return { code: res.exitCode, stderr: res.stderr.toString().trim() };
 };
 
+/** Whether the server on `port` answers `/health` as the launchd-supervised instance. Injected by tests. */
+export type HealthProbe = (port: number) => Promise<boolean>;
+
+const realHealthProbe: HealthProbe = async (port) => {
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(1000) });
+    return res.ok && ((await res.json()) as { supervisor?: unknown }).supervisor === "launchd";
+  } catch {
+    return false;
+  }
+};
+
 export interface LaunchdOptions {
   /** Home dir whose `~/Library/LaunchAgents` receives the plist. Defaults to `os.homedir()`; tests inject a temp dir. */
   home?: string;
   /** Repo root the agent runs the server from. Defaults to this module's own repo. */
   repoRoot?: string;
-  /** Data dir for the server, its log, and the engine's backups + undo journal. Defaults to the OS data dir. */
+  /** Data dir for the server and its log. Defaults to the OS data dir. */
   dataDir?: string;
   /** Port baked into the agent's environment. Defaults to `resolvePort()` — the same port the other installers dial. */
   port?: number;
@@ -42,10 +54,18 @@ export interface LaunchdOptions {
   launchctl?: Launchctl;
   /** The user's launchd GUI domain id. Defaults to the current uid. */
   uid?: number;
+  /** Readiness check run after every (re)load. Defaults to polling `/health` on `port`. */
+  healthy?: HealthProbe;
+  /** How long a (re)loaded agent has to answer `/health` before the install is treated as failed. */
+  readyTimeoutMs?: number;
 }
 
 export const plistPath = (home: string): string => join(home, "Library", "LaunchAgents", `${LAUNCHD_LABEL}.plist`);
 const serviceTarget = (uid: number): string => `gui/${uid}/${LAUNCHD_LABEL}`;
+/** Where the plist's backups + undo journal live. Keyed to `home` like the plist path itself, NOT to the server's
+ *  configurable data dir: a reinstall with a different data dir must still find the whole journal chain, or
+ *  uninstall would stop short and restore a RunAtLoad plist instead of removing it. */
+const installStateDir = (home: string): string => join(home, "Library", "Application Support", "agent-os");
 
 function resolve(opts: LaunchdOptions) {
   return {
@@ -58,6 +78,9 @@ function resolve(opts: LaunchdOptions) {
     bunPath: opts.bunPath ?? Bun.which("bun") ?? process.execPath,
     launchctl: opts.launchctl ?? realLaunchctl,
     uid: opts.uid ?? process.getuid?.() ?? 0,
+    healthy: opts.healthy ?? realHealthProbe,
+    readyTimeoutMs: opts.readyTimeoutMs ?? 15_000,
+    stateDir: installStateDir(opts.home ?? homedir()),
   };
 }
 
@@ -107,7 +130,7 @@ function publishPlist(r: ReturnType<typeof resolve>): MergeResult {
   const path = plistPath(r.home);
   const content = renderPlist(r);
   try {
-    return writeTextFile(path, content, { dataDir: r.dataDir });
+    return writeTextFile(path, content, { dataDir: r.stateDir });
   } catch (err) {
     if (!(err instanceof AppliedButUnjournaledError)) throw err;
     let outcome = "plist reverted";
@@ -122,13 +145,25 @@ function publishPlist(r: ReturnType<typeof resolve>): MergeResult {
   }
 }
 
+/** Poll the readiness probe until it passes or the timeout elapses. */
+async function becameHealthy(r: ReturnType<typeof resolve>): Promise<boolean> {
+  const deadline = Date.now() + r.readyTimeoutMs;
+  do {
+    if (await r.healthy(r.port)) return true;
+    await Bun.sleep(250);
+  } while (Date.now() < deadline);
+  return false;
+}
+
 /**
- * Write the plist and load the agent. Idempotent: identical bytes on an already-loaded agent is a full no-op.
- * Changed bytes reload it (bootout, then bootstrap) so launchd runs the new definition. If the bootstrap fails, a
- * plist this call wrote is rolled back — a failed install never leaves an unloaded plist that would surprise-start
- * at the next login.
+ * Write the plist, load the agent, and wait until the server it starts answers `/health` as supervised. Idempotent:
+ * identical bytes on an already-loaded, healthy agent is a full no-op. Changed bytes reload it (bootout, then
+ * bootstrap). A load that fails — launchctl refuses it, or the server never becomes healthy (a taken port, a crash at
+ * boot) — is rolled back: the new agent is stopped, the plist this call wrote is restored, and an agent we stopped to
+ * reload is started again. A failed install never leaves a crash-looping agent or a plist that would surprise-start
+ * at the next login, and never reports success for a server that is not up.
  */
-export function installLaunchd(opts: LaunchdOptions = {}): LaunchdInstallResult {
+export async function installLaunchd(opts: LaunchdOptions = {}): Promise<LaunchdInstallResult> {
   const r = resolve(opts);
   // launchd opens the log paths but never creates their directory.
   ensureDataDir(r.dataDir);
@@ -148,28 +183,39 @@ export function installLaunchd(opts: LaunchdOptions = {}): LaunchdInstallResult 
   }
 
   const plist = publishPlist(r);
-  if (plist.noop && loaded) return { plist, bootstrapped: false };
+  const log = join(r.dataDir, "logs", "server.log");
+  if (plist.noop && loaded) {
+    // Nothing to change — but an already-loaded agent that is not answering is not "installed"; say so.
+    if (!(await becameHealthy(r))) throw new Error(`launchd: the agent is loaded but its server is not healthy — see ${log}`);
+    return { plist, bootstrapped: false };
+  }
 
   const bootstrap = () => r.launchctl(["bootstrap", `gui/${r.uid}`, plistPath(r.home)]);
   if (loaded) r.launchctl(["bootout", serviceTarget(r.uid)]);
   const boot = bootstrap();
-  if (boot.code !== 0) {
-    // Roll back the plist this call wrote; if we stopped a running agent to reload it, start the restored definition
-    // again rather than leave the server down. Each step is guarded on its own and any failure is appended to the
-    // error, so a server left down is never silent — and the original bootstrap failure is never masked.
-    const notes: string[] = [];
-    try {
-      if (plist.undoId) undo(plist.undoId, r.dataDir);
-    } catch (err) {
-      notes.push(`plist rollback failed: ${errorText(err)}`);
-    }
-    if (loaded) {
-      const again = bootstrap();
-      if (again.code !== 0) notes.push(`previous agent NOT restarted (exit ${again.code}): ${again.stderr}`);
-    }
-    throw new Error(`launchd: bootstrap failed (exit ${boot.code}): ${boot.stderr}${notes.length > 0 ? ` — ${notes.join("; ")}` : ""}`);
+  let failure: string | null = null;
+  if (boot.code !== 0) failure = `bootstrap failed (exit ${boot.code}): ${boot.stderr}`;
+  else if (!(await becameHealthy(r))) {
+    failure = `the server did not become healthy within ${r.readyTimeoutMs}ms — see ${log}`;
+    r.launchctl(["bootout", serviceTarget(r.uid)]); // stop the failing agent before KeepAlive loops on it
   }
-  return { plist, bootstrapped: true };
+  if (failure === null) return { plist, bootstrapped: true };
+
+  // Roll back the plist this call wrote; if we stopped a running agent to reload it, start the restored definition
+  // again rather than leave the server down. Each step is guarded on its own and any failure is appended to the
+  // error, so a server left down is never silent — and the original failure is never masked.
+  const notes: string[] = [];
+  try {
+    if (plist.undoId) undo(plist.undoId, r.stateDir);
+  } catch (err) {
+    notes.push(`plist rollback failed: ${errorText(err)}`);
+  }
+  if (loaded) {
+    const again = bootstrap();
+    if (again.code !== 0) notes.push(`previous agent NOT restarted (exit ${again.code}): ${again.stderr}`);
+    else if (!(await becameHealthy(r))) notes.push("previous agent restarted but NOT healthy");
+  }
+  throw new Error(`launchd: ${failure}${notes.length > 0 ? ` — ${notes.join("; ")}` : ""}`);
 }
 
 /**
@@ -188,9 +234,9 @@ export function uninstallLaunchd(opts: LaunchdOptions = {}): UninstallOutcome {
   }
 
   try {
-    for (const entry of listUndo(r.dataDir).filter((e) => e.targetPath === path).reverse()) {
+    for (const entry of listUndo(r.stateDir).filter((e) => e.targetPath === path).reverse()) {
       if (!existsSync(path)) break;
-      if (undo(entry.id, r.dataDir) === "reversed" && !outcome.removed.includes(path)) outcome.removed.push(path);
+      if (undo(entry.id, r.stateDir) === "reversed" && !outcome.removed.includes(path)) outcome.removed.push(path);
       if (entry.created) break;
     }
   } catch (err) {
@@ -203,7 +249,7 @@ export function uninstallLaunchd(opts: LaunchdOptions = {}): UninstallOutcome {
 if (import.meta.main) {
   const cmd = process.argv[2];
   if (cmd === "install") {
-    const { plist, bootstrapped } = installLaunchd();
+    const { plist, bootstrapped } = await installLaunchd();
     console.log(`[agent-os] ${plist.targetPath}: ${plist.noop ? "unchanged" : "written"}; ${bootstrapped ? "agent (re)loaded" : "agent already loaded"}`);
   } else if (cmd === "uninstall") {
     const { removed, failed } = uninstallLaunchd();

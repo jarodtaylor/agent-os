@@ -192,7 +192,20 @@ export async function installLaunchd(opts: LaunchdOptions = {}): Promise<Launchd
   }
 
   const target = serviceTarget(r.uid);
-  if (loaded) r.launchctl(["bootout", target]);
+  if (loaded) {
+    // Stop the running agent so the new definition can load. If it won't stop, nothing has changed yet except the
+    // plist on disk — restore it and say the old server is still running, rather than bootstrap over it.
+    const out = r.launchctl(["bootout", target]);
+    if (out.code !== 0 || loadedIn(r)) {
+      let restored = "previous plist restored";
+      try {
+        if (plist.undoId) undo(plist.undoId, r.stateDir);
+      } catch (err) {
+        restored = `the new plist was NOT rolled back and will load at the next login: ${errorText(err)}`;
+      }
+      throw new Error(`launchd: could not stop the running agent to reload it (bootout exit ${out.code}: ${out.stderr}) — the previous server is still running; ${restored}`);
+    }
+  }
   const boot = r.launchctl(["bootstrap", `gui/${r.uid}`, plistPath(r.home)]);
   let failure: string;
   if (boot.code !== 0) failure = `bootstrap failed (exit ${boot.code}): ${boot.stderr}`;

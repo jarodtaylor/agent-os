@@ -177,6 +177,18 @@ describe("installLaunchd", () => {
     expect(lc.isLoaded()).toBe(false);
   });
 
+  test("a reload whose running agent will not stop leaves it running, restores the plist, and never claims DOWN", async () => {
+    const lc = fakeLaunchctl();
+    await installLaunchd(opts(lc.run));
+    const before = readFileSync(plistPath(home));
+    const stuck: Launchctl = (args) => (args[0] === "bootout" ? { code: 3, stderr: "nope" } : lc.run(args));
+    const err = await installLaunchd(opts(stuck, { port: 4400 })).catch((e: Error) => e);
+    expect(String(err)).toMatch(/could not stop the running agent.*previous server is still running; previous plist restored/);
+    expect(String(err)).not.toMatch(/DOWN/);
+    expect(readFileSync(plistPath(home)).equals(before)).toBe(true);
+    expect(lc.verbs()).toEqual(["bootstrap"]); // never bootstrapped over the running agent
+  });
+
   test("an unhealthy agent that bootout cannot stop is named in the error", async () => {
     const lc = fakeLaunchctl();
     const stuck: Launchctl = (args) => (args[0] === "bootout" ? { code: 3, stderr: "nope" } : lc.run(args));

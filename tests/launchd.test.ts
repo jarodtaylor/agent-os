@@ -133,29 +133,13 @@ describe("installLaunchd", () => {
     expect(existsSync(plistPath(home))).toBe(false);
   });
 
-  test("a failed reload restores the previous plist and starts it again, so the server is not left down", async () => {
+  test("a failed reload restores the previous plist and says the server is down", async () => {
     const lc = fakeLaunchctl();
     await installLaunchd(opts(lc.run));
     const before = readFileSync(plistPath(home));
-    let failNext = true;
-    const flaky: Launchctl = (args) => {
-      if (args[0] === "bootstrap" && failNext) {
-        failNext = false;
-        lc.calls.push(args);
-        return { code: 5, stderr: "Bootstrap failed" };
-      }
-      return lc.run(args);
-    };
-    await expect(installLaunchd(opts(flaky, { port: 4400 }))).rejects.toThrow(/bootstrap failed/);
-    expect(readFileSync(plistPath(home)).equals(before)).toBe(true);
-    expect(lc.isLoaded()).toBe(true);
-  });
-
-  test("a failed reload whose restart also fails says the previous agent was not restarted", async () => {
-    const lc = fakeLaunchctl();
-    await installLaunchd(opts(lc.run));
     const failing: Launchctl = (args) => (args[0] === "bootstrap" ? { code: 5, stderr: "Bootstrap failed" } : lc.run(args));
-    await expect(installLaunchd(opts(failing, { port: 4400 }))).rejects.toThrow(/previous agent NOT restarted \(exit 5\)/);
+    await expect(installLaunchd(opts(failing, { port: 4400 }))).rejects.toThrow(/bootstrap failed \(exit 5\).*server is DOWN/);
+    expect(readFileSync(plistPath(home)).equals(before)).toBe(true);
   });
 
   test("a plist whose undo entry could not be journaled is reverted, so it cannot start at the next login", async () => {
@@ -184,15 +168,28 @@ describe("installLaunchd", () => {
     expect(existsSync(plistPath(home))).toBe(false);
   });
 
-  test("a reload whose server never becomes healthy restores and restarts the previous definition", async () => {
+  test("a reload whose server never becomes healthy stops it, restores the previous plist, and says the server is down", async () => {
     const lc = fakeLaunchctl();
     await installLaunchd(opts(lc.run));
     const before = readFileSync(plistPath(home));
-    let checks = 0;
-    const firstCheckFails: HealthProbe = async () => ++checks > 1; // the new server fails; the restored one is healthy
-    await expect(installLaunchd(opts(lc.run, { port: 4400, healthy: firstCheckFails }))).rejects.toThrow(/did not become healthy/);
+    await expect(installLaunchd(opts(lc.run, { port: 4400, healthy: async () => false }))).rejects.toThrow(/did not become healthy.*server is DOWN/);
     expect(readFileSync(plistPath(home)).equals(before)).toBe(true);
-    expect(lc.isLoaded()).toBe(true);
+    expect(lc.isLoaded()).toBe(false);
+  });
+
+  test("an unhealthy agent that bootout cannot stop is named in the error", async () => {
+    const lc = fakeLaunchctl();
+    const stuck: Launchctl = (args) => (args[0] === "bootout" ? { code: 3, stderr: "nope" } : lc.run(args));
+    await expect(installLaunchd(opts(stuck, { healthy: async () => false }))).rejects.toThrow(/failing agent is still loaded \(bootout exit 3\)/);
+  });
+
+  test("a rollback the journal refuses is named in the error, never papered over", async () => {
+    const lc = fakeLaunchctl();
+    const editsThenFails: HealthProbe = async () => {
+      writeFileSync(plistPath(home), "edited while starting\n"); // makes the identity-checked undo refuse
+      return false;
+    };
+    await expect(installLaunchd(opts(lc.run, { healthy: editsThenFails }))).rejects.toThrow(/new plist was NOT rolled back/);
   });
 
   test("an unchanged, loaded agent whose server is not healthy is reported, not treated as installed", async () => {

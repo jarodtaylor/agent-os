@@ -31,9 +31,9 @@ The brain server must survive crashes and logout/login, because a down server si
 
 **Keep that journal where the file's path is keyed, not where the server's data lives.** The plist path is fixed by the home dir, but the server's data dir is configurable. If the journal lived in the data dir, a reinstall with a different data dir would start a second journal whose oldest entry is a *backup* of the first plist. Uninstall with the new dir would then restore that RunAtLoad plist and report success, and the "uninstalled" server would start at the next login. The install journal therefore lives under `~/Library/Application Support/agent-os`, derived from `home` (`installStateDir`). The cross-model gate caught this; no in-process reviewer did.
 
-**3. A reload is bootout-then-bootstrap, so a failed reload has to put the old agent back, and say so if it can't.** Changing the definition means `launchctl bootout` (the server is now down) then `bootstrap`. If that bootstrap fails, roll back the plist *and* bootstrap the restored definition, or the routine reinstall has left the server down. Guard each recovery step separately and append any failure to the thrown error (the rollback block at the end of `installLaunchd`). The first version wrapped both steps in one `catch {}`. Two independent reviewers (correctness, and the cross-model peer) caught it: a failed restart was invisible, and an `undo` that threw skipped the restart entirely.
+**3. A reload is bootout-then-bootstrap, so a failed reload leaves the server down. Make that loud, and don't try to be clever about it.** Changing the definition means `launchctl bootout` (the server is now down) then `bootstrap`. On failure, install stops the new agent and checks that it actually stopped, restores the previous plist, and throws an error that says the server is DOWN and names every rollback step that failed (the rollback block at the end of `installLaunchd`). It deliberately does **not** auto-restart the previous agent. The first version did, and each review round found an edge in that restart: a failed restart was swallowed, a thrown `undo` made it restart the *new* failed plist as if it were the old one, and the restored agent's readiness was probed on the new port. Two rounds of the adversarial gate stalled on that branch alone. Install is a command run by hand at a terminal, so a loud error is not a silent cold start, and removing the restart removed the whole class of bugs.
 
-**A zero exit from `launchctl bootstrap` only means launchd accepted the job, not that the server came up.** A child that dies at boot (taken port, bad path, crash) still bootstraps cleanly, and KeepAlive then loops on it. Install therefore waits, with a time limit, for `/health` to report `supervisor: "launchd"` (`becameHealthy`). On timeout it boots the new agent out, rolls back, and restarts the previous one, which also has to pass the health check. The no-op path ("same bytes, already loaded") checks health too, so a loaded but broken agent is reported rather than called "installed". This was the gate's high finding: tests with a fake launchctl model "bootstrapped" as "running", so only an explicit readiness probe can tell the two apart.
+**A zero exit from `launchctl bootstrap` only means launchd accepted the job, not that the server came up.** A child that dies at boot (taken port, bad path, crash) still bootstraps cleanly, and KeepAlive then loops on it. Install therefore waits, with a time limit, for `/health` to report `supervisor: "launchd"` (`becameHealthy`). On timeout it rolls back as in point 3. The no-op path ("same bytes, already loaded") checks health too, so a loaded but broken agent is reported rather than called "installed". This was the gate's high finding: tests with a fake launchctl model "bootstrapped" as "running", so only an explicit readiness probe can tell the two apart.
 
 **4. Revert an `AppliedButUnjournaledError` at install time.** When the engine's atomic rename succeeds but the journal append fails, the plist is live with no undo entry. Nothing later can reverse it, and `RunAtLoad` will start the failed install at the next login. `publishPlist` catches that error type, restores the backup or deletes a plist it created, but only while the file still holds the bytes we wrote. It then rethrows with the recovery outcome (`publishPlist`). Other installers can tolerate this state as "applied, warn"; a RunAtLoad file cannot, because its next effect is to *execute*.
 
@@ -48,17 +48,16 @@ Each of these failures is *silent* in exactly the way the supervision exists to 
 - Any installer-owned file whose mere presence has an effect (autostart, cron, login items). Treat `AppliedButUnjournaledError` as "revert now", not "warn".
 
 ## Examples
-Inject the launchctl runner so tests can fail exactly the step under test (`tests/launchd.test.ts`):
+Inject the launchctl runner and the health probe so tests can fail exactly the step under test (`tests/launchd.test.ts`):
 
 ```ts
-// Fail only the reload's first bootstrap: the previous plist must be restored AND the agent loaded again.
-let failNext = true;
-const flaky: Launchctl = (args) => {
-  if (args[0] === "bootstrap" && failNext) { failNext = false; return { code: 5, stderr: "Bootstrap failed" }; }
-  return lc.run(args);
-};
-expect(() => installLaunchd(opts(flaky, { port: 4400 }))).toThrow(/bootstrap failed/);
-expect(lc.isLoaded()).toBe(true);
+// A reload whose new server never answers /health: stopped, previous plist restored, and the error says DOWN.
+await installLaunchd(opts(lc.run));
+const before = readFileSync(plistPath(home));
+await expect(installLaunchd(opts(lc.run, { port: 4400, healthy: async () => false })))
+  .rejects.toThrow(/did not become healthy.*server is DOWN/);
+expect(readFileSync(plistPath(home)).equals(before)).toBe(true);
+expect(lc.isLoaded()).toBe(false);
 ```
 
 To force the unjournaled path, put a directory where the journal file goes (`<dataDir>/undo-journal.jsonl`). The append then fails after the rename has already published the plist.

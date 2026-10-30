@@ -159,9 +159,10 @@ async function becameHealthy(r: ReturnType<typeof resolve>): Promise<boolean> {
  * Write the plist, load the agent, and wait until the server it starts answers `/health` as supervised. Idempotent:
  * identical bytes on an already-loaded, healthy agent is a full no-op. Changed bytes reload it (bootout, then
  * bootstrap). A load that fails — launchctl refuses it, or the server never becomes healthy (a taken port, a crash at
- * boot) — is rolled back: the new agent is stopped, the plist this call wrote is restored, and an agent we stopped to
- * reload is started again. A failed install never leaves a crash-looping agent or a plist that would surprise-start
- * at the next login, and never reports success for a server that is not up.
+ * boot) — is rolled back: the new agent is stopped and the plist this call wrote is restored. It does NOT restart an
+ * agent it stopped for a reload: install is run by hand, so a failure throws an error that says the server is down,
+ * and the operator fixes the cause and re-runs install. A failed install never reports success for a server that is
+ * not up, and every rollback step that fails is named in the error.
  */
 export async function installLaunchd(opts: LaunchdOptions = {}): Promise<LaunchdInstallResult> {
   const r = resolve(opts);
@@ -190,31 +191,28 @@ export async function installLaunchd(opts: LaunchdOptions = {}): Promise<Launchd
     return { plist, bootstrapped: false };
   }
 
-  const bootstrap = () => r.launchctl(["bootstrap", `gui/${r.uid}`, plistPath(r.home)]);
-  if (loaded) r.launchctl(["bootout", serviceTarget(r.uid)]);
-  const boot = bootstrap();
-  let failure: string | null = null;
+  const target = serviceTarget(r.uid);
+  if (loaded) r.launchctl(["bootout", target]);
+  const boot = r.launchctl(["bootstrap", `gui/${r.uid}`, plistPath(r.home)]);
+  let failure: string;
   if (boot.code !== 0) failure = `bootstrap failed (exit ${boot.code}): ${boot.stderr}`;
-  else if (!(await becameHealthy(r))) {
-    failure = `the server did not become healthy within ${r.readyTimeoutMs}ms — see ${log}`;
-    r.launchctl(["bootout", serviceTarget(r.uid)]); // stop the failing agent before KeepAlive loops on it
-  }
-  if (failure === null) return { plist, bootstrapped: true };
+  else if (await becameHealthy(r)) return { plist, bootstrapped: true };
+  else failure = `the server did not become healthy within ${r.readyTimeoutMs}ms — see ${log}`;
 
-  // Roll back the plist this call wrote; if we stopped a running agent to reload it, start the restored definition
-  // again rather than leave the server down. Each step is guarded on its own and any failure is appended to the
-  // error, so a server left down is never silent — and the original failure is never masked.
+  // Roll back. Each step is checked on its own and named in the error if it fails, so nothing is left in a bad state
+  // silently — and the original failure is never masked.
   const notes: string[] = [];
+  if (boot.code === 0) {
+    // Stop the failing agent, or KeepAlive keeps restarting it.
+    const out = r.launchctl(["bootout", target]);
+    if (out.code !== 0 || loadedIn(r)) notes.push(`the failing agent is still loaded (bootout exit ${out.code}) — stop it with: launchctl bootout ${target}`);
+  }
   try {
     if (plist.undoId) undo(plist.undoId, r.stateDir);
   } catch (err) {
-    notes.push(`plist rollback failed: ${errorText(err)}`);
+    notes.push(`the new plist was NOT rolled back and will start at the next login: ${errorText(err)}`);
   }
-  if (loaded) {
-    const again = bootstrap();
-    if (again.code !== 0) notes.push(`previous agent NOT restarted (exit ${again.code}): ${again.stderr}`);
-    else if (!(await becameHealthy(r))) notes.push("previous agent restarted but NOT healthy");
-  }
+  if (loaded) notes.push("the server is DOWN (its agent was stopped for the reload) — fix the cause, then re-run install");
   throw new Error(`launchd: ${failure}${notes.length > 0 ? ` — ${notes.join("; ")}` : ""}`);
 }
 

@@ -75,6 +75,13 @@ export type RenderError =
 
 export type RenderResult = { ok: true; files: RenderedFile[] } | { ok: false; error: RenderError };
 
+/** Content-free render failure text — one shape for every caller (CLI, `apply`, the MCP tools), built only from
+ *  role/harness/destination/source/problem-code fields, never from bytes (KTD5). */
+export function renderErrorText(error: RenderError): string {
+  const where = `role '${error.role}' (${error.harness}) → '${error.destination}'`;
+  return "source" in error ? `render ${error.problem} for ${where} from '${error.source}'` : `render ${error.problem} for ${where}`;
+}
+
 /**
  * Render every manifest entry in manifest order. Stops on the first role/file failure so callers get one
  * loud, deterministic refusal rather than a partial plan whose missing row could look like a no-op.

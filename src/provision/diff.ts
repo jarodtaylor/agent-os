@@ -48,6 +48,24 @@ export type DiffResult = { ok: true; rows: DiffRow[] } | { ok: false; error: Dif
  *  bound), `non-regular` (a directory/FIFO/device), `unreadable` (permissions or any other lookup failure). */
 export type BlockedReason = "symlink" | "oversized" | "non-regular" | "unreadable";
 
+/** Operator-facing remedy per blocked cause — fixed strings selected by a fixed enum, never derived from bytes. */
+const BLOCKED_REMEDY: Readonly<Record<BlockedReason, string>> = {
+  symlink: "it is a symlink — provisioning never reads or writes through an indirection; replace it with a real file",
+  oversized: "it is larger than the 16 MiB read bound",
+  "non-regular": "it is not a regular file (a directory, FIFO, or device)",
+  unreadable: "it could not be read (check its permissions)",
+};
+
+/** Content-free diff failure text — one shape for every caller (CLI, `apply`, the MCP tools). */
+export function diffErrorText(error: DiffError): string {
+  const where = `diff ${error.problem} for role '${error.role}' (${error.harness}) → '${error.destination}'`;
+  // Name the CAUSE when the reader knew it. A blocked destination aborts the whole run, so "unreadable-destination"
+  // alone leaves the operator with no idea that removing one symlink unblocks every other surface. Fixed strings
+  // selected by a fixed enum — no bytes, so the no-content-echo rule is untouched.
+  const remedy = "blockedBy" in error && error.blockedBy ? ` — ${BLOCKED_REMEDY[error.blockedBy]}` : "";
+  return `${where}${remedy}`;
+}
+
 /** A live destination read retains raw bytes for KTD8's opaque-text identity check. */
 export type DestinationRead =
   | { ok: true; content: string; bytes: Uint8Array }

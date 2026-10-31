@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { installLaunchd, LAUNCHD_LABEL, plistPath, renderPlist, uninstallLaunchd, type HealthProbe, type Launchctl } from "../src/install/launchd";
 import { SUPERVISOR_ENV } from "../src/paths";
+import { listUndo, undo } from "../src/configwrite/index";
 import { createRoutes } from "../src/server/routes";
 import { acquireSingleInstanceLock } from "../src/server/single-instance";
 
@@ -270,6 +271,31 @@ describe("uninstallLaunchd", () => {
     await installLaunchd(opts(lc.run, { dataDir: join(root, "data-b") }));
     expect(uninstallLaunchd(opts(lc.run, { dataDir: join(root, "data-b") })).failed).toEqual([]);
     expect(existsSync(plistPath(home))).toBe(false);
+  });
+
+  test("an uninstall that died partway resumes where it stopped", async () => {
+    const lc = fakeLaunchctl();
+    await installLaunchd(opts(lc.run)); // A (created)
+    await installLaunchd(opts(lc.run, { port: 4400 })); // B
+    await installLaunchd(opts(lc.run, { port: 4401 })); // C
+    const journal = join(home, "Library", "Application Support", "agent-os");
+    const [, b, c] = listUndo(journal).filter((e) => e.targetPath === plistPath(home));
+    undo(c.id, journal); // C → B
+    undo(b.id, journal); // B → A, then the uninstall "died" before deleting A
+    expect(uninstallLaunchd(opts(lc.run))).toEqual({ removed: [plistPath(home)], failed: [], warnings: [] });
+    expect(existsSync(plistPath(home))).toBe(false);
+  });
+
+  test("a repeated uninstall after restoring a pre-existing plist is a clean no-op", async () => {
+    const original = "<?xml version=\"1.0\"?><plist version=\"1.0\"><dict/></plist>\n";
+    mkdirSync(join(home, "Library", "LaunchAgents"), { recursive: true });
+    writeFileSync(plistPath(home), original);
+    const lc = fakeLaunchctl();
+    await installLaunchd(opts(lc.run));
+    await installLaunchd(opts(lc.run, { port: 4400 }));
+    uninstallLaunchd(opts(lc.run));
+    expect(uninstallLaunchd(opts(lc.run))).toEqual({ removed: [], failed: [], warnings: [] });
+    expect(readFileSync(plistPath(home), "utf8")).toBe(original);
   });
 
   test("a hand-edited plist is reported as failed, never clobbered", async () => {

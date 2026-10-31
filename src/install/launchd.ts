@@ -233,9 +233,10 @@ export async function installLaunchd(opts: LaunchdOptions = {}): Promise<Launchd
  * Stop the agent and reverse the plist by replaying its undo journal newest-first (backup-restore), stopping at the
  * write that created it. Cross-process by design: it reads the on-disk journal, so it works days after install.
  *
- * Replay starts at the entry whose written bytes match the plist on disk NOW, not at the newest entry — so an
- * uninstall that died partway resumes where it stopped, and a repeated uninstall after a pre-existing plist was
- * restored is a clean no-op. That cursor is derived from the file itself, so every step stays identity-checked.
+ * Each step undoes the next-older entry whose written bytes match the plist on disk NOW, not simply the next entry —
+ * so an uninstall that died partway resumes where it stopped (even across a reinstall in between), and a repeated
+ * uninstall after a pre-existing plist was restored is a clean no-op. The cursor is the file itself, so every step
+ * stays identity-checked.
  * A plist that matches nothing we wrote or restored (hand-edited) is reported in `failed` and left in place.
  */
 export function uninstallLaunchd(opts: LaunchdOptions = {}): UninstallOutcome {
@@ -251,17 +252,20 @@ export function uninstallLaunchd(opts: LaunchdOptions = {}): UninstallOutcome {
   try {
     if (!existsSync(path)) return outcome;
     const entries = listUndo(r.stateDir).filter((e) => e.targetPath === path).reverse();
-    const current = hashContent(readFileSync(path));
-    const start = entries.findIndex((e) => e.postHash === current);
-    if (start === -1) {
+    // Follow the chain by content: each step undoes the next-older entry whose written bytes are what the file holds
+    // now, so interrupted uninstalls and reinstalls in between (journal branches) never derail the replay.
+    let current = hashContent(readFileSync(path));
+    let matched = false;
+    for (const entry of entries) {
+      if (entry.postHash !== current) continue;
+      matched = true;
+      if (undo(entry.id, r.stateDir) === "reversed" && !outcome.removed.includes(path)) outcome.removed.push(path);
+      if (entry.created || !existsSync(path)) break;
+      current = hashContent(readFileSync(path));
+    }
+    if (!matched) {
       const restoredAlready = entries.some((e) => e.backupPath && existsSync(e.backupPath) && hashContent(readFileSync(e.backupPath)) === current);
       if (!restoredAlready && entries.length > 0) outcome.failed.push({ path, error: "plist changed since agent-os wrote it — left in place" });
-      return outcome;
-    }
-    for (const entry of entries.slice(start)) {
-      if (!existsSync(path)) break;
-      if (undo(entry.id, r.stateDir) === "reversed" && !outcome.removed.includes(path)) outcome.removed.push(path);
-      if (entry.created) break;
     }
   } catch (err) {
     console.error(`[agent-os] uninstall: could not restore '${path}':`, err);

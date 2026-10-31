@@ -286,6 +286,20 @@ describe("uninstallLaunchd", () => {
     expect(existsSync(plistPath(home))).toBe(false);
   });
 
+  test("an interrupted uninstall followed by a reinstall still uninstalls in one call", async () => {
+    const lc = fakeLaunchctl();
+    await installLaunchd(opts(lc.run)); // A (created)
+    await installLaunchd(opts(lc.run, { port: 4400 })); // B
+    await installLaunchd(opts(lc.run, { port: 4401 })); // C
+    const journal = join(home, "Library", "Application Support", "agent-os");
+    const [, b, c] = listUndo(journal).filter((e) => e.targetPath === plistPath(home));
+    undo(c.id, journal);
+    undo(b.id, journal); // interrupted at A
+    await installLaunchd(opts(lc.run, { port: 4402 })); // D, backing up A
+    expect(uninstallLaunchd(opts(lc.run))).toEqual({ removed: [plistPath(home)], failed: [], warnings: [] });
+    expect(existsSync(plistPath(home))).toBe(false);
+  });
+
   test("a repeated uninstall after restoring a pre-existing plist is a clean no-op", async () => {
     const original = "<?xml version=\"1.0\"?><plist version=\"1.0\"><dict/></plist>\n";
     mkdirSync(join(home, "Library", "LaunchAgents"), { recursive: true });

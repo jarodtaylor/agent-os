@@ -14,7 +14,7 @@
  * has a home to land in.
  */
 import { codexConfigPath } from "../codex-credential";
-import { dbPath, ensureDataDir, resolveDataDir, resolveMachineId, resolvePort } from "../paths";
+import { dbPath, ensureDataDir, resolveDataDir, resolveMachineId, resolvePort, SUPERVISOR_ENV } from "../paths";
 import { openDb } from "../store/db";
 import { createRepo } from "../store/repo";
 import { createRoutes } from "./routes";
@@ -51,7 +51,10 @@ const gate = securityGate({ token, codexConfigPath: codexConfigPath(), port: POR
 // machineId is this machine's federation discriminator (decision #13), stamped onto every record the MCP
 // write path persists. A persisted opaque UUID (not os.hostname(), which can carry the user's name) so it
 // doesn't bake a personal identifier into records that accumulate now and federate in v1.1 — see ../paths.
-const app = createRoutes({ repo, gate, machineId: resolveMachineId(dataDir), dataDir });
+// The LaunchAgent plist sets SUPERVISOR_ENV (see ../install/launchd), so `/health` can tell a supervised server
+// from a manually started one.
+const supervisor = process.env[SUPERVISOR_ENV] === "launchd" ? "launchd" : "none";
+const app = createRoutes({ repo, gate, machineId: resolveMachineId(dataDir), dataDir, supervisor });
 
 // Bind loopback-only, BEFORE publishing the token. `hostname: "127.0.0.1"` because Bun.serve otherwise
 // defaults to 0.0.0.0 (all interfaces), which would expose the gate-exempt /health off-box (KTD9 is

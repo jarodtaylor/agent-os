@@ -25,6 +25,9 @@ export interface RouteDeps {
   /** The agent-os data dir the provisioning tools resolve projects through (KTD11). Defaults to the resolved
    *  data dir; tests inject a scratch one. */
   dataDir?: string;
+  /** Who keeps this process alive — `"launchd"` when run by the installed LaunchAgent, else `"none"`. Reported on
+   *  `/health` so a manually started (unsupervised) server is visible. Defaults to `"none"`. */
+  supervisor?: "launchd" | "none";
 }
 
 /** Upper bound for the `GET /work-state` `?limit=` param — the accept regex allows arbitrarily long digit
@@ -43,7 +46,7 @@ const SessionEndRequest = z.object({
  * Chained (not sequential `app.get()` calls) so the returned value's inferred type carries the
  * full route schema — the shape U11's `hc<AppType>()` RPC client will need later.
  */
-export function createRoutes({ repo, gate, machineId, now, dataDir }: RouteDeps) {
+export function createRoutes({ repo, gate, machineId, now, dataDir, supervisor = "none" }: RouteDeps) {
   // One MCP handler for the process lifetime — it owns the transport-per-session map, so it must NOT be
   // rebuilt per request.
   const mcp = createMcpHandler({ repo, machineId, now, dataDir });
@@ -54,7 +57,7 @@ export function createRoutes({ repo, gate, machineId, now, dataDir }: RouteDeps)
     // middleware, which is the whole point of a security spine. An unknown path is gated too: the gate
     // 403s a missing token before routing can 404 it.
     .use("*", (c, next) => (c.req.path === "/health" ? next() : gate(c, next)))
-    .get("/health", (c) => c.json({ ok: true }))
+    .get("/health", (c) => c.json({ ok: true, supervisor }))
     .get("/status", async (c) => {
       try {
         // A cheap, real read — proves the store is actually reachable rather than hardcoding a

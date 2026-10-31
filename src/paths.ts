@@ -42,6 +42,10 @@ export function resolvePort(): number {
   return Number.isInteger(n) && n > 0 && n <= 65535 ? n : DEFAULT_PORT;
 }
 
+/** Env var the launchd plist sets so the server can report it is supervised on `/health`. Shared by the
+ *  installer that writes it (`install/launchd.ts`) and the boot that reads it (`server/index.ts`). */
+export const SUPERVISOR_ENV = "AGENT_OS_SUPERVISOR";
+
 /** Path to the sqlite store db file (see `store/db.ts#openDb`). */
 export function dbPath(dataDir: string): string {
   return join(dataDir, "store.db");

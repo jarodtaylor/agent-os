@@ -3,14 +3,14 @@
 > **For humans.** Plain language, outcomes first, short on purpose. The deep/agent-grade state lives in [`START-HERE.md`](START-HERE.md) + [`DECISIONS.md`](DECISIONS.md); this page is their product-level projection.
 > **Freshness rule:** `/handoff` updates this page whenever something ships. If this page and reality ever disagree, that's a bug — flag it.
 
-_Last updated: 2026-10-30 · Status: **v0.1 "Continuity" in progress — 12 of 15 units shipped**; latest: **U10 provisioning COMPLETE** — the CLI + starter blueprint (PR #61) and propose-only agent tools (PR #65) finished the engine. Also: every PR is now auto-reviewed by Claude, Codex and Copilot, and PRs are capped at ~800 hand-written lines (PR #63, decision #61). Next: **U15 — always-on server**. · Roadmap postures locked by the 2026-07-10 interview (decisions #32–#41)_
+_Last updated: 2026-11-15 · Status: **v0.1 "Continuity" in progress — 13 of 15 units shipped**; latest: **U15 always-on server SHIPPED** (PR #67) — the brain server now restarts itself after crashes and starts at login, which completes the foundation. Before that: **U10 provisioning COMPLETE** (PRs #61, #65). Also: every PR is now auto-reviewed by Claude, Codex and Copilot, and PRs are capped at ~800 hand-written lines (PR #63, decision #61). Next: **switch the handoff record onto the always-on server, then the MVP-definition session**. · Roadmap postures locked by the 2026-07-10 interview (decisions #32–#41)_
 
 ## TL;DR
 
 - **Problem.** I run a dozen AI harnesses — Claude Code, Codex, Hermes, Cursor, Antigravity, and more. Each is powerful; none of them share anything. Every session starts cold, I re-explain myself constantly, and juggling terminals is heavy enough that I collapse back to just Claude Code — and lose the team.
 - **Bet.** **Connect, don't replace.** Agent OS is local-first connective tissue: one shared memory + one control surface every harness plugs into, so my agents act like a co-located team. Hard line: we never build or fork our own harness.
-- **Today.** The foundation works: **Claude Code and Codex write to one shared "where did we leave off?" memory.** A fresh Claude Code session picks up automatically — nothing pasted (ran live 2026-07-08). Codex is wired the same way; its live check lands with the always-on server (U15). No screens yet; everything so far is deliberately under the floorboards.
-- **Next (rest of v0.1).** An **always-on server** (U15), then the MVP-definition session and the **first actual screen** (U11).
+- **Today.** The foundation works: **Claude Code and Codex write to one shared "where did we leave off?" memory.** A fresh Claude Code session picks up automatically — nothing pasted (ran live 2026-07-08). Codex is wired the same way; its live check is now unblocked. **The server is always on** (U15): it restarts itself after a crash and is up before you open any session. No screens yet; everything so far is deliberately under the floorboards.
+- **Next (rest of v0.1).** Point the session handoff at the now always-on server, then the MVP-definition session and the **first actual screen** (U11).
 - **The headline act — the Agent Brain (real memory: wiki + long-term recall + auto-ingestion) — is designed, not built.** v0.1 is its foundation; building the Brain proper is the next big phase.
 
 ## The four tracks (the whole vision, one glance)
@@ -26,9 +26,10 @@ _Last updated: 2026-10-30 · Status: **v0.1 "Continuity" in progress — 12 of 1
 
 ## What works today (demo-able on this machine)
 
-- ✅ **A fresh Claude Code session knows where you left off** — open it; the context is just there. *Ran live on the real machine 2026-07-08 (installed, verified end-to-end, then cleanly uninstalled until the always-on server lands at U15).*
+- ✅ **A fresh Claude Code session knows where you left off** — open it; the context is just there. *Ran live on the real machine 2026-07-08 (installed, verified end-to-end, then cleanly uninstalled until the always-on server landed; re-installing it for keeps is the next step).*
 - ✅ **`/handoff` writes ONE authoritative record** of "where we left off" per project; the human docs render that record instead of competing with it.
-- ✅ **Codex is on the same shared memory** — same capture, same read tools, its own revocable credential. *Code + tests done; the live end-to-end check waits on the always-on server.*
+- ✅ **The brain server is always on** — it starts at login and restarts itself after a crash. *Checked live 2026-11-15: back in 0.3s after a forced restart, 2.4s after a hard kill, and up after logout/login before any session started (PR #67).*
+- ✅ **Codex is on the same shared memory** — same capture, same read tools, its own revocable credential. *Code + tests done; the live end-to-end check is unblocked now that the server is always on.*
 - ✅ **Crash-safe breadcrumbs** — every session automatically leaves a trail of what it did; a spike proved a cold agent can resume real mid-flight work from the trail alone.
 - ✅ **Marked secrets can't leak out** — every read path (agent tools, HTTP, the future UI) passes one redaction gate that masks anything marked secret. Security-reviewed; clean bill on outbound leak paths. (Scope honesty, per decision #25: the gate makes reads *non-leaky* — what's marked is what's masked.)
 - ✅ **Config safety** — Agent OS edits harness configs (hooks, MCP entries) with backup → atomic write → undo journal. It has run against the real `~/.claude` and restored it byte-perfect.
@@ -42,7 +43,7 @@ _Last updated: 2026-10-30 · Status: **v0.1 "Continuity" in progress — 12 of 1
 
 > _Naming map: this page's **v0.1** = "slice 1" / "v1" in the engineering docs; their "**v1.1**" = the **Memory** phase below._
 
-### v0.1 — "Continuity" *(now · 11 of 15 units shipped · **committed** — unit-backed)*
+### v0.1 — "Continuity" *(now · 13 of 15 units shipped · **committed** — unit-backed)*
 
 **Problem it solves:** resuming work = archaeology (which CLI touched this last? what was in flight?), and re-explaining context to every agent. That overhead made multi-agent work not worth it.
 
@@ -54,7 +55,7 @@ _Last updated: 2026-10-30 · Status: **v0.1 "Continuity" in progress — 12 of 1
 - **U10 ✅ — project provisioning:** a project carries one versioned "blueprint" (which roles run in which harness, on which model, with which files), and agent-os pushes it into Claude Code, Codex, and Cursor natively — reversibly, with a dry-run preview and a drift report. All seven sub-units shipped (PRs #44–#47, #52, #61, #65): the manifest contract + front-gate, the text write primitive, render → diff, the target registry + Cursor scanner, apply/undo, the operator CLI + starter blueprint, and propose-only agent tools (agents see, only you apply). Rescoped from the earlier "parity actions" framing by lived dogfood evidence (decision #52).
 - **U11 — the first screen:** projects + where-they-left-off + the inventory grid + provision buttons.
 - **U12 — roster spike:** find the read/write surfaces for Hermes / Cursor / Antigravity / OpenCode (decides their lanes).
-- **U15 — always-on:** server survives reboots/crashes (launchd); hooks re-install for keeps; the pending live Codex check runs then.
+- ✅ **U15 — always-on:** server survives crashes and logout/login (launchd, PR #67). Follow-ups it unblocks: re-install the hooks for keeps, and run the pending live Codex check.
 
 ### The next two phases — **order decided** (decision #38): Memory, then Coordination *(each phase's scope stays open until its own scoping session)*
 
@@ -122,7 +123,7 @@ A shared task board across harnesses *and* instances, plus Hermes as the always-
 | U10 | Provisioning engine | Blueprint → native harness setup (roles/models/files), with undo | ✅ (7/7 — PRs #44–#47, #52, #61, #65) |
 | U11 | Thin human view | The first screen | ⏳ |
 | U12 | Roster lane spike | What's possible for Hermes / Cursor / Antigravity / OpenCode | ⏳ |
-| U15 | Always-on (launchd) | Server survives reboots; hooks installed for keeps; live Codex check | ⏳ |
+| U15 | Always-on (launchd) | Server survives crashes + logout/login | ✅ (PR #67) |
 
 ## Dig deeper
 

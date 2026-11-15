@@ -189,7 +189,7 @@ export async function installLaunchd(opts: LaunchdOptions = {}): Promise<Launchd
     try {
       acquireSingleInstanceLock(r.dataDir)();
     } catch (err) {
-      throw new Error(`launchd: an agent-os server is already running outside launchd — stop it, then install (${errorText(err)})`);
+      throw new Error(`launchd: could not take the data dir's single-instance lock — if an agent-os server is running outside launchd, stop it, then install (${errorText(err)})`);
     }
   }
 
@@ -275,7 +275,10 @@ export function uninstallLaunchd(opts: LaunchdOptions = {}): UninstallOutcome {
     }
     if (!matched) {
       const restoredAlready = entries.some((e) => e.backupPath && existsSync(e.backupPath) && hashContent(readFileSync(e.backupPath)) === current);
-      if (!restoredAlready && entries.length > 0) outcome.failed.push({ path, error: "plist changed since agent-os wrote it — left in place" });
+      // No journal at all (state dir removed, rows unreadable) is not "nothing to do": the RunAtLoad plist would
+      // survive a "successful" uninstall and start the server at the next login.
+      if (entries.length === 0) outcome.failed.push({ path, error: "no agent-os undo journal for this plist — cannot verify it is ours; left in place (remove it by hand)" });
+      else if (!restoredAlready) outcome.failed.push({ path, error: "plist changed since agent-os wrote it — left in place" });
     }
   } catch (err) {
     console.error(`[agent-os] uninstall: could not restore '${path}':`, err);

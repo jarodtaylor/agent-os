@@ -231,7 +231,7 @@ describe("installLaunchd", () => {
     const release = acquireSingleInstanceLock(dataDir);
     try {
       const lc = fakeLaunchctl();
-      await expect(installLaunchd(opts(lc.run))).rejects.toThrow(/already running outside launchd/);
+      await expect(installLaunchd(opts(lc.run))).rejects.toThrow(/single-instance lock.*running outside launchd/);
       expect(existsSync(plistPath(home))).toBe(false);
       expect(lc.verbs()).toEqual([]);
     } finally {
@@ -257,6 +257,15 @@ describe("uninstallLaunchd", () => {
     await installLaunchd(opts(lc.run, { port: 4400 }));
     expect(uninstallLaunchd(opts(lc.run)).failed).toEqual([]);
     expect(existsSync(plistPath(home))).toBe(false);
+  });
+
+  test("a plist with no undo journal is reported as failed, never a silent success", async () => {
+    const lc = fakeLaunchctl();
+    await installLaunchd(opts(lc.run));
+    rmSync(join(home, "Library", "Application Support", "agent-os"), { recursive: true, force: true });
+    const out = uninstallLaunchd(opts(lc.run));
+    expect(out.failed).toEqual([{ path: plistPath(home), error: expect.stringMatching(/no agent-os undo journal/) }]);
+    expect(existsSync(plistPath(home))).toBe(true);
   });
 
   test("restores a pre-existing plist byte-identically", async () => {

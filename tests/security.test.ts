@@ -122,7 +122,7 @@ describe("scenario 3 — token gate on /status; /health stays exempt", () => {
     const { app } = buildApp();
     const res = await app.request("/health");
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ ok: true });
+    expect(await res.json()).toEqual({ ok: true, supervisor: "none" });
   });
 
   test("/health is exempt even behind a hostile Host header — the gate is never applied to it", async () => {
@@ -406,7 +406,7 @@ describe("scenario 7 — dev=prod: bun run src/server/index.ts", () => {
 
         const health = await fetch(`http://127.0.0.1:${port}/health`);
         expect(health.status).toBe(200);
-        expect(await health.json()).toEqual({ ok: true });
+        expect(await health.json()).toEqual({ ok: true, supervisor: "none" });
 
         const status = await fetch(`http://127.0.0.1:${port}/status`); // no token
         expect(status.status).toBe(403);

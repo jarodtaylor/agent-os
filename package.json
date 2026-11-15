@@ -7,7 +7,8 @@
     "typecheck": "tsc --noEmit",
     "build": "tsc --noEmit",
     "start": "bun run src/server/index.ts",
-    "provision": "bun run src/provision/cli.ts"
+    "provision": "bun run src/provision/cli.ts",
+    "supervise": "bun run src/install/launchd.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "~1.29.0",

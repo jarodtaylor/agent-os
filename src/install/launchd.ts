@@ -11,7 +11,7 @@
  */
 import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve as resolvePath } from "node:path";
 import { AppliedButUnjournaledError, hashContent, listUndo, undo, writeTextFile, type MergeResult } from "../configwrite/index";
 import { ensureDataDir, resolveDataDir, resolvePort, SUPERVISOR_ENV } from "../paths";
 import { acquireSingleInstanceLock } from "../server/single-instance";
@@ -71,7 +71,9 @@ function resolve(opts: LaunchdOptions) {
   return {
     home: opts.home ?? homedir(),
     repoRoot: opts.repoRoot ?? defaultRepoRoot(),
-    dataDir: resolveDataDir(opts.dataDir),
+    // Absolute now: the server resolves a relative dir against the plist's WorkingDirectory (the repo root), not
+    // against wherever this installer happens to run, so the lock probe and log dir must use the same absolute path.
+    dataDir: resolvePath(resolveDataDir(opts.dataDir)),
     port: opts.port ?? resolvePort(),
     // PATH lookup first: a version manager's stable path (e.g. mise's `.../bun/latest/bin/bun`) survives a bun
     // upgrade, whereas `process.execPath` is the version-pinned binary a prune would delete from under the agent.
@@ -82,6 +84,14 @@ function resolve(opts: LaunchdOptions) {
     readyTimeoutMs: opts.readyTimeoutMs ?? 15_000,
     stateDir: installStateDir(opts.home ?? homedir()),
   };
+}
+
+/** A warning when `bunPath` has a version-number directory in it (e.g. `.../bun/1.2.14/bin/bun`): a version manager's
+ *  upgrade-and-prune deletes that binary and launchd silently crash-loops. `Bun.which` is a plain PATH lookup, so it
+ *  only yields a stable path (mise's `.../latest/...`, `~/.bun/bin`, Homebrew's `bin`) when PATH holds one. */
+export function versionPinnedWarning(bunPath: string): string | null {
+  if (!/\/v?\d+\.\d+[^/]*\//.test(bunPath)) return null;
+  return `bun path ${bunPath} is pinned to one version — a bun upgrade that removes it will stop the server from starting. Put a stable bun path (e.g. a version manager's 'latest' shim) first on PATH and re-run install.`;
 }
 
 const xmlEscape = (s: string): string =>
@@ -277,6 +287,8 @@ export function uninstallLaunchd(opts: LaunchdOptions = {}): UninstallOutcome {
 if (import.meta.main) {
   const cmd = process.argv[2];
   if (cmd === "install") {
+    const pinned = versionPinnedWarning(resolve({}).bunPath);
+    if (pinned) console.warn(`[agent-os] warning: ${pinned}`);
     const { plist, bootstrapped } = await installLaunchd();
     console.log(`[agent-os] ${plist.targetPath}: ${plist.noop ? "unchanged" : "written"}; ${bootstrapped ? "agent (re)loaded" : "agent already loaded"}`);
   } else if (cmd === "uninstall") {

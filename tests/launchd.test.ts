@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { installLaunchd, LAUNCHD_LABEL, plistPath, renderPlist, uninstallLaunchd, type HealthProbe, type Launchctl } from "../src/install/launchd";
+import { installLaunchd, LAUNCHD_LABEL, plistPath, renderPlist, uninstallLaunchd, versionPinnedWarning, type HealthProbe, type Launchctl } from "../src/install/launchd";
 import { SUPERVISOR_ENV } from "../src/paths";
 import { listUndo, undo } from "../src/configwrite/index";
 import { createRoutes } from "../src/server/routes";
@@ -89,6 +89,20 @@ describe("renderPlist", () => {
 });
 
 describe("installLaunchd", () => {
+  test("a relative data dir is baked in as an absolute path, so the server (cwd = repo root) uses the same store", async () => {
+    const lc = fakeLaunchctl();
+    const prev = process.cwd();
+    process.chdir(root);
+    try {
+      await installLaunchd(opts(lc.run, { dataDir: "rel-data" }));
+    } finally {
+      process.chdir(prev);
+    }
+    const abs = join(realpathSync(root), "rel-data");
+    expect(readFileSync(plistPath(home), "utf8")).toContain(`<string>${abs}</string>`);
+    expect(existsSync(join(abs, "logs"))).toBe(true);
+  });
+
   test("fresh install writes the plist, creates the log dir, and bootstraps the agent", async () => {
     const lc = fakeLaunchctl();
     const res = await installLaunchd(opts(lc.run));
@@ -325,6 +339,19 @@ describe("uninstallLaunchd", () => {
     const lc = fakeLaunchctl();
     expect(uninstallLaunchd(opts(lc.run))).toEqual({ removed: [], failed: [], warnings: [] });
     expect(lc.verbs()).toEqual([]);
+  });
+});
+
+describe("versionPinnedWarning", () => {
+  test("flags a version-numbered bun path", () => {
+    expect(versionPinnedWarning("/Users/x/.local/share/mise/installs/bun/1.2.14/bin/bun")).toMatch(/pinned to one version/);
+    expect(versionPinnedWarning("/opt/homebrew/Cellar/bun/1.3.0/bin/bun")).not.toBeNull();
+  });
+
+  test("accepts stable paths", () => {
+    for (const p of ["/Users/x/.local/share/mise/installs/bun/latest/bin/bun", "/Users/x/.bun/bin/bun", "/opt/homebrew/bin/bun"]) {
+      expect(versionPinnedWarning(p)).toBeNull();
+    }
   });
 });
 

@@ -3,8 +3,10 @@
  * integrations (U6 Claude Code, U8 Codex), which until now were only reachable via `bun -e`. Thin by design:
  * every write/undo guarantee lives in the installers; this module only dispatches and reports.
  *
- * - No target ⇒ both harnesses. They are independent: one failing never stops the other (no cross-harness
- *   rollback — each installer is already all-or-nothing across its own files); any failure ⇒ exit 1.
+ * - No target ⇒ both harnesses. They are independent: one failing never stops the other, and there is no
+ *   cross-harness rollback. Exit 1 does NOT mean "nothing changed": each installer rolls back its own earlier
+ *   writes only best-effort, and its first write has a narrow publish-before-journal window
+ *   (`AppliedButUnjournaledError`, see `codex.ts` installCodex) — so a failed harness may be partially installed.
  * - Output is PATHS + written/unchanged only — never config content (Codex `config.toml` carries the
  *   credential; decision #45's no-content-echo threat model).
  * - `runCli(argv, ctx)` takes an injectable `home`/`dataDir` so the suite never touches the real configs;

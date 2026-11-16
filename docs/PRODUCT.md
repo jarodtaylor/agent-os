@@ -127,6 +127,7 @@ A shared task board across harnesses *and* instances, plus Hermes as the always-
 
 ## Dig deeper
 
+- **[`site/index.html`](site/index.html) — the human product site** (open in a browser): roadmap, what's shipped, diagrams, glossary. Jarod's primary view (decision #68).
 - [`START-HERE.md`](START-HERE.md) — live project state (agent-grade; the "you are here").
 - [`DECISIONS.md`](DECISIONS.md) — every decision, its why, and the open forks.
 - [`plans/2026-07-01-001-feat-slice-1-substrate-parity-plan.md`](plans/2026-07-01-001-feat-slice-1-substrate-parity-plan.md) — the full v0.1 plan.

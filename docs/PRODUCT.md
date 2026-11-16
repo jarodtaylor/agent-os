@@ -3,7 +3,7 @@
 > **For humans.** Plain language, outcomes first, short on purpose. The deep/agent-grade state lives in [`START-HERE.md`](START-HERE.md) + [`DECISIONS.md`](DECISIONS.md); this page is their product-level projection.
 > **Freshness rule:** `/handoff` updates this page whenever something ships. If this page and reality ever disagree, that's a bug — flag it.
 
-_Last updated: 2026-11-15 · Status: **v0.1 "Continuity" in progress — 13 of 15 units shipped**; latest: **U15 always-on server SHIPPED** (PR #67) — the brain server now restarts itself after crashes and starts at login, which completes the foundation. Before that: **U10 provisioning COMPLETE** (PRs #61, #65). Also: every PR is now auto-reviewed by Claude, Codex and Copilot, and PRs are capped at ~800 hand-written lines (PR #63, decision #61). Next: **switch the handoff record onto the always-on server, then the MVP-definition session**. · Roadmap postures locked by the 2026-07-10 interview (decisions #32–#41)_
+_Last updated: 2026-11-16 · Status: **v0.1 "Continuity" in progress — 13 of 15 units shipped**; latest: **U15 always-on server SHIPPED** (PR #67) — the brain server now restarts itself after crashes and starts at login, which completes the foundation. Before that: **U10 provisioning COMPLETE** (PRs #61, #65). Also: every PR is now auto-reviewed by Claude, Codex and Copilot, and PRs are capped at ~800 hand-written lines (PR #63, decision #61). Handoff record now lives on the always-on server, read by both Claude Code and Codex (decision #67). Next: **the MVP-definition session**. · Roadmap postures locked by the 2026-07-10 interview (decisions #32–#41)_
 
 ## TL;DR
 
@@ -26,10 +26,10 @@ _Last updated: 2026-11-15 · Status: **v0.1 "Continuity" in progress — 13 of 1
 
 ## What works today (demo-able on this machine)
 
-- ✅ **A fresh Claude Code session knows where you left off** — open it; the context is just there. *Ran live on the real machine 2026-07-08 (installed, verified end-to-end, then cleanly uninstalled until the always-on server landed; re-installing it for keeps is the next step).*
-- ✅ **`/handoff` writes ONE authoritative record** of "where we left off" per project; the human docs render that record instead of competing with it.
+- ✅ **A fresh Claude Code session knows where you left off** — open it; the context is just there. *Installed for keeps (PR #69) and verified live 2026-11-16.*
+- ✅ **`/handoff` writes ONE authoritative record** of "where we left off" per project, to the always-on server; the human docs render that record instead of competing with it. *Live since 2026-11-16 (decision #67).*
 - ✅ **The brain server is always on** — it starts at login and restarts itself after a crash. *Checked live 2026-11-15: back in 0.3s after a forced restart, 2.4s after a hard kill, and up after logout/login before any session started (PR #67).*
-- ✅ **Codex is on the same shared memory** — same capture, same read tools, its own revocable credential. *Code + tests done; the live end-to-end check is unblocked now that the server is always on.*
+- ✅ **Codex is on the same shared memory** — same capture, same read tools, its own revocable credential. *Checked live 2026-11-16: a real Codex session, asked only "what should I work on next?", read the shared handoff on its own and answered from it.*
 - ✅ **Crash-safe breadcrumbs** — every session automatically leaves a trail of what it did; a spike proved a cold agent can resume real mid-flight work from the trail alone.
 - ✅ **Marked secrets can't leak out** — every read path (agent tools, HTTP, the future UI) passes one redaction gate that masks anything marked secret. Security-reviewed; clean bill on outbound leak paths. (Scope honesty, per decision #25: the gate makes reads *non-leaky* — what's marked is what's masked.)
 - ✅ **Config safety** — Agent OS edits harness configs (hooks, MCP entries) with backup → atomic write → undo journal. It has run against the real `~/.claude` and restored it byte-perfect.

@@ -27,7 +27,7 @@
   <figure class="diagram"><!-- diagram:how-it-fits -->
 <svg viewBox="0 0 1280 720" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="how-it-fits-title how-it-fits-desc">
         <title id="how-it-fits-title">How Agent OS fits together</title>
-        <desc id="how-it-fits-desc">Architecture showing you and your agent harnesses connecting to an always-on brain server on your Mac, which holds shared memory, an inventory of every skill and tool, and provisioning, with a planned first app screen that will show all of it.</desc>
+        <desc id="how-it-fits-desc">Architecture showing you and your agent harnesses connecting to an always-on brain server on your Mac, which holds shared memory, an inventory of the skills and tool, and provisioning, with a planned first app screen that will show all of it.</desc>
         <defs>
           <marker id="how-it-fits-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#D8DEE9"/></marker>
           <marker id="how-it-fits-arrow-two" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto-start-reverse"><polygon points="0 0, 8 3, 0 6" fill="#D8DEE9"/></marker>
@@ -109,7 +109,7 @@
         <rect x="420" y="342" width="36" height="12" rx="2" fill="transparent" stroke="rgba(216,222,233,0.40)" stroke-width="0.8"/>
         <text x="438" y="351" fill="#D8DEE9" font-size="7" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">SEES</text>
         <text x="636" y="372" fill="#ECEFF4" font-size="12" font-weight="600" font-family="'Geist', system-ui, sans-serif" text-anchor="middle">Inventory</text>
-        <text x="636" y="388" fill="#D8DEE9" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">every skill · MCP server · plugin, across harnesses</text>
+        <text x="636" y="388" fill="#D8DEE9" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">skills · MCP servers · plugins (Codex skills: later)</text>
 
         <!-- Shared memory (FOCAL) -->
         <rect x="412" y="424" width="448" height="136" rx="6" fill="#2E3440"/>
@@ -118,7 +118,7 @@
         <text x="444" y="439" fill="#EBCB8B" font-size="7" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">MEMORY</text>
         <text x="636" y="470" fill="#ECEFF4" font-size="14" font-weight="600" font-family="'Geist', system-ui, sans-serif" text-anchor="middle">Shared memory</text>
         <text x="636" y="492" fill="#D8DEE9" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">“where we left off” handoffs</text>
-        <text x="636" y="508" fill="#D8DEE9" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">+ automatic session breadcrumbs</text>
+        <text x="636" y="508" fill="#D8DEE9" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">+ session-end markers · breadcrumbs: not on yet</text>
         <text x="636" y="532" fill="#EBCB8B" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">secrets masked on every read</text>
 
         <!-- First screen (planned, optional/dashed) -->
@@ -158,11 +158,11 @@
   <figcaption>The highlighted box is the heart of it: the shared memory. <a href="diagrams/how-it-fits.html">Open full size</a></figcaption></figure>
 
   <h2>How “where we left off” travels</h2>
-  <p>While a session works, breadcrumbs are saved automatically. At the end, <code>/handoff</code> saves one short note: the next step and the last decision. The next session, in Claude Code or Codex, gets that note automatically at the start, with any secrets masked.</p>
+  <p>At the end of a session, <code>/handoff</code> saves one short note: the next step and the last decision. The next session, in Claude Code or Codex, gets that note automatically at the start, with any secrets masked. (The dashed breadcrumb step is built but not switched on yet.)</p>
   <figure class="diagram"><!-- diagram:where-we-left-off -->
 <svg viewBox="0 0 1280 720" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="where-we-left-off-title where-we-left-off-desc">
         <title id="where-we-left-off-title">Where we left off: how a handoff carries over</title>
-        <desc id="where-we-left-off-desc">Sequence showing a Claude Code session dropping automatic breadcrumbs and a wrap-up handoff on the brain server, then days later a new Claude Code or Codex session asking the server at start-up and getting the handoff back with secrets masked, so it picks up where you left off without pasting anything.</desc>
+        <desc id="where-we-left-off-desc">Sequence showing a Claude Code session dropping automatic breadcrumbs (built, not yet switched on) and a wrap-up handoff on the brain server, then days later a new Claude Code or Codex session asking the server at start-up and getting the handoff back with secrets masked, so it picks up where you left off without pasting anything.</desc>
         <defs>
           <marker id="where-we-left-off-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#D8DEE9"/></marker>
           <marker id="where-we-left-off-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#EBCB8B"/></marker>
@@ -185,7 +185,7 @@
         <rect x="208" y="152" width="464" height="96" rx="4" fill="rgba(236,239,244,0.04)" stroke="rgba(236,239,244,0.22)" stroke-width="1"/>
         <rect x="208" y="152" width="40" height="16" rx="2" fill="#2E3440" stroke="rgba(236,239,244,0.22)" stroke-width="1"/>
         <text x="228" y="164" fill="#D8DEE9" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.12em">LOOP</text>
-        <text x="260" y="182" fill="#D8DEE9" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" letter-spacing="0.04em">[while you work · hooks fire on their own]</text>
+        <text x="260" y="182" fill="#D8DEE9" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" letter-spacing="0.04em">[planned · built, not switched on yet]</text>
 
         <!-- ACTIVATION BARS -->
         <rect x="236" y="176" width="8" height="128" fill="rgba(236,239,244,0.06)" stroke="#D8DEE9" stroke-width="0.8"/>

@@ -29,13 +29,13 @@
       <tr><td>Agent / harness</td><td>An AI coding tool you run: Claude Code, Codex, Cursor, Hermes and others. Agent OS connects them and never rebuilds them.</td></tr>
       <tr><td>Brain server</td><td>The small always-on program on your Mac that every agent talks to. It holds the shared memory.</td></tr>
       <tr><td>Handoff</td><td>The single “where we left off” note per project: the next step and the last decision. Written by <code>/handoff</code>; read automatically by the next session.</td></tr>
-      <tr><td>Breadcrumbs</td><td>The automatic trail of what each session did. Survives crashes.</td></tr>
-      <tr><td>The Brain</td><td>The full shared-memory system: wiki, deep archive and the loop that keeps it clean. Designed, not built. Today's handoffs and breadcrumbs are its first piece.</td></tr>
+      <tr><td>Breadcrumbs</td><td>The automatic trail of what each session did, meant to survive crashes. Built but not switched on yet; today only a “session ended cleanly” marker is saved.</td></tr>
+      <tr><td>The Brain</td><td>The full shared-memory system: wiki, deep archive and the loop that keeps it clean. Designed, not built. Today's handoffs are its first piece.</td></tr>
       <tr><td>Substrate</td><td>The agents' word for the foundation: the local server, the database and the tools agents call.</td></tr>
       <tr><td>MCP</td><td>“USB-C for agents”: the standard plug agents use to call tools. The brain server is an MCP server, so any agent can use it.</td></tr>
       <tr><td>Hook</td><td>A small script an agent runs automatically at moments like session start or end. That's how memory gets saved and loaded without you doing anything.</td></tr>
       <tr><td>Provisioning / blueprint</td><td>Setting up each agent for a project from one file (the blueprint) that says which agent plays which role, on which model, with which files.</td></tr>
-      <tr><td>Inventory</td><td>The list of every skill, tool server and plugin installed across your agents.</td></tr>
+      <tr><td>Inventory</td><td>The list of skills, tool servers and plugins installed across your agents. Codex skills aren't scanned yet.</td></tr>
       <tr><td>Secret masking</td><td>The one checkpoint every read passes through; anything marked secret comes out as <code>[redacted]</code>.</td></tr>
       <tr><td>MVP</td><td>Minimum viable product: the smallest version that's actually useful day to day.</td></tr>
       <tr><td>Dogfooding</td><td>Using Agent OS on real work to find what breaks.</td></tr>
@@ -67,7 +67,7 @@
       <tr><td>U2</td><td>The local database</td><td><span class="status shipped">Shipped</span></td></tr>
       <tr><td>U3</td><td>The local server, locked to this machine</td><td><span class="status shipped">Shipped</span></td></tr>
       <tr><td>U4</td><td>Agent tools to read memory, plus secret masking</td><td><span class="status shipped">Shipped</span></td></tr>
-      <tr><td>U5</td><td>Claude Code leaves breadcrumbs automatically</td><td><span class="status shipped">Shipped</span></td></tr>
+      <tr><td>U5</td><td>Automatic breadcrumbs for Claude Code</td><td><span class="status planned">Built, not on</span></td></tr>
       <tr><td>U6</td><td>Claude Code picks up where you left off</td><td><span class="status shipped">Shipped</span></td></tr>
       <tr><td>U7</td><td>The <code>/handoff</code> record</td><td><span class="status shipped">Shipped</span></td></tr>
       <tr><td>U8</td><td>Codex on the same memory</td><td><span class="status shipped">Shipped</span></td></tr>

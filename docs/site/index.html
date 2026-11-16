@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent OS — Home</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+<header class="top"><div class="wrap">
+  <a class="brand" href="index.html">Agent OS</a>
+  <nav class="nav" aria-label="Site">
+    <a href="index.html" aria-current="page">Home</a>
+    <a href="roadmap.html">Roadmap</a>
+    <a href="how-it-works.html">How it works</a>
+    <a href="glossary.html">Glossary</a>
+  </nav>
+</div></header>
+
+<main class="wrap">
+  <h1>Where things stand</h1>
+  <p class="lede">One place for all your AI agents: they share one memory, so every session picks up where the last one left off, whichever agent you open.</p>
+  <p class="dim small">Last updated 16 Nov 2026 · kept current by <code>/handoff</code> at the end of every work session.</p>
+
+  <!-- SINCE YOU WERE LAST HERE: newest first. /handoff prepends one line per session that changed something. Keep ~8; older ones fold into the details below. -->
+  <h2>Since you were last here</h2>
+  <div class="panel">
+    <ul class="log">
+      <li><time datetime="2026-11-16">16 Nov 2026</time><div><b>This site.</b> A human-friendly view of the project, kept current every session.</div></li>
+      <li><time datetime="2026-11-16">16 Nov 2026</time><div><b>The "where we left off" note now lives on the always-on server.</b> Checked live: Claude Code saves it, and a real Codex session read it on its own and knew what to do next.</div></li>
+      <li><time datetime="2026-11-16">16 Nov 2026</time><div><b>One command connects Agent OS to Claude Code and Codex</b> (<code>bun run integrate install</code>), and the same command undoes it.</div></li>
+      <li><time datetime="2026-11-14">14 Nov 2026</time><div><b>The brain server is always on.</b> It starts when you log in and restarts itself within seconds if it crashes. That finished the foundation.</div></li>
+      <li><time datetime="2026-10-30">30 Oct 2026</time><div><b>Project setup ("provisioning") finished.</b> One blueprint sets up Claude Code, Codex and Cursor for a project, with preview and undo. Agents can look at it but only you can apply it.</div></li>
+      <li><time datetime="2026-10-30">30 Oct 2026</time><div><b>Every pull request now gets three AI reviews</b> (Claude, Codex, Copilot). They only comment; you merge.</div></li>
+    </ul>
+    <details style="margin-top:10px">
+      <summary class="dim small" style="cursor:pointer">Earlier (July 2026)</summary>
+      <ul class="log" style="margin-top:8px">
+        <li><time datetime="2026-07-22">22 Jul 2026</time><div>Provisioning can apply a whole setup in one go and undo it as a batch.</div></li>
+        <li><time datetime="2026-07-21">21 Jul 2026</time><div>Cursor joined as a third agent Agent OS can see and set up.</div></li>
+        <li><time datetime="2026-07-20">20 Jul 2026</time><div>First real trial run: Claude planned, Codex built, Claude reviewed, Cursor tested, on a live project.</div></li>
+        <li><time datetime="2026-07-16">16 Jul 2026</time><div>Inventory: see every skill, tool server and plugin installed across your agents.</div></li>
+        <li><time datetime="2026-07-09">9 Jul 2026</time><div>Codex connected to the same shared memory as Claude Code.</div></li>
+        <li><time datetime="2026-07-08">8 Jul 2026</time><div>First time a fresh Claude Code session picked up where the last left off, with nothing pasted.</div></li>
+        <li><time datetime="2026-07-04">4–5 Jul 2026</time><div>The foundation pieces: the database, the local server, secret masking, automatic session breadcrumbs.</div></li>
+      </ul>
+    </details>
+  </div>
+
+  <h2>Where we are</h2>
+  <div class="grid">
+    <div class="panel">
+      <span class="eyebrow">Milestone 1 of 5</span>
+      <h3 style="margin-top:6px">Foundation — "Continuity" <span class="status shipped" style="margin-left:6px">Done</span></h3>
+      <div class="progress"><div class="bar" aria-hidden="true"><span style="width:87%"></span></div><b>13 of 15 pieces</b></div>
+      <p class="dim small" style="margin:6px 0 0">The plumbing works. The 2 remaining pieces are the <b>first screen</b> and <b>research on the other agents</b> (Hermes, Antigravity, OpenCode). Both move into the next milestone.</p>
+    </div>
+    <div class="panel here">
+      <span class="eyebrow">You are here</span>
+      <h3 style="margin-top:6px">Define the MVP <span class="status next" style="margin-left:6px">Next</span></h3>
+      <p style="margin:8px 0 0">A working session with you to decide what the first usable version is. That decides what the <b>first screen</b> shows.</p>
+    </div>
+  </div>
+  <p style="margin-top:14px"><a href="roadmap.html">See the full roadmap →</a></p>
+
+  <h2>The big picture</h2>
+  <div class="panel">
+    <p style="margin-top:0"><b>The problem:</b> you pay for many AI agents (Claude Code, Codex, Cursor and more), but they share nothing. Every session starts cold, you re-explain yourself, and juggling them is so heavy you fall back to just one.</p>
+    <p><b>The bet:</b> <i>connect, don't replace.</i> Agent OS is the connective tissue: one shared memory and one control panel every agent plugs into, so they work like a team. We never build our own agent.</p>
+    <p style="margin-bottom:0"><b>What you'll most notice:</b> today, agents remember <i>where you left off</i>. Next comes the <b>Brain</b>: agents that remember <i>what you know and decided</i>, months later.</p>
+  </div>
+
+  <footer>Agent OS · personal project · sources: <a href="../START-HERE.md">START-HERE</a>, <a href="../DECISIONS.md">DECISIONS</a>, <a href="../../STRATEGY.md">STRATEGY</a> (agent-facing docs).</footer>
+</main>
+</body>
+</html>

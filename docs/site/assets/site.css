@@ -1,0 +1,141 @@
+/* Agent OS product site — Nord dark (https://www.nordtheme.com/docs/colors-and-palettes).
+   Reader is red-green colorblind: status is ALWAYS text + marker shape, never hue alone.
+   Tokens match the diagram profile (~/.diagram-design/profiles/nord.md). */
+:root {
+  --paper: #2e3440;      /* nord0 */
+  --paper-2: #3b4252;    /* nord1 */
+  --paper-3: #434c5e;    /* nord2 */
+  --line: #4c566a;       /* nord3 */
+  --ink: #eceff4;        /* nord6 */
+  --muted: #d8dee9;      /* nord4 */
+  --soft: #9aa5b8;       /* derived; 5.0:1 on paper */
+  --accent: #ebcb8b;     /* nord13 — "you are here" / focal only */
+  --link: #88c0d0;       /* nord8 */
+  --radius: 8px;
+  --serif: "Instrument Serif", Georgia, serif;
+  --sans: "Geist", system-ui, -apple-system, sans-serif;
+  --mono: "Geist Mono", ui-monospace, Menlo, monospace;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  margin: 0; background: var(--paper); color: var(--ink);
+  font: 17px/1.6 var(--sans);
+}
+a { color: var(--link); text-underline-offset: 3px; }
+a:hover { color: var(--ink); }
+code { font: 0.88em var(--mono); background: var(--paper-2); padding: 1px 6px; border-radius: 4px; color: var(--muted); }
+
+/* ---------- layout ---------- */
+.wrap { max-width: 920px; margin: 0 auto; padding: 0 20px 80px; }
+.top {
+  position: sticky; top: 0; z-index: 10; background: rgba(46,52,64,0.94);
+  border-bottom: 1px solid var(--paper-3); backdrop-filter: blur(6px);
+}
+.top .wrap { display: flex; align-items: center; gap: 28px; padding-top: 14px; padding-bottom: 14px; flex-wrap: wrap; }
+.brand { font: 26px var(--serif); color: var(--ink); text-decoration: none; }
+.nav { display: flex; gap: 6px; flex-wrap: wrap; }
+.nav a {
+  color: var(--soft); text-decoration: none; padding: 6px 12px; border-radius: 6px; font-size: 15px;
+}
+.nav a:hover { color: var(--ink); background: var(--paper-2); }
+.nav a[aria-current="page"] { color: var(--ink); background: var(--paper-2); box-shadow: inset 0 -2px 0 var(--accent); }
+
+h1 { font: 52px/1.1 var(--serif); margin: 48px 0 8px; font-weight: 400; }
+h2 { font: 34px/1.2 var(--serif); margin: 56px 0 14px; font-weight: 400; }
+h3 { font-size: 19px; margin: 0; font-weight: 600; }
+.lede { color: var(--muted); font-size: 19px; max-width: 680px; margin: 0 0 8px; }
+.eyebrow { font: 12px var(--mono); letter-spacing: 0.12em; text-transform: uppercase; color: var(--soft); }
+.dim { color: var(--soft); }
+.small { font-size: 14px; }
+
+/* ---------- panels ---------- */
+.panel { background: var(--paper-2); border: 1px solid var(--paper-3); border-radius: var(--radius); padding: 22px 24px; }
+.panel + .panel { margin-top: 16px; }
+.grid > .panel { margin-top: 0; }
+.panel.here { border-left: 4px solid var(--accent); }
+.grid { display: grid; gap: 16px; grid-template-columns: 1.15fr 0.85fr; }
+@media (max-width: 760px) { .grid { grid-template-columns: 1fr; } h1 { font-size: 40px; } }
+
+/* "Since you were last here" log */
+.log { list-style: none; margin: 0; padding: 0; }
+.log li { display: grid; grid-template-columns: 92px 1fr; gap: 14px; padding: 10px 0; border-top: 1px solid var(--paper-3); }
+.log li:first-child { border-top: 0; }
+.log time { font: 13px/1.9 var(--mono); color: var(--soft); }
+
+/* progress bar (meaning carried by the text beside it) */
+.progress { display: flex; align-items: center; gap: 14px; margin: 10px 0 4px; }
+.bar { flex: 1; height: 10px; background: var(--paper-3); border-radius: 5px; overflow: hidden; }
+.bar > span { display: block; height: 100%; background: var(--muted); }
+.progress b { font: 600 15px var(--mono); white-space: nowrap; }
+
+/* ---------- status badges: text + distinct marker shape + distinct border style ---------- */
+.status {
+  display: inline-flex; align-items: center; gap: 7px; white-space: nowrap;
+  font: 600 12px var(--mono); letter-spacing: 0.08em; text-transform: uppercase;
+  padding: 3px 10px; border-radius: 4px; color: var(--ink);
+}
+.status::before { font-size: 13px; letter-spacing: 0; }
+.status.shipped  { border: 1px solid var(--muted); }
+.status.shipped::before  { content: "●"; }
+.status.next     { border: 2px solid var(--accent); color: var(--accent); }
+.status.next::before     { content: "◎"; }
+.status.planned  { border: 1px dashed var(--soft); color: var(--muted); }
+.status.planned::before  { content: "○"; }
+.status.later    { border: 1px dotted var(--soft); color: var(--soft); }
+.status.later::before    { content: "◌"; }
+.status.never    { border: 1px solid var(--soft); color: var(--soft); text-decoration: line-through; }
+.status.never::before    { content: "✕"; text-decoration: none; }
+
+.legend { display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: center; margin: 12px 0 0; }
+.legend .dim { font-size: 14px; }
+
+/* ---------- milestones + feature cards ---------- */
+.milestone { margin-top: 48px; }
+.milestone-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px 16px; border-bottom: 1px solid var(--paper-3); padding-bottom: 10px; }
+.milestone-head h2 { margin: 0; }
+.milestone-head .when { font: 13px var(--mono); color: var(--soft); }
+.milestone > p { color: var(--muted); max-width: 720px; }
+
+details.card { background: var(--paper-2); border: 1px solid var(--paper-3); border-radius: var(--radius); margin-top: 10px; }
+details.card[open] { border-color: var(--line); }
+details.card > summary {
+  list-style: none; cursor: pointer; padding: 16px 20px;
+  display: grid; grid-template-columns: 1fr auto; gap: 4px 16px; align-items: start;
+}
+details.card > summary::-webkit-details-marker { display: none; }
+details.card > summary .why { grid-column: 1 / -1; color: var(--muted); font-size: 15.5px; }
+details.card > summary h3::before { content: "›"; color: var(--soft); display: inline-block; width: 16px; transition: transform .15s; }
+details.card[open] > summary h3::before { transform: rotate(90deg); }
+details.card > summary .why { padding-left: 16px; }
+details.card > summary:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; border-radius: var(--radius); }
+.card-body { padding: 4px 20px 18px; border-top: 1px solid var(--paper-3); }
+.card-body dl { display: grid; grid-template-columns: 150px 1fr; gap: 8px 16px; margin: 14px 0 0; }
+.card-body dt { font: 12px/1.9 var(--mono); text-transform: uppercase; letter-spacing: 0.08em; color: var(--soft); }
+.card-body dd { margin: 0; }
+@media (max-width: 640px) { .card-body dl { grid-template-columns: 1fr; gap: 2px; } .card-body dd { margin-bottom: 10px; } }
+.id { font: 12px var(--mono); color: var(--soft); }
+
+/* ---------- tables (glossary) ---------- */
+table { width: 100%; border-collapse: collapse; margin-top: 12px; font-size: 16px; }
+th { text-align: left; font: 12px var(--mono); text-transform: uppercase; letter-spacing: 0.08em; color: var(--soft); padding: 8px 12px; border-bottom: 1px solid var(--line); }
+td { padding: 10px 12px; border-bottom: 1px solid var(--paper-3); vertical-align: top; }
+td:first-child { font-weight: 600; white-space: nowrap; }
+.tablewrap { overflow-x: auto; }
+td .status { margin: 2px 0; }
+td .stack { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
+td .stack span.dim { font-size: 14px; }
+
+/* ---------- diagrams ---------- */
+/* Diagrams are 1280x720 SVGs inlined by sync-diagrams.py. They break out of the 920px text
+   column to stay readable, and scroll sideways (inside the figure only) on narrow screens. */
+figure.diagram {
+  margin: 24px 0 0; background: var(--paper); border: 1px solid var(--paper-3); border-radius: var(--radius);
+  width: min(1280px, calc(100vw - 40px)); position: relative; left: 50%; transform: translateX(-50%);
+}
+figure.diagram > svg { display: block; width: 100%; height: auto; min-width: 900px; }
+figure.diagram { overflow-x: auto; }
+figure.diagram figcaption { padding: 10px 12px 6px; color: var(--soft); font-size: 14px; }
+
+footer { margin-top: 72px; padding-top: 18px; border-top: 1px solid var(--paper-3); color: var(--soft); font-size: 14px; }

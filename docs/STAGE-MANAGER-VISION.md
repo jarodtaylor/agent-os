@@ -183,3 +183,13 @@ implementation the MVP reproduces. Not just a test — the grounding artifact fo
 natural trigger is **before U10/U11**, since that's what the friction + reference spec ground. Then spend
 a focused block creating the dogfood project and deciding what it requires. This is a distinct block from
 the MVP-definition session, though they feed each other.
+
+## Lead candidate — the human context layer + cross-project cockpit (2026-11-19, decision #69)
+
+**Captured for the MVP-definition session; opening topic. Not a decision to build.**
+
+- **The insight.** Agent OS keeps one continuity record so *agents* resume without drift. The human owner has the same problem one level up: across ~18 half-done projects, Jarod loses sight of what each is, why it exists, where it's at, and what's next, and drifts to the next idea. The `docs/site` work (#68) proved the cure is the same record rendered for a human.
+- **The shape.** Every project Agent OS scaffolds gets two contexts: **agent context** (instructions, roles, memory: U10 provisioning already does this) and **human context** (why · what · where · next · what changed while you were away). The first screen (U11) becomes a **cross-project cockpit** over the human context.
+- **Constraints.** Structured data in the substrate, written by any harness over MCP; renderer-agnostic (static HTML → U11 screen → whatever's next); no lock-in to any harness or model (the landscape changes monthly: Hermes, Grok, Muse, Dot…). `docs/site` is the prototype to learn from, not the implementation.
+- **Questions for the session.** Is this the MVP, or one pillar of it? What is the minimum human-context schema (and is the existing handoff cursor its seed)? Who writes it, and when: `/handoff`, project setup, the agents themselves? How does it relate to the provisioning blueprint? Does it fold in the unwired-breadcrumbs gap (#71)?
+

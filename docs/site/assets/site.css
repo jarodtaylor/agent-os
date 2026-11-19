@@ -8,7 +8,7 @@
   --line: #4c566a;       /* nord3 */
   --ink: #eceff4;        /* nord6 */
   --muted: #d8dee9;      /* nord4 */
-  --soft: #9aa5b8;       /* derived; 5.0:1 on paper */
+  --soft: #a9b3c4;       /* derived from Nord Snow Storm; 5.9:1 on paper, 4.8:1 on paper-2 (WCAG AA) */
   --accent: #ebcb8b;     /* nord13 — "you are here" / focal only */
   --link: #88c0d0;       /* nord8 */
   --radius: 8px;
@@ -114,7 +114,11 @@ details.card > summary:focus-visible { outline: 2px solid var(--link); outline-o
 .card-body dl { display: grid; grid-template-columns: 150px 1fr; gap: 8px 16px; margin: 14px 0 0; }
 .card-body dt { font: 12px/1.9 var(--mono); text-transform: uppercase; letter-spacing: 0.08em; color: var(--soft); }
 .card-body dd { margin: 0; }
-@media (max-width: 640px) { .card-body dl { grid-template-columns: 1fr; gap: 2px; } .card-body dd { margin-bottom: 10px; } }
+@media (max-width: 640px) {
+  .card-body dl { grid-template-columns: 1fr; gap: 2px; } .card-body dd { margin-bottom: 10px; }
+  details.card > summary { grid-template-columns: 1fr; } /* stack heading over badge so long badges never overflow */
+  details.card > summary .status { justify-self: start; }
+}
 .id { font: 12px var(--mono); color: var(--soft); }
 
 /* ---------- tables (glossary) ---------- */

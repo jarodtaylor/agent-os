@@ -33,7 +33,7 @@
       <tr><td>The Brain</td><td>The full shared-memory system: wiki, deep archive and the loop that keeps it clean. Designed, not built. Today's handoffs are its first piece.</td></tr>
       <tr><td>Substrate</td><td>The agents' word for the foundation: the local server, the database and the tools agents call.</td></tr>
       <tr><td>MCP</td><td>“USB-C for agents”: the standard plug agents use to call tools. The brain server is an MCP server, so any agent can use it.</td></tr>
-      <tr><td>Hook</td><td>A small script an agent runs automatically at moments like session start or end. That's how memory gets saved and loaded without you doing anything.</td></tr>
+      <tr><td>Hook</td><td>A small script an agent runs automatically at moments like session start or end. That's how the handoff gets loaded at the start of a session without you doing anything. Saving it is still <code>/handoff</code>; ending a session only records that it ended.</td></tr>
       <tr><td>Provisioning / blueprint</td><td>Setting up each agent for a project from one file (the blueprint) that says which agent plays which role, on which model, with which files.</td></tr>
       <tr><td>Inventory</td><td>The list of skills, tool servers and plugins installed across your agents. Codex skills aren't scanned yet. Built; first visible in the first screen.</td></tr>
       <tr><td>Secret masking</td><td>The one checkpoint every read passes through; anything marked secret comes out as <code>[redacted]</code>.</td></tr>

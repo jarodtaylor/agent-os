@@ -293,7 +293,7 @@
       <li><b>Connect, don't replace.</b> Every agent still works on its own; Agent OS is a layer, never a requirement.</li>
       <li><b>Local first.</b> It runs on your Mac and only answers callers on your Mac.</li>
       <li><b>Don't break your setup.</b> Every config change is backed up first and records how to undo it (if that record fails, it tells you).</li>
-      <li><b>Secrets never leak out.</b> One masking checkpoint on every way out.</li>
+      <li><b>Marked secrets stay masked.</b> One masking checkpoint on every way out; anything marked or detected as secret is masked. Text that isn't marked (like the handoff's next step) passes through as written.</li>
       <li><b>One record of where we are.</b> Docs and agents read the same note, so they can't drift apart.</li>
     </ul>
   </div>

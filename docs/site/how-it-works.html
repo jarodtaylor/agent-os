@@ -1,0 +1,307 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent OS — How it works</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+<header class="top"><div class="wrap">
+  <a class="brand" href="index.html">Agent OS</a>
+  <nav class="nav" aria-label="Site">
+    <a href="index.html">Home</a>
+    <a href="roadmap.html">Roadmap</a>
+    <a href="how-it-works.html" aria-current="page">How it works</a>
+    <a href="glossary.html">Glossary</a>
+  </nav>
+</div></header>
+<main class="wrap">
+  <h1>How it works</h1>
+  <p class="lede">Agent OS is a small server on your Mac that every agent plugs into. It doesn't replace any agent; it connects them.</p>
+
+  <h2>How it fits together</h2>
+  <p>Claude Code and Codex talk to one always-on <b>brain server</b> on your Mac and share its memory. Cursor isn't on the shared memory yet; Agent OS can only see and set it up. The server holds the <b>shared memory</b>, can take an <b>inventory</b> of what each agent has installed (you'll see it in the first screen), and can <b>set up</b> each agent for a project. You drive setup from the command line for now; the first screen will come next.</p>
+  <figure class="diagram"><!-- diagram:how-it-fits -->
+<svg viewBox="0 0 1280 720" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="how-it-fits-title how-it-fits-desc">
+        <title id="how-it-fits-title">How Agent OS fits together</title>
+        <desc id="how-it-fits-desc">Architecture showing you and your agent harnesses connecting to an always-on brain server on your Mac, which holds shared memory, an inventory of the skills and tool, and provisioning, with a planned first app screen that will show all of it.</desc>
+        <defs>
+          <marker id="how-it-fits-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#D8DEE9"/></marker>
+          <marker id="how-it-fits-arrow-two" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto-start-reverse"><polygon points="0 0, 8 3, 0 6" fill="#D8DEE9"/></marker>
+          <marker id="how-it-fits-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#EBCB8B"/></marker>
+          <marker id="how-it-fits-arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto-start-reverse"><polygon points="0 0, 8 3, 0 6" fill="#88C0D0"/></marker>
+        </defs>
+
+        <rect width="100%" height="100%" fill="#2E3440"/>
+
+        <!-- ZONE: Your Mac, always on (boundary, dashed) -->
+        <rect x="280" y="88" width="960" height="528" rx="8" fill="rgba(236,239,244,0.02)" stroke="rgba(236,239,244,0.30)" stroke-width="1" stroke-dasharray="4,4"/>
+        <rect x="292" y="82" width="128" height="12" rx="2" fill="#2E3440"/>
+        <text x="300" y="91" fill="#9AA5B8" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" letter-spacing="0.14em">YOUR MAC — ALWAYS ON</text>
+
+        <!-- CONTAINER: Brain server (painted as a container, before arrows) -->
+        <rect x="384" y="168" width="504" height="424" rx="8" fill="#3B4252" stroke="#ECEFF4" stroke-width="1"/>
+        <rect x="404" y="184" width="40" height="12" rx="2" fill="transparent" stroke="rgba(236,239,244,0.40)" stroke-width="0.8"/>
+        <text x="424" y="193" fill="#D8DEE9" font-size="7" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">LOCAL</text>
+        <text x="404" y="218" fill="#ECEFF4" font-size="14" font-weight="600" font-family="'Geist', system-ui, sans-serif">Brain server</text>
+        <text x="404" y="236" fill="#D8DEE9" font-size="9" font-family="'Geist Mono', ui-monospace, monospace">starts at login · restarts itself · locked to this machine</text>
+
+        <!-- ARROWS (before nodes) -->
+        <!-- You -> Provisioning : CLI -->
+        <line x1="264" y1="280" x2="412" y2="280" stroke="#D8DEE9" stroke-width="1.2" marker-end="url(#how-it-fits-arrow)"/>
+        <!-- Harnesses <-> Brain server : MCP tools (two-way, link) -->
+        <line x1="264" y1="476" x2="384" y2="476" stroke="#88C0D0" stroke-width="1.2" marker-start="url(#how-it-fits-arrow-link)" marker-end="url(#how-it-fits-arrow-link)"/>
+        <!-- Harnesses <-> Brain server : session hooks (two-way) -->
+        <line x1="264" y1="508" x2="384" y2="508" stroke="#D8DEE9" stroke-width="1.2" marker-start="url(#how-it-fits-arrow-two)" marker-end="url(#how-it-fits-arrow-two)"/>
+        <!-- You -> First screen (planned, dashed, routed above the server) -->
+        <path d="M152,252 V136 Q152,128 160,128 H1068 Q1076,128 1076,136 V332" fill="none" stroke="#D8DEE9" stroke-width="1" stroke-dasharray="5,4" marker-end="url(#how-it-fits-arrow)"/>
+        <!-- Brain server -> First screen (planned, dashed) -->
+        <line x1="888" y1="368" x2="952" y2="368" stroke="#D8DEE9" stroke-width="1" stroke-dasharray="5,4" marker-end="url(#how-it-fits-arrow)"/>
+
+        <!-- ARROW LABELS -->
+        <rect x="318" y="262" width="28" height="12" rx="2" fill="#2E3440"/>
+        <text x="332" y="271" fill="#9AA5B8" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.06em">CLI</text>
+
+        <rect x="304" y="458" width="56" height="12" rx="2" fill="#2E3440"/>
+        <text x="332" y="467" fill="#88C0D0" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.06em">MCP TOOLS</text>
+
+        <rect x="294" y="490" width="76" height="12" rx="2" fill="#2E3440"/>
+        <text x="332" y="499" fill="#9AA5B8" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.06em">SESSION HOOKS</text>
+
+        <rect x="580" y="110" width="80" height="12" rx="2" fill="#2E3440"/>
+        <text x="620" y="119" fill="#9AA5B8" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.06em">YOU'LL USE IT</text>
+
+        <rect x="900" y="350" width="40" height="12" rx="2" fill="#2E3440"/>
+        <text x="920" y="359" fill="#9AA5B8" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.06em">SHOWS</text>
+
+        <!-- NODES -->
+        <!-- You (input) -->
+        <rect x="40" y="252" width="224" height="56" rx="6" fill="#2E3440"/>
+        <rect x="40" y="252" width="224" height="56" rx="6" fill="rgba(216,222,233,0.10)" stroke="#9AA5B8" stroke-width="1"/>
+        <rect x="48" y="258" width="28" height="12" rx="2" fill="transparent" stroke="rgba(154,165,184,0.60)" stroke-width="0.8"/>
+        <text x="62" y="267" fill="#9AA5B8" font-size="7" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">YOU</text>
+        <text x="152" y="286" fill="#ECEFF4" font-size="12" font-weight="600" font-family="'Geist', system-ui, sans-serif" text-anchor="middle">You</text>
+        <text x="152" y="300" fill="#D8DEE9" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">the operator</text>
+
+        <!-- Your agent harnesses (external) -->
+        <rect x="40" y="444" width="224" height="96" rx="6" fill="#2E3440"/>
+        <rect x="40" y="444" width="224" height="96" rx="6" fill="rgba(236,239,244,0.03)" stroke="rgba(236,239,244,0.30)" stroke-width="1"/>
+        <rect x="48" y="450" width="44" height="12" rx="2" fill="transparent" stroke="rgba(236,239,244,0.30)" stroke-width="0.8"/>
+        <text x="70" y="459" fill="#9AA5B8" font-size="7" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">AGENTS</text>
+        <text x="152" y="486" fill="#ECEFF4" font-size="12" font-weight="600" font-family="'Geist', system-ui, sans-serif" text-anchor="middle">Your agent harnesses</text>
+        <text x="152" y="504" fill="#D8DEE9" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">memory: Claude Code · Codex</text>
+        <text x="152" y="520" fill="#9AA5B8" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">setup only: Cursor · more later</text>
+
+        <!-- Provisioning (inside server) -->
+        <rect x="412" y="248" width="448" height="64" rx="6" fill="#2E3440"/>
+        <rect x="412" y="248" width="448" height="64" rx="6" fill="rgba(236,239,244,0.05)" stroke="#D8DEE9" stroke-width="1"/>
+        <rect x="420" y="254" width="36" height="12" rx="2" fill="transparent" stroke="rgba(216,222,233,0.40)" stroke-width="0.8"/>
+        <text x="438" y="263" fill="#D8DEE9" font-size="7" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">SETUP</text>
+        <text x="636" y="284" fill="#ECEFF4" font-size="12" font-weight="600" font-family="'Geist', system-ui, sans-serif" text-anchor="middle">Provisioning</text>
+        <text x="636" y="300" fill="#D8DEE9" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">one blueprint → sets up each harness natively, with undo</text>
+
+        <!-- Inventory (inside server) -->
+        <rect x="412" y="336" width="448" height="64" rx="6" fill="#2E3440"/>
+        <rect x="412" y="336" width="448" height="64" rx="6" fill="rgba(236,239,244,0.05)" stroke="#D8DEE9" stroke-width="1"/>
+        <rect x="420" y="342" width="36" height="12" rx="2" fill="transparent" stroke="rgba(216,222,233,0.40)" stroke-width="0.8"/>
+        <text x="438" y="351" fill="#D8DEE9" font-size="7" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">SEES</text>
+        <text x="636" y="372" fill="#ECEFF4" font-size="12" font-weight="600" font-family="'Geist', system-ui, sans-serif" text-anchor="middle">Inventory</text>
+        <text x="636" y="388" fill="#D8DEE9" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">skills · MCP servers · plugins · shown in first screen</text>
+
+        <!-- Shared memory (FOCAL) -->
+        <rect x="412" y="424" width="448" height="136" rx="6" fill="#2E3440"/>
+        <rect x="412" y="424" width="448" height="136" rx="6" fill="rgba(235,203,139,0.10)" stroke="#EBCB8B" stroke-width="1.2"/>
+        <rect x="420" y="430" width="48" height="12" rx="2" fill="transparent" stroke="rgba(235,203,139,0.50)" stroke-width="0.8"/>
+        <text x="444" y="439" fill="#EBCB8B" font-size="7" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">MEMORY</text>
+        <text x="636" y="470" fill="#ECEFF4" font-size="14" font-weight="600" font-family="'Geist', system-ui, sans-serif" text-anchor="middle">Shared memory</text>
+        <text x="636" y="492" fill="#D8DEE9" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">“where we left off” handoffs</text>
+        <text x="636" y="508" fill="#D8DEE9" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">+ session-end markers · breadcrumbs: not on yet</text>
+        <text x="636" y="532" fill="#EBCB8B" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">secrets masked on every read</text>
+
+        <!-- First screen (planned, optional/dashed) -->
+        <rect x="952" y="332" width="248" height="72" rx="6" fill="#2E3440"/>
+        <rect x="952" y="332" width="248" height="72" rx="6" fill="rgba(236,239,244,0.02)" stroke="rgba(236,239,244,0.40)" stroke-width="1" stroke-dasharray="4,3"/>
+        <rect x="960" y="338" width="52" height="12" rx="2" fill="transparent" stroke="rgba(236,239,244,0.30)" stroke-width="0.8" stroke-dasharray="2,2"/>
+        <text x="986" y="347" fill="#9AA5B8" font-size="7" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">PLANNED</text>
+        <text x="1076" y="372" fill="#ECEFF4" font-size="12" font-weight="600" font-family="'Geist', system-ui, sans-serif" text-anchor="middle">First screen</text>
+        <text x="1076" y="388" fill="#D8DEE9" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">the app that shows all of this</text>
+
+        <!-- LEGEND (bottom strip) -->
+        <line x1="40" y1="652" x2="1240" y2="652" stroke="rgba(236,239,244,0.10)" stroke-width="0.8"/>
+        <text x="40" y="684" fill="#9AA5B8" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" letter-spacing="0.14em">LEGEND</text>
+
+        <rect x="112" y="675" width="20" height="12" rx="2" fill="rgba(235,203,139,0.10)" stroke="#EBCB8B" stroke-width="1.2"/>
+        <text x="140" y="684" fill="#D8DEE9" font-size="10" font-family="'Geist', system-ui, sans-serif">Focal: shared memory</text>
+
+        <rect x="276" y="675" width="20" height="12" rx="2" fill="rgba(236,239,244,0.05)" stroke="#D8DEE9" stroke-width="1"/>
+        <text x="304" y="684" fill="#D8DEE9" font-size="10" font-family="'Geist', system-ui, sans-serif">Runs on your Mac today</text>
+
+        <rect x="448" y="675" width="20" height="12" rx="2" fill="rgba(216,222,233,0.10)" stroke="#9AA5B8" stroke-width="1"/>
+        <text x="476" y="684" fill="#D8DEE9" font-size="10" font-family="'Geist', system-ui, sans-serif">You and your tools</text>
+
+        <rect x="600" y="675" width="20" height="12" rx="2" fill="rgba(236,239,244,0.02)" stroke="rgba(236,239,244,0.40)" stroke-width="1" stroke-dasharray="4,3"/>
+        <text x="628" y="684" fill="#D8DEE9" font-size="10" font-family="'Geist', system-ui, sans-serif">Dashed box: planned</text>
+
+        <line x1="760" y1="681" x2="792" y2="681" stroke="#88C0D0" stroke-width="1.2" marker-start="url(#how-it-fits-arrow-link)" marker-end="url(#how-it-fits-arrow-link)"/>
+        <text x="800" y="684" fill="#D8DEE9" font-size="10" font-family="'Geist', system-ui, sans-serif">MCP tool calls, two-way</text>
+
+        <line x1="940" y1="681" x2="972" y2="681" stroke="#D8DEE9" stroke-width="1.2"/>
+        <text x="980" y="684" fill="#D8DEE9" font-size="10" font-family="'Geist', system-ui, sans-serif">Solid line: works today</text>
+
+        <line x1="1104" y1="681" x2="1136" y2="681" stroke="#D8DEE9" stroke-width="1" stroke-dasharray="5,4"/>
+        <text x="1144" y="684" fill="#D8DEE9" font-size="10" font-family="'Geist', system-ui, sans-serif">Dashed: planned</text>
+      </svg>
+<!-- /diagram:how-it-fits -->
+  <figcaption>The highlighted box is the heart of it: the shared memory. <a href="diagrams/how-it-fits.html">Open full size</a></figcaption></figure>
+
+  <h2>How “where we left off” travels</h2>
+  <p>At the end of a session, <code>/handoff</code> saves one short note: the next step and the last decision. The next session, in Claude Code or Codex, gets that note automatically at the start, with any secrets masked. (The dashed breadcrumb step is built but not switched on yet.)</p>
+  <figure class="diagram"><!-- diagram:where-we-left-off -->
+<svg viewBox="0 0 1280 720" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="where-we-left-off-title where-we-left-off-desc">
+        <title id="where-we-left-off-title">Where we left off: how a handoff carries over</title>
+        <desc id="where-we-left-off-desc">Sequence showing a Claude Code session dropping automatic breadcrumbs (built, not yet switched on) and a wrap-up handoff on the brain server, then days later a new Claude Code or Codex session asking the server at start-up and getting the handoff back with secrets masked, so it picks up where you left off without pasting anything.</desc>
+        <defs>
+          <marker id="where-we-left-off-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#D8DEE9"/></marker>
+          <marker id="where-we-left-off-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#EBCB8B"/></marker>
+          <marker id="where-we-left-off-arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#88C0D0"/></marker>
+          <marker id="where-we-left-off-arrow-open" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polyline points="0 0, 8 3, 0 6" fill="none" stroke="#D8DEE9" stroke-width="1.2"/></marker>
+        </defs>
+
+        <rect width="100%" height="100%" fill="#2E3440"/>
+
+        <!-- LIFELINES (centers 240, 640, 1040) -->
+        <line x1="240" y1="128" x2="240" y2="588" stroke="rgba(236,239,244,0.20)" stroke-width="1" stroke-dasharray="3,3"/>
+        <line x1="640" y1="128" x2="640" y2="588" stroke="rgba(236,239,244,0.20)" stroke-width="1" stroke-dasharray="3,3"/>
+        <line x1="1040" y1="128" x2="1040" y2="588" stroke="rgba(236,239,244,0.20)" stroke-width="1" stroke-dasharray="3,3"/>
+
+        <!-- TIME BREAK: days later -->
+        <line x1="120" y1="400" x2="1160" y2="400" stroke="rgba(236,239,244,0.22)" stroke-width="1" stroke-dasharray="2,4"/>
+        <text x="108" y="405" fill="#ECEFF4" font-size="14" font-style="italic" font-family="'Instrument Serif', 'Noto Serif', serif" text-anchor="end">days later</text>
+
+        <!-- LOOP FRAGMENT: while you work -->
+        <rect x="208" y="152" width="464" height="96" rx="4" fill="rgba(236,239,244,0.04)" stroke="rgba(236,239,244,0.22)" stroke-width="1"/>
+        <rect x="208" y="152" width="40" height="16" rx="2" fill="#2E3440" stroke="rgba(236,239,244,0.22)" stroke-width="1"/>
+        <text x="228" y="164" fill="#D8DEE9" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.12em">LOOP</text>
+        <text x="260" y="182" fill="#D8DEE9" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" letter-spacing="0.04em">[planned · built, not switched on yet]</text>
+
+        <!-- ACTIVATION BARS -->
+        <rect x="236" y="176" width="8" height="128" fill="rgba(236,239,244,0.06)" stroke="#D8DEE9" stroke-width="0.8"/>
+        <rect x="636" y="452" width="8" height="56" fill="rgba(236,239,244,0.06)" stroke="#D8DEE9" stroke-width="0.8"/>
+        <rect x="1036" y="444" width="8" height="128" fill="rgba(236,239,244,0.06)" stroke="#D8DEE9" stroke-width="0.8"/>
+
+        <!-- MESSAGES -->
+        <!-- 1. breadcrumbs, automatic (async: dashed + open head) -->
+        <line x1="244" y1="220" x2="640" y2="220" stroke="#D8DEE9" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#where-we-left-off-arrow-open)"/>
+        <!-- 2. /handoff writes the handoff -->
+        <line x1="244" y1="288" x2="640" y2="288" stroke="#D8DEE9" stroke-width="1.2" marker-end="url(#where-we-left-off-arrow)"/>
+        <!-- 3. new session asks at start-up (MCP tool call) -->
+        <line x1="1036" y1="456" x2="644" y2="456" stroke="#88C0D0" stroke-width="1.2" marker-end="url(#where-we-left-off-arrow-link)"/>
+        <!-- 4. server returns the handoff, secrets masked (headline) -->
+        <line x1="644" y1="504" x2="1036" y2="504" stroke="#EBCB8B" stroke-width="1.4" marker-end="url(#where-we-left-off-arrow-accent)"/>
+        <!-- 5. session picks up (self) -->
+        <path d="M1044,532 H1072 Q1080,532 1080,540 V548 Q1080,556 1072,556 H1044" fill="none" stroke="#D8DEE9" stroke-width="1.2" marker-end="url(#where-we-left-off-arrow)"/>
+
+        <!-- MESSAGE LABELS -->
+        <rect x="408" y="202" width="64" height="12" rx="2" fill="#2E3440"/>
+        <text x="440" y="211" fill="#9AA5B8" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.06em">BREADCRUMB</text>
+
+        <rect x="412" y="270" width="56" height="12" rx="2" fill="#2E3440"/>
+        <text x="440" y="279" fill="#9AA5B8" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.06em">/HANDOFF</text>
+
+        <rect x="800" y="438" width="80" height="12" rx="2" fill="#2E3440"/>
+        <text x="840" y="447" fill="#88C0D0" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.06em">SESSION START</text>
+        <rect x="796" y="462" width="88" height="12" rx="2" fill="#2E3440"/>
+        <text x="840" y="471" fill="#9AA5B8" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">read_work_state</text>
+
+        <rect x="796" y="486" width="88" height="12" rx="2" fill="#2E3440"/>
+        <text x="840" y="495" fill="#EBCB8B" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.06em">MASKED HANDOFF</text>
+
+        <rect x="1088" y="538" width="52" height="12" rx="2" fill="#2E3440"/>
+        <text x="1114" y="547" fill="#9AA5B8" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.06em">PICKS UP</text>
+
+        <!-- FOCAL: handoff stored on the server -->
+        <rect x="528" y="304" width="224" height="56" rx="6" fill="#2E3440"/>
+        <rect x="528" y="304" width="224" height="56" rx="6" fill="rgba(235,203,139,0.10)" stroke="#EBCB8B" stroke-width="1.2"/>
+        <text x="640" y="328" fill="#ECEFF4" font-size="12" font-weight="600" font-family="'Geist', system-ui, sans-serif" text-anchor="middle">Handoff stored</text>
+        <text x="640" y="344" fill="#D8DEE9" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">next step · last decision</text>
+
+        <!-- ACTORS -->
+        <rect x="120" y="72" width="240" height="56" rx="6" fill="#2E3440"/>
+        <rect x="120" y="72" width="240" height="56" rx="6" fill="rgba(236,239,244,0.03)" stroke="rgba(236,239,244,0.30)" stroke-width="1"/>
+        <rect x="128" y="78" width="40" height="12" rx="2" fill="transparent" stroke="rgba(236,239,244,0.30)" stroke-width="0.8"/>
+        <text x="148" y="87" fill="#9AA5B8" font-size="7" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">TODAY</text>
+        <text x="240" y="104" fill="#ECEFF4" font-size="12" font-weight="600" font-family="'Geist', system-ui, sans-serif" text-anchor="middle">Claude Code session</text>
+        <text x="240" y="119" fill="#D8DEE9" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">you're working</text>
+
+        <rect x="520" y="72" width="240" height="56" rx="6" fill="#2E3440"/>
+        <rect x="520" y="72" width="240" height="56" rx="6" fill="#3B4252" stroke="#ECEFF4" stroke-width="1"/>
+        <rect x="528" y="78" width="40" height="12" rx="2" fill="transparent" stroke="rgba(236,239,244,0.40)" stroke-width="0.8"/>
+        <text x="548" y="87" fill="#D8DEE9" font-size="7" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">LOCAL</text>
+        <text x="640" y="104" fill="#ECEFF4" font-size="12" font-weight="600" font-family="'Geist', system-ui, sans-serif" text-anchor="middle">Brain server</text>
+        <text x="640" y="119" fill="#D8DEE9" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">always on · your Mac</text>
+
+        <rect x="920" y="72" width="240" height="56" rx="6" fill="#2E3440"/>
+        <rect x="920" y="72" width="240" height="56" rx="6" fill="rgba(236,239,244,0.03)" stroke="rgba(236,239,244,0.30)" stroke-width="1"/>
+        <rect x="928" y="78" width="40" height="12" rx="2" fill="transparent" stroke="rgba(236,239,244,0.30)" stroke-width="0.8"/>
+        <text x="948" y="87" fill="#9AA5B8" font-size="7" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">LATER</text>
+        <text x="1040" y="104" fill="#ECEFF4" font-size="12" font-weight="600" font-family="'Geist', system-ui, sans-serif" text-anchor="middle">Next session</text>
+        <text x="1040" y="119" fill="#D8DEE9" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">Claude Code or Codex</text>
+
+        <!-- Outcome callout -->
+        <text x="1160" y="620" fill="#ECEFF4" font-size="14" font-style="italic" font-family="'Instrument Serif', 'Noto Serif', serif" text-anchor="end">picks up where you left off — nothing pasted</text>
+
+        <!-- LEGEND -->
+        <line x1="40" y1="652" x2="1240" y2="652" stroke="rgba(236,239,244,0.10)" stroke-width="0.8"/>
+        <text x="40" y="684" fill="#9AA5B8" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" letter-spacing="0.14em">LEGEND</text>
+
+        <line x1="120" y1="681" x2="152" y2="681" stroke="#D8DEE9" stroke-width="1.2" marker-end="url(#where-we-left-off-arrow)"/>
+        <text x="160" y="684" fill="#D8DEE9" font-size="10" font-family="'Geist', system-ui, sans-serif">Solid arrow: a direct call</text>
+
+        <line x1="336" y1="681" x2="368" y2="681" stroke="#D8DEE9" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#where-we-left-off-arrow-open)"/>
+        <text x="376" y="684" fill="#D8DEE9" font-size="10" font-family="'Geist', system-ui, sans-serif">Dashed, open head: automatic, in the background</text>
+
+        <line x1="664" y1="681" x2="696" y2="681" stroke="#88C0D0" stroke-width="1.2" marker-end="url(#where-we-left-off-arrow-link)"/>
+        <text x="704" y="684" fill="#D8DEE9" font-size="10" font-family="'Geist', system-ui, sans-serif">Blue: MCP tool call</text>
+
+        <rect x="852" y="675" width="20" height="12" rx="2" fill="rgba(235,203,139,0.10)" stroke="#EBCB8B" stroke-width="1.2"/>
+        <text x="880" y="684" fill="#D8DEE9" font-size="10" font-family="'Geist', system-ui, sans-serif">Gold: the handoff (focal)</text>
+
+        <line x1="1036" y1="681" x2="1068" y2="681" stroke="rgba(236,239,244,0.22)" stroke-width="1" stroke-dasharray="2,4"/>
+        <text x="1076" y="684" fill="#D8DEE9" font-size="10" font-family="'Geist', system-ui, sans-serif">Time gap</text>
+      </svg>
+<!-- /diagram:where-we-left-off -->
+  <figcaption>From one session to the next, with nothing pasted. <a href="diagrams/where-we-left-off.html">Open full size</a></figcaption></figure>
+
+  <h2>The four areas</h2>
+  <p>Everything we build belongs to one of four areas from the project's strategy.</p>
+  <div class="tablewrap"><table>
+    <thead><tr><th>Area</th><th>In plain words</th><th>Status</th></tr></thead>
+    <tbody>
+      <tr><td>1 · The Brain</td><td>One shared memory every agent reads and writes.</td><td><div class="stack"><span><span class="status shipped">Shipped</span> <span class="dim">foundation</span></span><span><span class="status planned">Planned</span> <span class="dim">real memory</span></span></div></td></tr>
+      <tr><td>2 · See + control</td><td>See every agent, skill and tool across your agents, and act on them: install, set up, undo.</td><td><div class="stack"><span><span class="status shipped">Shipped</span> <span class="dim">behind the scenes</span></span><span><span class="status next">Next</span> <span class="dim">first screen</span></span></div></td></tr>
+      <tr><td>3 · Coordination</td><td>One task board across agents, with Hermes handing out work.</td><td><span class="status planned">Planned</span></td></tr>
+      <tr><td>4 · Self-improvement</td><td>Watch how it's going; recommend and run the next best fixes.</td><td><span class="status later">Later</span></td></tr>
+    </tbody>
+  </table></div>
+
+  <h2>Rules we build by</h2>
+  <div class="panel">
+    <ul style="margin:0; padding-left:20px">
+      <li><b>Connect, don't replace.</b> Every agent still works on its own; Agent OS is a layer, never a requirement.</li>
+      <li><b>Local first.</b> It runs on your Mac and only answers callers on your Mac.</li>
+      <li><b>Don't break your setup.</b> Every config change is backed up first and records how to undo it (if that record fails, it tells you).</li>
+      <li><b>Marked secrets stay masked.</b> One masking checkpoint on every way out; anything marked or detected as secret is masked. Text that isn't marked (like the handoff's next step) passes through as written.</li>
+      <li><b>One record of where we are.</b> Docs and agents read the same note, so they can't drift apart.</li>
+    </ul>
+  </div>
+
+  <h2>Built with</h2>
+  <p class="dim">Bun (runtime) · SQLite (local database) · Hono (web server) · MCP (the standard plug agents use to call tools) · launchd (keeps the server running). The first screen will likely use React with Tailwind and shadcn.</p>
+
+  <footer>Want the engineering detail? <a href="../ARCHITECTURE.md">ARCHITECTURE.md</a> (agent-facing).</footer>
+</main>
+</body>
+</html>

@@ -30,10 +30,10 @@ _Last updated: 2026-11-16 · Status: **v0.1 "Continuity" in progress — 13 of 1
 - ✅ **`/handoff` writes ONE authoritative record** of "where we left off" per project, to the always-on server; the human docs render that record instead of competing with it. *Live since 2026-11-16 (decision #67).*
 - ✅ **The brain server is always on** — it starts at login and restarts itself after a crash. *Checked live 2026-11-15: back in 0.3s after a forced restart, 2.4s after a hard kill, and up after logout/login before any session started (PR #67).*
 - ✅ **Codex is on the same shared memory** — same capture, same read tools, its own revocable credential. *Checked live 2026-11-16: a real Codex session, asked only "what should I work on next?", read the shared handoff on its own and answered from it.*
-- ✅ **Crash-safe breadcrumbs** — every session automatically leaves a trail of what it did; a spike proved a cold agent can resume real mid-flight work from the trail alone.
+- ⚠️ **Crash-safe breadcrumbs — built, NOT switched on.** The capture code (U5/U8) is built and tested, and a spike proved a cold agent can resume from such a trail, but the server never starts the tailers; today only a clean-session-end marker is recorded (found 2026-11-16 by the site PR's Codex gate). Wiring it on is a pending product call (issue #71).
 - ✅ **Marked secrets can't leak out** — every read path (agent tools, HTTP, the future UI) passes one redaction gate that masks anything marked secret. Security-reviewed; clean bill on outbound leak paths. (Scope honesty, per decision #25: the gate makes reads *non-leaky* — what's marked is what's masked.)
 - ✅ **Config safety** — Agent OS edits harness configs (hooks, MCP entries) with backup → atomic write → undo journal. It has run against the real `~/.claude` and restored it byte-perfect.
-- ✅ **See what every harness has installed** — a typed inventory of skills / MCP servers / plugins across Claude Code + Codex (the Observe half; further harnesses join as one-line registry rows as they enter rotation). *Shipped U9, PR #38.*
+- ⚠️ **See what every harness has installed — scanners built, no surface yet** (nothing calls `scanAll` until the first screen, U11) — a typed inventory of skills / MCP servers / plugins across Claude Code + Codex (the Observe half; further harnesses join as one-line registry rows as they enter rotation). *Shipped U9, PR #38.*
 - ✅ **Provision a project in one command, with undo** — a project carries one blueprint (which roles run in which harness, on which model, with which files); `init` seeds it, `plan` previews, `apply` writes Claude Code + Codex + Cursor natively in one all-or-nothing batch, `status` reports drift, `undo` reverses a batch. *Shipped U10, PRs #44–#65.*
 - ✅ **Agents can see (never change) provisioning** — two read-only agent tools show a project's drift and pending plan; only you can apply. *PR #65.*
 - ✅ **Every PR gets three independent AI reviews** — Claude (on your Max plan), Codex and Copilot, read-only, re-run on every push. *PR #63.*
@@ -115,11 +115,11 @@ A shared task board across harnesses *and* instances, plus Hermes as the always-
 | U2 | Store | The local database (SQLite) holding all shared state | ✅ |
 | U3 | Server | One local process, locked to this machine (loopback + token) | ✅ |
 | U4 | Brain MCP + redaction | Agents read work-state as a tool; secrets masked on every path | ✅ |
-| U5 | Claude Code capture | CC sessions leave breadcrumbs automatically | ✅ |
+| U5 | Claude Code capture | CC sessions leave breadcrumbs automatically | ⚠️ built, not wired into the server |
 | U6 | CC consumption | A fresh CC session auto-loads "where was I" + marks clean endings | ✅ *lived 7/8* |
 | U7 | `/handoff` rewire | One authoritative continuity record; docs render it | ✅ |
 | U8 | Codex integration | Second harness on the shared brain (capture + read + installer) | ✅ *live check pending* |
-| U9 | Inventory scanners | See every skill/MCP server/plugin across harnesses — CC + Codex now; others join as one-line registry rows as they enter rotation | ✅ *PR #38* |
+| U9 | Inventory scanners | See skills/MCP servers/plugins across harnesses — CC + Codex now (Codex skills deferred, issue #36); others join as one-line registry rows as they enter rotation | ✅ *PR #38* |
 | U10 | Provisioning engine | Blueprint → native harness setup (roles/models/files), with undo | ✅ (7/7 — PRs #44–#47, #52, #61, #65) |
 | U11 | Thin human view | The first screen | ⏳ |
 | U12 | Roster lane spike | What's possible for Hermes / Cursor / Antigravity / OpenCode | ⏳ |
@@ -127,6 +127,7 @@ A shared task board across harnesses *and* instances, plus Hermes as the always-
 
 ## Dig deeper
 
+- **[`site/index.html`](site/index.html) — the human product site** (open in a browser): roadmap, what's shipped, diagrams, glossary. Jarod's primary view (decision #68).
 - [`START-HERE.md`](START-HERE.md) — live project state (agent-grade; the "you are here").
 - [`DECISIONS.md`](DECISIONS.md) — every decision, its why, and the open forks.
 - [`plans/2026-07-01-001-feat-slice-1-substrate-parity-plan.md`](plans/2026-07-01-001-feat-slice-1-substrate-parity-plan.md) — the full v0.1 plan.

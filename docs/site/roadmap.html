@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent OS — Roadmap</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+<header class="top"><div class="wrap">
+  <a class="brand" href="index.html">Agent OS</a>
+  <nav class="nav" aria-label="Site">
+    <a href="index.html">Home</a>
+    <a href="roadmap.html" aria-current="page">Roadmap</a>
+    <a href="how-it-works.html">How it works</a>
+    <a href="glossary.html">Glossary</a>
+  </nav>
+</div></header>
+<main class="wrap">
+  <h1>Roadmap</h1>
+  <p class="lede">Five milestones. Each card shows what a feature does for you; click one for the details.</p>
+  <div class="legend">
+    <span class="status shipped">Shipped</span><span class="status next">Next</span><span class="status planned">Planned</span><span class="status later">Later</span><span class="status never">Not doing</span>
+    <span class="dim">Each status has its own symbol and border, not just a color.</span>
+  </div>
+  <figure class="diagram"><!-- diagram:roadmap -->
+<svg viewBox="0 0 1280 720" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="roadmap-title roadmap-desc">
+        <title id="roadmap-title">Agent OS roadmap</title>
+        <desc id="roadmap-desc">Timeline showing the shipped Continuity foundation from July to November 2026, the current step of defining the MVP and building the first screen, then the planned Brain memory, team coordination, and a later self-improvement loop, in order but not yet dated.</desc>
+
+        <rect width="100%" height="100%" fill="#2E3440"/>
+
+        <!-- AXIS: dated part (to scale, 80px per month from Jul 1) -->
+        <line x1="80" y1="352" x2="432" y2="352" stroke="#ECEFF4" stroke-width="3"/>
+        <!-- AXIS: undated part (order only) -->
+        <line x1="448" y1="352" x2="532" y2="352" stroke="rgba(236,239,244,0.40)" stroke-width="1" stroke-dasharray="5,4"/>
+        <line x1="536" y1="360" x2="544" y2="344" stroke="#9AA5B8" stroke-width="1"/>
+        <line x1="544" y1="360" x2="552" y2="344" stroke="#9AA5B8" stroke-width="1"/>
+        <line x1="556" y1="352" x2="1200" y2="352" stroke="rgba(236,239,244,0.40)" stroke-width="1" stroke-dasharray="5,4"/>
+
+        <!-- Month ticks -->
+        <line x1="80" y1="340" x2="80" y2="364" stroke="rgba(236,239,244,0.40)" stroke-width="1"/>
+        <line x1="160" y1="344" x2="160" y2="360" stroke="rgba(236,239,244,0.40)" stroke-width="1"/>
+        <line x1="240" y1="344" x2="240" y2="360" stroke="rgba(236,239,244,0.40)" stroke-width="1"/>
+        <line x1="320" y1="344" x2="320" y2="360" stroke="rgba(236,239,244,0.40)" stroke-width="1"/>
+        <line x1="400" y1="344" x2="400" y2="360" stroke="rgba(236,239,244,0.40)" stroke-width="1"/>
+        <text x="80" y="380" fill="#9AA5B8" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.14em">JUL 2026</text>
+        <text x="160" y="380" fill="#9AA5B8" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.14em">AUG</text>
+        <text x="240" y="380" fill="#9AA5B8" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.14em">SEP</text>
+        <text x="320" y="380" fill="#9AA5B8" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.14em">OCT</text>
+        <text x="400" y="380" fill="#9AA5B8" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.14em">NOV</text>
+        <text x="572" y="380" fill="#9AA5B8" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" letter-spacing="0.14em">NO DATES YET — ORDER ONLY</text>
+
+        <!-- STEMS -->
+        <line x1="256" y1="284" x2="256" y2="344" stroke="rgba(236,239,244,0.30)" stroke-width="1"/>
+        <line x1="440" y1="362" x2="440" y2="404" stroke="rgba(236,239,244,0.30)" stroke-width="1"/>
+        <line x1="680" y1="284" x2="680" y2="344" stroke="rgba(236,239,244,0.30)" stroke-width="1"/>
+        <line x1="880" y1="360" x2="880" y2="404" stroke="rgba(236,239,244,0.30)" stroke-width="1"/>
+        <line x1="1080" y1="284" x2="1080" y2="344" stroke="rgba(236,239,244,0.30)" stroke-width="1"/>
+
+        <!-- MARKERS: filled = shipped, ring = next, dashed outline = planned/later -->
+        <circle cx="256" cy="352" r="7" fill="#ECEFF4" stroke="#2E3440" stroke-width="2"/>
+        <circle cx="440" cy="352" r="8" fill="#2E3440" stroke="#EBCB8B" stroke-width="2.4"/>
+        <circle cx="680" cy="352" r="7" fill="#2E3440" stroke="#D8DEE9" stroke-width="1.4" stroke-dasharray="3,2"/>
+        <circle cx="880" cy="352" r="7" fill="#2E3440" stroke="#D8DEE9" stroke-width="1.4" stroke-dasharray="3,2"/>
+        <circle cx="1080" cy="352" r="7" fill="#2E3440" stroke="#D8DEE9" stroke-width="1.4" stroke-dasharray="3,2"/>
+
+        <!-- YOU ARE HERE (the only accent) -->
+        <text x="440" y="328" fill="#EBCB8B" font-size="8" font-weight="600" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.14em">YOU ARE HERE ▾</text>
+
+        <!-- 1. Foundation (above) -->
+        <text x="256" y="182" fill="#D8DEE9" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.14em">SHIPPED · JUL–NOV 2026</text>
+        <text x="256" y="204" fill="#ECEFF4" font-size="14" font-weight="600" font-family="'Geist', system-ui, sans-serif" text-anchor="middle">Foundation — “Continuity”</text>
+        <text x="256" y="224" fill="#D8DEE9" font-size="11" font-family="'Geist', system-ui, sans-serif" text-anchor="middle">Agents remember where you left off</text>
+        <text x="256" y="240" fill="#D8DEE9" font-size="11" font-family="'Geist', system-ui, sans-serif" text-anchor="middle">Claude Code + Codex share it</text>
+        <text x="256" y="256" fill="#D8DEE9" font-size="11" font-family="'Geist', system-ui, sans-serif" text-anchor="middle">Inventory of installed tools</text>
+        <text x="256" y="272" fill="#D8DEE9" font-size="11" font-family="'Geist', system-ui, sans-serif" text-anchor="middle">Provisioning · always-on server</text>
+
+        <!-- 2. MVP definition + first screen (below, NEXT) -->
+        <text x="440" y="424" fill="#ECEFF4" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.14em">NEXT · NOW</text>
+        <text x="440" y="446" fill="#ECEFF4" font-size="14" font-weight="600" font-family="'Geist', system-ui, sans-serif" text-anchor="middle">MVP definition + first screen</text>
+        <text x="440" y="466" fill="#D8DEE9" font-size="11" font-family="'Geist', system-ui, sans-serif" text-anchor="middle">Decide what the MVP is,</text>
+        <text x="440" y="482" fill="#D8DEE9" font-size="11" font-family="'Geist', system-ui, sans-serif" text-anchor="middle">then build the first app screen</text>
+
+        <!-- 3. The Brain (above, PLANNED) -->
+        <text x="680" y="198" fill="#9AA5B8" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.14em">PLANNED</text>
+        <text x="680" y="220" fill="#ECEFF4" font-size="14" font-weight="600" font-family="'Geist', system-ui, sans-serif" text-anchor="middle">The Brain — real memory</text>
+        <text x="680" y="240" fill="#D8DEE9" font-size="11" font-family="'Geist', system-ui, sans-serif" text-anchor="middle">Long-term knowledge: wiki,</text>
+        <text x="680" y="256" fill="#D8DEE9" font-size="11" font-family="'Geist', system-ui, sans-serif" text-anchor="middle">deep archive, auto-ingestion</text>
+        <text x="680" y="272" fill="#D8DEE9" font-size="11" font-family="'Geist', system-ui, sans-serif" text-anchor="middle">Ask any agent about months-old work</text>
+
+        <!-- 4. Team coordination (below, PLANNED) -->
+        <text x="880" y="424" fill="#9AA5B8" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.14em">PLANNED</text>
+        <text x="880" y="446" fill="#ECEFF4" font-size="14" font-weight="600" font-family="'Geist', system-ui, sans-serif" text-anchor="middle">Team coordination</text>
+        <text x="880" y="466" fill="#D8DEE9" font-size="11" font-family="'Geist', system-ui, sans-serif" text-anchor="middle">One task board across harnesses</text>
+        <text x="880" y="482" fill="#D8DEE9" font-size="11" font-family="'Geist', system-ui, sans-serif" text-anchor="middle">Hermes as chief of staff,</text>
+        <text x="880" y="498" fill="#D8DEE9" font-size="11" font-family="'Geist', system-ui, sans-serif" text-anchor="middle">dispatching the work</text>
+
+        <!-- 5. Self-improvement loop (above, LATER) -->
+        <text x="1080" y="198" fill="#9AA5B8" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.14em">LATER</text>
+        <text x="1080" y="220" fill="#ECEFF4" font-size="14" font-weight="600" font-family="'Geist', system-ui, sans-serif" text-anchor="middle">Self-improvement loop</text>
+        <text x="1080" y="240" fill="#D8DEE9" font-size="11" font-family="'Geist', system-ui, sans-serif" text-anchor="middle">Watches the metrics,</text>
+        <text x="1080" y="256" fill="#D8DEE9" font-size="11" font-family="'Geist', system-ui, sans-serif" text-anchor="middle">recommends and runs the</text>
+        <text x="1080" y="272" fill="#D8DEE9" font-size="11" font-family="'Geist', system-ui, sans-serif" text-anchor="middle">next best improvements</text>
+
+        <!-- LEGEND -->
+        <line x1="40" y1="652" x2="1240" y2="652" stroke="rgba(236,239,244,0.10)" stroke-width="0.8"/>
+        <text x="40" y="684" fill="#9AA5B8" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" letter-spacing="0.14em">LEGEND</text>
+
+        <circle cx="124" cy="680" r="6" fill="#ECEFF4"/>
+        <text x="138" y="684" fill="#D8DEE9" font-size="10" font-family="'Geist', system-ui, sans-serif">Filled: shipped</text>
+
+        <circle cx="264" cy="680" r="7" fill="#2E3440" stroke="#EBCB8B" stroke-width="2.4"/>
+        <text x="280" y="684" fill="#D8DEE9" font-size="10" font-family="'Geist', system-ui, sans-serif">Ring: next — you are here</text>
+
+        <circle cx="452" cy="680" r="6" fill="#2E3440" stroke="#D8DEE9" stroke-width="1.4" stroke-dasharray="3,2"/>
+        <text x="466" y="684" fill="#D8DEE9" font-size="10" font-family="'Geist', system-ui, sans-serif">Dashed ring: planned or later</text>
+
+        <line x1="652" y1="680" x2="684" y2="680" stroke="#ECEFF4" stroke-width="3"/>
+        <text x="692" y="684" fill="#D8DEE9" font-size="10" font-family="'Geist', system-ui, sans-serif">Solid axis: dated, to scale</text>
+
+        <line x1="860" y1="680" x2="892" y2="680" stroke="rgba(236,239,244,0.40)" stroke-width="1" stroke-dasharray="5,4"/>
+        <text x="900" y="684" fill="#D8DEE9" font-size="10" font-family="'Geist', system-ui, sans-serif">Dashed axis: order only, no dates</text>
+      </svg>
+<!-- /diagram:roadmap -->
+  <figcaption>The five milestones at a glance. <a href="diagrams/roadmap.html">Open full size</a></figcaption></figure>
+<section class="milestone" id="m1">
+  <div class="milestone-head"><span class="eyebrow">Milestone 1</span><h2>Foundation — “Continuity”</h2><span class="status shipped">Done</span><span class="when">Jul – Nov 2026</span></div>
+  <p>Agents remember where you left off, across Claude Code and Codex, on an always-on local server. Everything is still under the floorboards: no screens yet. One piece is built but not switched on: automatic breadcrumbs.</p><p><b>How we'll know it worked:</b> open any connected agent in any project and it knows where you left off. ✔ Lived 16 Nov 2026. <span class="dim">The “even after a crash” half waits on breadcrumbs being switched on.</span></p>
+  <details class="card">
+  <summary><h3>Picks up where you left off <span class="id">U6</span></h3><span class="status shipped">Shipped</span><span class="why">Open a fresh Claude Code session and it already knows the last next step and decision. Nothing to paste.</span></summary>
+  <div class="card-body"><dl><dt>Try it</dt><dd>Start <code>claude</code> in this repo and ask “where did we leave off?”. It answers from the handoff without reading any files.</dd><dt>How</dt><dd>A session-start hook asks the brain server for the latest handoff and adds it to the session's context.</dd><dt>When</dt><dd>First worked 8 Jul 2026; installed for keeps 16 Nov 2026.</dd><dt>Pull requests</dt><dd><a href="https://github.com/jarodtaylor/agent-os/pull/23">#23</a>, <a href="https://github.com/jarodtaylor/agent-os/pull/69">#69</a></dd></dl></div>
+</details><details class="card">
+  <summary><h3>Codex shares the same memory <span class="id">U8</span></h3><span class="status shipped">Shipped</span><span class="why">Switch between Claude Code and Codex without re-explaining. Both read and write the same record.</span></summary>
+  <div class="card-body"><dl><dt>Try it</dt><dd>Run <code>codex</code> here and ask “what should I work on next?”. It calls the brain on its own.</dd><dt>When</dt><dd>Connected 9 Jul 2026; checked live with a real Codex session 16 Nov 2026.</dd><dt>Pull requests</dt><dd><a href="https://github.com/jarodtaylor/agent-os/pull/25">#25</a>, <a href="https://github.com/jarodtaylor/agent-os/pull/41">#41</a></dd></dl></div>
+</details><details class="card">
+  <summary><h3>One “where we left off” record <span class="id">U7</span></h3><span class="status shipped">Shipped</span><span class="why">Exactly one answer to “where were we?”, so the docs and the agents never disagree.</span></summary>
+  <div class="card-body"><dl><dt>Try it</dt><dd>Run <code>/handoff</code> at the end of a session. It saves the record to the server first, then updates the docs from it.</dd><dt>When</dt><dd>Built 8 Jul 2026; moved onto the always-on server 16 Nov 2026.</dd><dt>Why it exists</dt><dd>Your first Agent OS attempt died when its plans drifted apart. One record prevents that.</dd></dl></div>
+</details><details class="card">
+  <summary><h3>Automatic session breadcrumbs <span class="id">U5</span></h3><span class="status planned">Built, not on</span><span class="why">Meant to keep a trail of what each session did, even if it crashes. The code is built and tested, but the server doesn't run it yet.</span></summary>
+  <div class="card-body"><dl><dt>What runs today</dt><dd>Only a “session ended cleanly” marker per session. The activity trail itself is empty.</dd><dt>Found</dt><dd>16 Nov 2026, by the Codex review of this site. Switching it on (and testing a real crash) needs a decision from you. Tracked in <a href="https://github.com/jarodtaylor/agent-os/issues/71">issue #71</a>.</dd><dt>Built</dt><dd>5 Jul 2026</dd><dt>Pull requests</dt><dd><a href="https://github.com/jarodtaylor/agents-os-internal/pull/8" title="Archived pre-public repo">#8 (archived repo)</a></dd></dl></div>
+</details><details class="card">
+  <summary><h3>Secrets stay masked <span class="id">U4</span></h3><span class="status shipped">Shipped</span><span class="why">Anything marked secret is masked on every way out, whether an agent, a web request or a future screen reads it.</span></summary>
+  <div class="card-body"><dl><dt>How</dt><dd>Every read path goes through one masking checkpoint. It was security-reviewed.</dd><dt>When</dt><dd>5 Jul 2026</dd><dt>Pull requests</dt><dd><a href="https://github.com/jarodtaylor/agents-os-internal/pull/6" title="Archived pre-public repo">#6 (archived repo)</a></dd></dl></div>
+</details><details class="card">
+  <summary><h3>Safe config edits, with undo <span class="id">U14</span></h3><span class="status shipped">Shipped</span><span class="why">Agent OS edits your agents' settings carefully: a backup first, the change in one step, and a note on how to undo it.</span></summary>
+  <div class="card-body"><dl><dt>How</dt><dd>Backup → write in one step → record how to undo. Tested against your real <code>~/.claude</code>; restored byte-perfect.</dd><dt>Limits</dt><dd>In the rare case the undo note itself can't be saved, it says so loudly and the fix is manual. It doesn't guard against an agent editing the same file at the same moment.</dd><dt>When</dt><dd>4 Jul 2026; targeted removal 10 Jul 2026</dd><dt>Pull requests</dt><dd><a href="https://github.com/jarodtaylor/agents-os-internal/pull/1" title="Archived pre-public repo">#1 (archived repo)</a>, <a href="https://github.com/jarodtaylor/agent-os/pull/34">#34</a></dd></dl></div>
+</details><details class="card">
+  <summary><h3>See everything installed <span class="id">U9</span></h3><span class="status planned">Built, not visible yet</span><span class="why">One list of skills, tool servers and plugins across Claude Code, Codex and Cursor. The scanners work; you'll see the list in the first screen.</span></summary>
+  <div class="card-body"><dl><dt>How</dt><dd>A scanner per agent; adding another agent is one new row. Built and tested, but nothing shows the list yet. The first screen is its first viewer.</dd><dt>Not yet</dt><dd>Codex <i>skills</i>: deferred until we confirm where Codex actually looks for them. Codex tool servers and plugins are scanned.</dd><dt>When</dt><dd>16 Jul 2026 (Cursor added 21 Jul)</dd><dt>Pull requests</dt><dd><a href="https://github.com/jarodtaylor/agent-os/pull/38">#38</a>, <a href="https://github.com/jarodtaylor/agent-os/pull/46">#46</a></dd></dl></div>
+</details><details class="card">
+  <summary><h3>Set up a project in one command <span class="id">U10</span></h3><span class="status shipped">Shipped</span><span class="why">Describe which agent does what (planner, builder, reviewer) once, and Agent OS sets each agent up natively. Preview first; undo a whole batch later.</span></summary>
+  <div class="card-body"><dl><dt>Try it</dt><dd><code>bun run provision init</code> → <code>plan</code> (preview) → <code>apply</code> → <code>status</code> (drift) → <code>undo</code>.</dd><dt>Safety</dt><dd>Everything is checked before anything is written. If a write still fails, it rolls back what it can and tells you exactly what's left to fix. Agents can <i>see</i> the plan through tools, but only you can apply it.</dd><dt>When</dt><dd>21 Jul – 30 Oct 2026 (7 pieces)</dd><dt>Pull requests</dt><dd><a href="https://github.com/jarodtaylor/agent-os/pull/44">#44</a>–<a href="https://github.com/jarodtaylor/agent-os/pull/47">#47</a>, <a href="https://github.com/jarodtaylor/agent-os/pull/52">#52</a>, <a href="https://github.com/jarodtaylor/agent-os/pull/61">#61</a>, <a href="https://github.com/jarodtaylor/agent-os/pull/65">#65</a></dd></dl></div>
+</details><details class="card">
+  <summary><h3>Always-on brain server <span class="id">U15</span></h3><span class="status shipped">Shipped</span><span class="why">The shared memory is always there. It starts at login and comes back on its own after a crash.</span></summary>
+  <div class="card-body"><dl><dt>Try it</dt><dd><code>bun run supervise status</code></dd><dt>Checked live</dt><dd>Back in 0.3s after a forced restart, 2.4s after a hard kill, up after logout/login.</dd><dt>When</dt><dd>14 Nov 2026</dd><dt>Pull requests</dt><dd><a href="https://github.com/jarodtaylor/agent-os/pull/67">#67</a></dd></dl></div>
+</details><details class="card">
+  <summary><h3>One-command connect</h3><span class="status shipped">Shipped</span><span class="why">Connect Agent OS to Claude Code and Codex in one step, and disconnect just as easily.</span></summary>
+  <div class="card-body"><dl><dt>Try it</dt><dd><code>bun run integrate install</code> (or <code>uninstall</code>). Re-running it is safe.</dd><dt>When</dt><dd>16 Nov 2026</dd><dt>Pull requests</dt><dd><a href="https://github.com/jarodtaylor/agent-os/pull/69">#69</a></dd></dl></div>
+</details><details class="card">
+  <summary><h3>Locked to this machine <span class="id">U3</span></h3><span class="status shipped">Shipped</span><span class="why">Nothing outside your Mac can talk to the brain server.</span></summary>
+  <div class="card-body"><dl><dt>How</dt><dd>Only local callers with a per-boot token are allowed, and only one copy of the server can run at a time.</dd><dt>When</dt><dd>5–6 Jul 2026</dd><dt>Pull requests</dt><dd><a href="https://github.com/jarodtaylor/agents-os-internal/pull/4" title="Archived pre-public repo">#4 (archived repo)</a>, <a href="https://github.com/jarodtaylor/agent-os/pull/19">#19</a></dd></dl></div>
+</details>
+</section>
+<section class="milestone" id="m2">
+  <div class="milestone-head"><span class="eyebrow">Milestone 2</span><h2>MVP + first screen</h2><span class="status next">Next</span><span class="when">you are here</span></div>
+  <p>Decide the first usable version, then build the first screen you can actually look at.</p>
+  <details class="card">
+  <summary><h3>Define the MVP</h3><span class="status next">Next</span><span class="why">Decide what the first usable version of Agent OS is, so we build the right thing next.</span></summary>
+  <div class="card-body"><dl><dt>What happens</dt><dd>A working session with you. Inputs: the stage-manager vision and the feature catalog from the apps we studied.</dd><dt>The big question</dt><dd>Should Agent OS <i>kick off</i> multi-agent workflows, or <i>design and set up</i> what each agent needs to run them? Or both, in order?</dd></dl></div>
+</details><details class="card">
+  <summary><h3>The first screen <span class="id">U11</span></h3><span class="status planned">Planned</span><span class="why">See every project's “where we left off”, everything installed across your agents, and project setup buttons, in one place.</span></summary>
+  <div class="card-body"><dl><dt>Status</dt><dd>Waiting on the MVP definition, which decides what this screen shows first.</dd><dt>Design</dt><dd>Nord dark, built for colorblind-safe reading.</dd></dl></div>
+</details><details class="card">
+  <summary><h3>Research the other agents <span class="id">U12</span></h3><span class="status planned">Planned</span><span class="why">Work out how Hermes, Antigravity and OpenCode can plug in, so they can join the team.</span></summary>
+  <div class="card-body"><dl><dt>Status</dt><dd>A short research spike; decides how each one connects.</dd></dl></div>
+</details>
+</section>
+<section class="milestone" id="m3">
+  <div class="milestone-head"><span class="eyebrow">Milestone 3</span><h2>The Brain</h2><span class="status planned">Planned</span><span class="when">after milestone 2</span></div>
+  <p>The headline feature: real shared memory. Designed; not built.</p><p><b>How we'll know it worked:</b> ask any agent something whose answer lives in months-old work, and it answers from the Brain, citing the source.</p>
+  <details class="card">
+  <summary><h3>Long-term memory</h3><span class="status planned">Planned</span><span class="why">Agents remember what you know, decided and learned, not just where you left off. Ask any agent about work from months ago.</span></summary>
+  <div class="card-body"><dl><dt>Layers</dt><dd>1 · who each agent is and where to look · 2 · a curated wiki of notes · 3 · a deep searchable archive · 4 · the loop that turns raw activity into clean knowledge (the real product).</dd><dt>Already decided</dt><dd>Agents write to it by default, with a source on everything and the ability to roll back; you review flagged items rather than approve everything.</dd></dl></div>
+</details>
+</section>
+<section class="milestone" id="m4">
+  <div class="milestone-head"><span class="eyebrow">Milestone 4</span><h2>Team coordination</h2><span class="status planned">Planned</span><span class="when">after the Brain</span></div>
+  <p>Your agents act as one team instead of separate terminals.</p><p><b>How we'll know it worked:</b> one real multi-agent workflow (code, research or content) planned, handed out and tracked end-to-end.</p>
+  <details class="card">
+  <summary><h3>One team, many agents</h3><span class="status planned">Planned</span><span class="why">Drive your agents as one team: a shared task board, with Hermes as an always-on chief of staff handing work to the right agent.</span></summary>
+  <div class="card-body"><dl><dt>Early proof</dt><dd>20 Jul 2026: one real workflow ran end-to-end by hand (Claude planned → Codex built → Claude reviewed → Cursor tested → merged).</dd><dt>Gate</dt><dd>Comes after the first screen, since dispatching work isn't trustworthy until Agent OS can see and safely change your setup.</dd></dl></div>
+</details>
+</section>
+<section class="milestone" id="m5">
+  <div class="milestone-head"><span class="eyebrow">Milestone 5</span><h2>Later</h2><span class="status later">Later</span><span class="when">not scheduled</span></div>
+  <p>Directions we're heading, not yet scoped.</p>
+  <details class="card">
+  <summary><h3>Self-improvement loop</h3><span class="status later">Later</span><span class="why">Agent OS watches how things are going and recommends, then runs, the next best improvements.</span></summary>
+  <div class="card-body"><dl><dt>Status</dt><dd>Direction only; not scoped yet.</dd></dl></div>
+</details><details class="card">
+  <summary><h3>Remote machines</h3><span class="status later">Later</span><span class="why">Drive agents on other machines or a server. The foundation was built so this is an add-on, not a rewrite.</span></summary>
+  <div class="card-body"><dl><dt>Status</dt><dd>Deliberately not now.</dd></dl></div>
+</details>
+</section>
+<section class="milestone" id="not-doing"><div class="milestone-head"><h2>Not doing</h2><span class="status never">Not doing</span></div><p>Decisions to stay out of these, so they don't creep back in.</p><details class="card">
+  <summary><h3>Building our own agent</h3><span class="status never">Not doing</span><span class="why">Agent OS connects your agents; it never replaces or forks them. That's the hard line.</span></summary>
+  <div class="card-body"><dl><dt>Why</dt><dd>Every agent you pay for keeps working on its own. Agent OS is a layer, not a dependency.</dd></dl></div>
+</details><details class="card">
+  <summary><h3>OpenClaw</h3><span class="status never">Not doing</span><span class="why">Dropped from the lineup on 2 Jul 2026.</span></summary>
+  <div class="card-body"><dl><dt>Why</dt><dd>No longer in use.</dd></dl></div>
+</details><details class="card">
+  <summary><h3>Selling it as a product</h3><span class="status never">Not doing</span><span class="why">This is your personal OS. The public repo is a build-in-public journal.</span></summary>
+  <div class="card-body"><dl><dt>Why</dt><dd>Built for one user: you.</dd></dl></div>
+</details></section>
+  <footer>Small grey tags like <span class="id">U9</span> are internal IDs used in the agent docs. <a href="glossary.html#ids">What they mean →</a></footer>
+</main>
+</body>
+</html>

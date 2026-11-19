@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Where we left off</title>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500;600&family=Noto+Serif:ital@0;1&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --color-paper:   #2E3440;   /* Nord nord0 */
+      --color-ink:     #ECEFF4;   /* Nord nord6 */
+      --color-muted:   #D8DEE9;   /* Nord nord4 */
+      --color-soft:    #9AA5B8;
+      --color-accent:  #EBCB8B;   /* Nord nord13 */
+      --font-sans:     'Geist', system-ui, sans-serif;
+      --font-serif:    'Instrument Serif', 'Noto Serif', serif;
+      --font-mono:     'Geist Mono', ui-monospace, monospace;
+    }
+
+    body {
+      font-family: var(--font-sans);
+      background: var(--color-paper);
+      color: var(--color-ink);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 3rem 2rem;
+    }
+
+    .frame { max-width: 1280px; width: 100%; }
+    .diagram-container { width: 100%; overflow-x: auto; }
+
+    .eyebrow {
+      font-family: var(--font-mono);
+      font-size: 0.66rem;
+      font-weight: 500;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      color: var(--color-soft);
+      margin-bottom: 0.5rem;
+    }
+
+    h1 {
+      font-family: var(--font-serif);
+      font-size: clamp(1.5rem, 2.4vw + 0.75rem, 2rem);
+      font-weight: 400;
+      letter-spacing: -0.02em;
+      line-height: 1.15;
+      color: var(--color-ink);
+      margin-bottom: 1.5rem;
+    }
+
+    svg { width: 100%; min-width: 1280px; display: block; }
+    @media print {
+      .diagram-container { overflow-x: visible; }
+      svg { min-width: 0; }
+    }
+  </style>
+</head>
+<body>
+  <div class="frame">
+    <p class="eyebrow">Sequence · Agent OS</p>
+    <h1>Where we left off</h1>
+
+    <div class="diagram-container">
+      <svg viewBox="0 0 1280 720" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="where-we-left-off-title where-we-left-off-desc">
+        <title id="where-we-left-off-title">Where we left off: how a handoff carries over</title>
+        <desc id="where-we-left-off-desc">Sequence showing a Claude Code session dropping automatic breadcrumbs (built, not yet switched on) and a wrap-up handoff on the brain server, then days later a new Claude Code or Codex session asking the server at start-up and getting the handoff back with secrets masked, so it picks up where you left off without pasting anything.</desc>
+        <defs>
+          <marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#D8DEE9"/></marker>
+          <marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#EBCB8B"/></marker>
+          <marker id="arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#88C0D0"/></marker>
+          <marker id="arrow-open" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polyline points="0 0, 8 3, 0 6" fill="none" stroke="#D8DEE9" stroke-width="1.2"/></marker>
+        </defs>
+
+        <rect width="100%" height="100%" fill="#2E3440"/>
+
+        <!-- LIFELINES (centers 240, 640, 1040) -->
+        <line x1="240" y1="128" x2="240" y2="588" stroke="rgba(236,239,244,0.20)" stroke-width="1" stroke-dasharray="3,3"/>
+        <line x1="640" y1="128" x2="640" y2="588" stroke="rgba(236,239,244,0.20)" stroke-width="1" stroke-dasharray="3,3"/>
+        <line x1="1040" y1="128" x2="1040" y2="588" stroke="rgba(236,239,244,0.20)" stroke-width="1" stroke-dasharray="3,3"/>
+
+        <!-- TIME BREAK: days later -->
+        <line x1="120" y1="400" x2="1160" y2="400" stroke="rgba(236,239,244,0.22)" stroke-width="1" stroke-dasharray="2,4"/>
+        <text x="108" y="405" fill="#ECEFF4" font-size="14" font-style="italic" font-family="'Instrument Serif', 'Noto Serif', serif" text-anchor="end">days later</text>
+
+        <!-- LOOP FRAGMENT: while you work -->
+        <rect x="208" y="152" width="464" height="96" rx="4" fill="rgba(236,239,244,0.04)" stroke="rgba(236,239,244,0.22)" stroke-width="1"/>
+        <rect x="208" y="152" width="40" height="16" rx="2" fill="#2E3440" stroke="rgba(236,239,244,0.22)" stroke-width="1"/>
+        <text x="228" y="164" fill="#D8DEE9" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.12em">LOOP</text>
+        <text x="260" y="182" fill="#D8DEE9" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" letter-spacing="0.04em">[planned · built, not switched on yet]</text>
+
+        <!-- ACTIVATION BARS -->
+        <rect x="236" y="176" width="8" height="128" fill="rgba(236,239,244,0.06)" stroke="#D8DEE9" stroke-width="0.8"/>
+        <rect x="636" y="452" width="8" height="56" fill="rgba(236,239,244,0.06)" stroke="#D8DEE9" stroke-width="0.8"/>
+        <rect x="1036" y="444" width="8" height="128" fill="rgba(236,239,244,0.06)" stroke="#D8DEE9" stroke-width="0.8"/>
+
+        <!-- MESSAGES -->
+        <!-- 1. breadcrumbs, automatic (async: dashed + open head) -->
+        <line x1="244" y1="220" x2="640" y2="220" stroke="#D8DEE9" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#arrow-open)"/>
+        <!-- 2. /handoff writes the handoff -->
+        <line x1="244" y1="288" x2="640" y2="288" stroke="#D8DEE9" stroke-width="1.2" marker-end="url(#arrow)"/>
+        <!-- 3. new session asks at start-up (MCP tool call) -->
+        <line x1="1036" y1="456" x2="644" y2="456" stroke="#88C0D0" stroke-width="1.2" marker-end="url(#arrow-link)"/>
+        <!-- 4. server returns the handoff, secrets masked (headline) -->
+        <line x1="644" y1="504" x2="1036" y2="504" stroke="#EBCB8B" stroke-width="1.4" marker-end="url(#arrow-accent)"/>
+        <!-- 5. session picks up (self) -->
+        <path d="M1044,532 H1072 Q1080,532 1080,540 V548 Q1080,556 1072,556 H1044" fill="none" stroke="#D8DEE9" stroke-width="1.2" marker-end="url(#arrow)"/>
+
+        <!-- MESSAGE LABELS -->
+        <rect x="408" y="202" width="64" height="12" rx="2" fill="#2E3440"/>
+        <text x="440" y="211" fill="#9AA5B8" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.06em">BREADCRUMB</text>
+
+        <rect x="412" y="270" width="56" height="12" rx="2" fill="#2E3440"/>
+        <text x="440" y="279" fill="#9AA5B8" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.06em">/HANDOFF</text>
+
+        <rect x="800" y="438" width="80" height="12" rx="2" fill="#2E3440"/>
+        <text x="840" y="447" fill="#88C0D0" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.06em">SESSION START</text>
+        <rect x="796" y="462" width="88" height="12" rx="2" fill="#2E3440"/>
+        <text x="840" y="471" fill="#9AA5B8" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">read_work_state</text>
+
+        <rect x="796" y="486" width="88" height="12" rx="2" fill="#2E3440"/>
+        <text x="840" y="495" fill="#EBCB8B" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.06em">MASKED HANDOFF</text>
+
+        <rect x="1088" y="538" width="52" height="12" rx="2" fill="#2E3440"/>
+        <text x="1114" y="547" fill="#9AA5B8" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.06em">PICKS UP</text>
+
+        <!-- FOCAL: handoff stored on the server -->
+        <rect x="528" y="304" width="224" height="56" rx="6" fill="#2E3440"/>
+        <rect x="528" y="304" width="224" height="56" rx="6" fill="rgba(235,203,139,0.10)" stroke="#EBCB8B" stroke-width="1.2"/>
+        <text x="640" y="328" fill="#ECEFF4" font-size="12" font-weight="600" font-family="'Geist', system-ui, sans-serif" text-anchor="middle">Handoff stored</text>
+        <text x="640" y="344" fill="#D8DEE9" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">next step · last decision</text>
+
+        <!-- ACTORS -->
+        <rect x="120" y="72" width="240" height="56" rx="6" fill="#2E3440"/>
+        <rect x="120" y="72" width="240" height="56" rx="6" fill="rgba(236,239,244,0.03)" stroke="rgba(236,239,244,0.30)" stroke-width="1"/>
+        <rect x="128" y="78" width="40" height="12" rx="2" fill="transparent" stroke="rgba(236,239,244,0.30)" stroke-width="0.8"/>
+        <text x="148" y="87" fill="#9AA5B8" font-size="7" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">TODAY</text>
+        <text x="240" y="104" fill="#ECEFF4" font-size="12" font-weight="600" font-family="'Geist', system-ui, sans-serif" text-anchor="middle">Claude Code session</text>
+        <text x="240" y="119" fill="#D8DEE9" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">you're working</text>
+
+        <rect x="520" y="72" width="240" height="56" rx="6" fill="#2E3440"/>
+        <rect x="520" y="72" width="240" height="56" rx="6" fill="#3B4252" stroke="#ECEFF4" stroke-width="1"/>
+        <rect x="528" y="78" width="40" height="12" rx="2" fill="transparent" stroke="rgba(236,239,244,0.40)" stroke-width="0.8"/>
+        <text x="548" y="87" fill="#D8DEE9" font-size="7" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">LOCAL</text>
+        <text x="640" y="104" fill="#ECEFF4" font-size="12" font-weight="600" font-family="'Geist', system-ui, sans-serif" text-anchor="middle">Brain server</text>
+        <text x="640" y="119" fill="#D8DEE9" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">always on · your Mac</text>
+
+        <rect x="920" y="72" width="240" height="56" rx="6" fill="#2E3440"/>
+        <rect x="920" y="72" width="240" height="56" rx="6" fill="rgba(236,239,244,0.03)" stroke="rgba(236,239,244,0.30)" stroke-width="1"/>
+        <rect x="928" y="78" width="40" height="12" rx="2" fill="transparent" stroke="rgba(236,239,244,0.30)" stroke-width="0.8"/>
+        <text x="948" y="87" fill="#9AA5B8" font-size="7" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">LATER</text>
+        <text x="1040" y="104" fill="#ECEFF4" font-size="12" font-weight="600" font-family="'Geist', system-ui, sans-serif" text-anchor="middle">Next session</text>
+        <text x="1040" y="119" fill="#D8DEE9" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">Claude Code or Codex</text>
+
+        <!-- Outcome callout -->
+        <text x="1160" y="620" fill="#ECEFF4" font-size="14" font-style="italic" font-family="'Instrument Serif', 'Noto Serif', serif" text-anchor="end">picks up where you left off — nothing pasted</text>
+
+        <!-- LEGEND -->
+        <line x1="40" y1="652" x2="1240" y2="652" stroke="rgba(236,239,244,0.10)" stroke-width="0.8"/>
+        <text x="40" y="684" fill="#9AA5B8" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" letter-spacing="0.14em">LEGEND</text>
+
+        <line x1="120" y1="681" x2="152" y2="681" stroke="#D8DEE9" stroke-width="1.2" marker-end="url(#arrow)"/>
+        <text x="160" y="684" fill="#D8DEE9" font-size="10" font-family="'Geist', system-ui, sans-serif">Solid arrow: a direct call</text>
+
+        <line x1="336" y1="681" x2="368" y2="681" stroke="#D8DEE9" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#arrow-open)"/>
+        <text x="376" y="684" fill="#D8DEE9" font-size="10" font-family="'Geist', system-ui, sans-serif">Dashed, open head: automatic, in the background</text>
+
+        <line x1="664" y1="681" x2="696" y2="681" stroke="#88C0D0" stroke-width="1.2" marker-end="url(#arrow-link)"/>
+        <text x="704" y="684" fill="#D8DEE9" font-size="10" font-family="'Geist', system-ui, sans-serif">Blue: MCP tool call</text>
+
+        <rect x="852" y="675" width="20" height="12" rx="2" fill="rgba(235,203,139,0.10)" stroke="#EBCB8B" stroke-width="1.2"/>
+        <text x="880" y="684" fill="#D8DEE9" font-size="10" font-family="'Geist', system-ui, sans-serif">Gold: the handoff (focal)</text>
+
+        <line x1="1036" y1="681" x2="1068" y2="681" stroke="rgba(236,239,244,0.22)" stroke-width="1" stroke-dasharray="2,4"/>
+        <text x="1076" y="684" fill="#D8DEE9" font-size="10" font-family="'Geist', system-ui, sans-serif">Time gap</text>
+      </svg>
+    </div>
+  </div>
+</body>
+</html>
